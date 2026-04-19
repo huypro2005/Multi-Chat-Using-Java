@@ -32,6 +32,30 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W3-D1) — feat: V3 migration conversations + conversation_members, entities, repositories
+
+### Xong
+- V3 migration: tạo `conversations` (type CHECK ONE_ON_ONE/GROUP, last_message_at, idx_conversations_last_message) và `conversation_members` (role CHECK OWNER/ADMIN/MEMBER, UNIQUE conv+user, idx_members_user, idx_members_conv). Flyway "Successfully applied 3 migrations".
+- ConversationType enum + MemberRole enum (`com.chatapp.conversation.enums`).
+- Conversation entity: `@Getter @Setter @Builder`, `@Enumerated(EnumType.STRING)`, `@OneToMany(mappedBy="conversation", fetch=LAZY)`, `@PrePersist`/`@PreUpdate`, domain methods (isGroup, touchLastMessage).
+- ConversationMember entity: `@Enumerated(EnumType.STRING)` role, `@ManyToOne LAZY` cho cả conversation và user, `@PrePersist` joinedAt, domain methods (isOwner, canManageMembers, isMuted).
+- ConversationRepository: `findByIdWithMembers` với JOIN FETCH tránh N+1.
+- ConversationMemberRepository: `findByUser_IdOrderByJoinedAtDesc`, `existsByConversation_IdAndUser_Id`.
+- DB reset: terminate sessions → DROP → CREATE → pgcrypto → Flyway.
+- `mvn test`: 50 tests, 0 failures.
+
+### Đang dở
+- Service + Controller cho conversation (Ngày 2).
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `@Builder.Default private List<ConversationMember> members = new ArrayList<>()` cần thiết để builder không trả null list.
+- DB_PASSWORD=123456 (từ backend/.env).
+
+---
+
 ## 2026-04-19 (W2D4) — OAuth (Firebase) + Logout (blacklist jti)
 
 ### Xong

@@ -392,9 +392,247 @@ Validation rules:
 
 ---
 
-## Conversations
+## Conversations API (v0.5.0-conversations — W3-D2+)
 
-(reviewer sẽ thêm khi phase conversation bắt đầu)
+> **Naming note**: V1 đơn giản hoá so với ARCHITECTURE.md mục 3.2:
+> - `type` dùng UPPERCASE `ONE_ON_ONE` | `GROUP` (không phải lowercase `direct`/`group` trong ARCHITECTURE gốc). Xem ADR-012.
+> - Bỏ `left_at` / `leave_reason` (soft-leave), `is_hidden` / `cleared_at` (soft-hide) khỏi V1 migration. Khi cần tính năng "rời nhóm" hoặc "xoá lịch sử chat" sẽ thêm migration V4. Trong scope tuần 3, rời nhóm = hard-delete row `conversation_members` (qua endpoint riêng sẽ design ở tuần 5-6).
+> - `muted_until` (snake_case → DB) / `mutedUntil` (camelCase → JSON) có mặt nhưng endpoint mute sẽ chốt sau.
+>
+> Nguyên tắc chung cho mọi endpoint trong nhóm này:
+> - **Auth required**: Bearer JWT trên header `Authorization: Bearer <accessToken>`. Thiếu → `401 AUTH_REQUIRED`; hết hạn → `401 AUTH_TOKEN_EXPIRED`.
+> - **IDs là UUID v4** (string). Mọi reference user/conversation/member trong body/response đều là UUID.
+> - **Timestamp là ISO-8601 với offset** (ví dụ `"2026-04-19T10:00:00Z"` hoặc `"2026-04-19T17:00:00+07:00"`).
+
+---
+
+### POST /api/conversations
+
+**Description**: Tạo conversation mới (1-1 hoặc nhóm). Caller tự động trở thành thành viên với role `OWNER`.
+
+**Auth required**: Yes
+
+**Rate limit**: 30 conversations/giờ/user (chống spam tạo nhóm).
+
+**Request body**:
+
+```json
+{
+  "type": "ONE_ON_ONE",
+  "name": null,
+  "memberIds": ["9b1a7c16-4c72-4a2a-a8f6-abc111222333"]
+}
+```
+
+Validation rules:
+- `type`: bắt buộc, enum `"ONE_ON_ONE" | "GROUP"`.
+- `name`:
+  - `ONE_ON_ONE`: phải là `null` (server không dùng field này; gửi string sẽ bị bỏ qua hoặc trả `VALIDATION_FAILED` — để rõ ràng FE gửi `null`).
+  - `GROUP`: bắt buộc, 1–100 ký tự, không toàn whitespace.
+- `memberIds`: bắt buộc, array UUID, **không chứa UUID của caller** (caller tự add qua OWNER role). Không được có phần tử trùng. Giới hạn độ dài:
+  - `ONE_ON_ONE`: exactly 1 phần tử (sẽ có tổng 2 members gồm caller + 1 user kia).
+  - `GROUP`: tối thiểu 2, tối đa 49 (cộng caller = 50, khớp giới hạn V1 "tối đa 50 thành viên" trong ARCHITECTURE).
+
+**Response 201**:
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "ONE_ON_ONE",
+  "name": null,
+  "avatarUrl": null,
+  "createdBy": {
+    "id": "9b1a7c16-4c72-4a2a-a8f6-abc111222333",
+    "username": "alice",
+    "fullName": "Alice Nguyen",
+    "avatarUrl": null
+  },
+  "members": [
+    {
+      "userId": "9b1a7c16-4c72-4a2a-a8f6-abc111222333",
+      "username": "alice",
+      "fullName": "Alice Nguyen",
+      "avatarUrl": null,
+      "role": "OWNER",
+      "joinedAt": "2026-04-19T10:00:00Z"
+    },
+    {
+      "userId": "7c1a7c16-4c72-4a2a-a8f6-def444555666",
+      "username": "bob",
+      "fullName": "Bob Tran",
+      "avatarUrl": null,
+      "role": "MEMBER",
+      "joinedAt": "2026-04-19T10:00:00Z"
+    }
+  ],
+  "createdAt": "2026-04-19T10:00:00Z",
+  "lastMessageAt": null
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | Vi phạm validation rule (type sai enum, memberIds rỗng, GROUP thiếu name, ONE_ON_ONE có name ≠ null, v.v.); kèm `details.fields`. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `CONV_MEMBER_NOT_FOUND` | Một hoặc nhiều `memberIds` không trỏ tới user tồn tại; kèm `details.missingIds: [uuid, ...]`. |
+| 409 | `CONV_ONE_ON_ONE_EXISTS` | Đã tồn tại `ONE_ON_ONE` giữa caller và user kia; kèm `details.conversationId` để FE redirect luôn. |
+| 409 | `CONV_MEMBER_BLOCKED` | Caller đã block / bị block bởi 1 trong các `memberIds`; kèm `details.blockedIds: [uuid, ...]`. (V1 nếu `user_blocks` chưa wire, error này không fire — documented để FE sẵn sàng khi bật.) |
+| 429 | `RATE_LIMITED` | Vượt 30 conversations/giờ/user; kèm `details.retryAfterSeconds`. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Notes**:
+- **Idempotency `ONE_ON_ONE`**: server query xem giữa caller và target user đã có `ONE_ON_ONE` chưa. Có → trả `409 CONV_ONE_ON_ONE_EXISTS` với `details.conversationId` (FE điều hướng sang conv cũ). KHÔNG tự động trả 200 với conv cũ — để FE chủ động xử lý UX "bạn đã có chat với người này".
+- **Race duplicate ONE_ON_ONE**: 2 request song song có thể cùng pass existence check. V1 chấp nhận edge case (traffic thấp); cần partial UNIQUE index cho lần cleanup V2: `CREATE UNIQUE INDEX ... ON conversations(LEAST(user_a, user_b), GREATEST(user_a, user_b)) WHERE type='ONE_ON_ONE'` (denormalize 2 columns hoặc dùng conv_members swap). Documented trong WARNINGS.md.
+- **Role mặc định**: caller = `OWNER`; các `memberIds` khác = `MEMBER`. Không cho phép set role khác qua endpoint này.
+- `lastMessageAt` luôn `null` khi vừa tạo — cập nhật khi có message đầu tiên (tuần 4).
+
+---
+
+### GET /api/conversations
+
+**Description**: Lấy danh sách conversations mà caller đang là thành viên, sắp xếp theo hoạt động gần nhất.
+
+**Auth required**: Yes
+
+**Rate limit**: 60 requests/phút/user.
+
+**Query params**:
+
+| Param | Kiểu | Default | Mô tả |
+|-------|------|---------|------|
+| `page` | integer ≥ 0 | `0` | Trang (0-indexed). |
+| `size` | integer 1..50 | `20` | Số record mỗi trang. |
+
+> Tại sao offset pagination ở đây? V1 danh sách conversations của 1 user nhỏ (≤ vài trăm). Cursor-based pagination sẽ áp dụng cho messages (tuần 4) vì lượng lớn.
+
+**Response 200**:
+
+```json
+{
+  "content": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "type": "ONE_ON_ONE",
+      "name": null,
+      "avatarUrl": null,
+      "displayName": "Bob Tran",
+      "displayAvatarUrl": null,
+      "memberCount": 2,
+      "lastMessageAt": "2026-04-19T09:30:00Z",
+      "unreadCount": 3,
+      "mutedUntil": null
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 12,
+  "totalPages": 1
+}
+```
+
+Field notes:
+- `name`, `avatarUrl`: giá trị từ cột `conversations` — `null` cho `ONE_ON_ONE`.
+- `displayName`, `displayAvatarUrl`: **server-computed** cho FE render trực tiếp:
+  - `ONE_ON_ONE`: là `fullName` / `avatarUrl` của user kia (không phải caller).
+  - `GROUP`: trùng `name` / `avatarUrl` của conversation. Nếu `avatarUrl` null → FE tự fallback (ví dụ avatar compose 2-3 thành viên đầu).
+- `memberCount`: tính từ `COUNT(*) FROM conversation_members WHERE conversation_id = ?`.
+- `lastMessageAt`: `null` nếu chưa có message nào.
+- `unreadCount`: V1 placeholder — luôn trả `0` cho tới khi implement unread counter (Redis `unread:{userId}:{convId}`) ở tuần 4. FE phải handle `number` field, không assume > 0.
+- `mutedUntil`: ISO-8601 hoặc `null`. FE hiển thị icon mute nếu `mutedUntil` trong tương lai.
+
+**Sort**: `lastMessageAt DESC NULLS LAST, createdAt DESC` (conversation mới tạo chưa có tin nằm dưới cùng).
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `page` < 0, `size` ≤ 0 hoặc > 50. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 429 | `RATE_LIMITED` | Vượt 60/phút/user. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Notes**:
+- BE MUST filter by caller (`WHERE cm.user_id = :callerId`). Không được expose conversations không liên quan.
+- Endpoint này sẽ được FE gọi lại sau mỗi reconnect socket (tuần 4) để sync danh sách.
+
+---
+
+### GET /api/conversations/{id}
+
+**Description**: Lấy chi tiết conversation kèm danh sách members đầy đủ.
+
+**Auth required**: Yes
+
+**Rate limit**: 120 requests/phút/user.
+
+**Path params**:
+- `id`: UUID của conversation.
+
+**Response 200**: cùng shape với response 201 của `POST /api/conversations` — đầy đủ `createdBy` và `members[]` với `role` + `joinedAt`.
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `CONV_NOT_FOUND` | Conversation không tồn tại **HOẶC** caller không phải member (trả cùng code để không leak conversation existence). |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Notes**:
+- **Authorization merge với not-found**: nếu conv tồn tại nhưng caller không phải member → trả `404 CONV_NOT_FOUND` (không phải `403 AUTH_FORBIDDEN`). Lý do: tránh tiết lộ "conv này tồn tại" qua error code khác nhau. Đây là pattern chống enumeration — thống nhất với cách `/login` dùng cùng error cho user-not-found và wrong-password.
+- BE implement hiện đã có `ConversationRepository.findByIdWithMembers(UUID)` (JOIN FETCH) — dùng trực tiếp, tránh N+1.
+
+---
+
+### GET /api/users/search
+
+**Description**: Tìm user theo username hoặc fullName, dùng cho flow "tạo conversation mới" (FE cần lookup target user).
+
+**Auth required**: Yes
+
+**Rate limit**: 30 requests/phút/user (chống abuse enumerate user list).
+
+**Query params**:
+
+| Param | Kiểu | Bắt buộc | Mô tả |
+|-------|------|----------|------|
+| `q` | string | Yes | Query string. Trim rồi check: tối thiểu **2 ký tự sau trim**, tối đa 50. |
+| `limit` | integer 1..20 | No (default 10) | Số kết quả tối đa. |
+
+**Response 200**:
+
+```json
+[
+  {
+    "id": "7c1a7c16-4c72-4a2a-a8f6-def444555666",
+    "username": "bob",
+    "fullName": "Bob Tran",
+    "avatarUrl": null
+  }
+]
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `q` rỗng, < 2 ký tự sau trim, > 50 ký tự; hoặc `limit` ngoài range. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 429 | `RATE_LIMITED` | Vượt 30/phút/user. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Notes**:
+- Search strategy: `LOWER(username) LIKE LOWER(:q) || '%' OR LOWER(full_name) LIKE '%' || LOWER(:q) || '%'` (username prefix-match để dùng index `users_username_key`; fullName substring-match chấp nhận scan vì dataset V1 nhỏ). Nếu tương lai scale → thêm GIN trigram index hoặc elasticsearch.
+- **Luôn exclude caller** khỏi results (`WHERE id <> :callerId`).
+- **Luôn exclude users `status != 'active'`** (suspended, deleted).
+- **Luôn exclude users đã block caller hoặc bị caller block** (khi `user_blocks` wire; V1 chấp nhận tạm chưa filter — documented).
+- Kết quả sort theo `username ASC` để ổn định (không sort theo relevance ở V1).
+- Response KHÔNG bao gồm `email` (privacy — email là PII, chỉ owner của account xem được qua endpoint self-profile).
+
+---
 
 ---
 
@@ -417,6 +655,7 @@ Validation rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.5.0-conversations | Thêm 4 endpoints Conversations phase: POST /api/conversations, GET /api/conversations, GET /api/conversations/{id}, GET /api/users/search. Chốt UPPERCASE ONE_ON_ONE/GROUP (ADR-012). Chốt pattern auth-merge-with-404 cho GET detail (không leak existence). Idempotency ONE_ON_ONE trả 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId. Noted race dup và soft-leave/soft-hide out-of-scope V1. |
 | 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented + contract sync: rate limit đổi sang 10 req/60s/userId (khớp implementation); reuse case trả `AUTH_REFRESH_TOKEN_INVALID` (bỏ tên `REFRESH_TOKEN_REUSED` trong note vì error code thực tế là INVALID); bổ sung note revoke-all-sessions khi detect reuse. |
 | 2026-04-19 | v0.2.1-auth | Thêm note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED vào mục Error codes dùng chung. |
 | 2026-04-19 | v0.2-auth | Thêm 5 Auth endpoints: register, login, oauth, refresh, logout. Chốt contract cho BE/FE tuần 1. |

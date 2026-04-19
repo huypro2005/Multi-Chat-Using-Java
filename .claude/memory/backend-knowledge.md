@@ -175,8 +175,24 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### Conversation Domain Pattern (W3-D1)
+
+- Package: `com.chatapp.conversation.{enums,entity,repository}` — tuân theo pattern `com.chatapp.<domain>.*`.
+- Enum ConversationType: ONE_ON_ONE, GROUP — `@Enumerated(EnumType.STRING)`, CHECK constraint tương ứng trong migration.
+- Enum MemberRole: OWNER, ADMIN, MEMBER — `@Enumerated(EnumType.STRING)`.
+- Conversation entity: KHÔNG dùng `@Data`. Dùng `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`. `@PrePersist`/`@PreUpdate` cho timestamps.
+- ConversationMember: có `@Builder.Default private MemberRole role = MemberRole.MEMBER` để giữ default khi dùng builder.
+- `@OneToMany(mappedBy="conversation", fetch=LAZY)` với `@Builder.Default private List<ConversationMember> members = new ArrayList<>()` — cần Builder.Default để tránh null list khi dùng builder.
+- Repository: `findByIdWithMembers(UUID)` dùng `@Query("SELECT c FROM Conversation c LEFT JOIN FETCH c.members WHERE c.id = :id")` — tránh N+1 cho membership query.
+- Spring Data method với nested FK: `findByUser_IdOrderByJoinedAtDesc` và `existsByConversation_IdAndUser_Id` — dấu `_` để phân biệt nested property (đã chốt pattern này từ tuần 1).
+- Migration V3: index đặt tên `idx_conversations_last_message`, `idx_conversations_created_by`, `idx_members_user`, `idx_members_conv`. Convention: `idx_{table}_{columns}`.
+- DROP/CREATE database cho data reset giữa các tuần: terminate sessions trước bằng `pg_terminate_backend`, sau đó DROP.
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W3D1: Thêm Conversation domain pattern, enum string mapping, JOIN FETCH repo pattern, index naming convention, DROP/recreate DB flow.
 - 2026-04-19 W2D4: Thêm Firebase OAuth pattern, Logout + blacklist, OAuthResponse shape, JwtAuthFilter blacklist check.
 - 2026-04-19 W2D3.5: Thêm Refresh Token Rotation Pattern, constant-time comparison, getClaimsAllowExpired pattern.
 - 2026-04-19 W2D1: Thêm AuthMethod enum pattern (W-BE-3).

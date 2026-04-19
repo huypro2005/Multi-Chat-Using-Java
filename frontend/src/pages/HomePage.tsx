@@ -96,10 +96,20 @@ export default function HomePage() {
           <div className="mt-4 pt-4 border-t border-gray-100 text-left">
             <p className="text-gray-700">Xin chào, <strong>{user.fullName}</strong></p>
             <p className="text-xs text-gray-400 mt-1">@{user.username}</p>
+
+            {/* CTA vào trang chat */}
+            <Link
+              to="/conversations"
+              className="mt-4 inline-block bg-indigo-600 hover:bg-indigo-700 text-white
+                rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+            >
+              Vào Chat →
+            </Link>
+
             <button
               type="button"
               onClick={handleLogout}
-              className="mt-3 text-sm text-red-500 hover:underline"
+              className="mt-3 block text-sm text-red-500 hover:underline"
             >
               Đăng xuất
             </button>

@@ -26,6 +26,98 @@
 
 ---
 
+## 2026-04-19 — W3D1 Review: V3 schema + Conversation domain + FE layout skeleton; Draft Conversations contract
+
+### Verdict
+⚠️ APPROVE WITH COMMENTS
+
+### Files reviewed
+- `backend/src/main/resources/db/migration/V3__create_conversations.sql`: mới — 2 tables conversations + conversation_members, CHECK enum UPPERCASE, UNIQUE (conv_id, user_id), ON DELETE CASCADE members, ON DELETE SET NULL created_by, 4 indexes.
+- `backend/src/main/java/com/chatapp/conversation/{enums,entity,repository}/*` (6 files): ConversationType, MemberRole, Conversation, ConversationMember, ConversationRepository (findByIdWithMembers JOIN FETCH), ConversationMemberRepository (findByUser_Id + existsByConv_User).
+- `frontend/src/pages/ConversationsLayout.tsx`: mới — 2-col desktop, stack mobile theo :id param.
+- `frontend/src/pages/ConversationsIndexPage.tsx`: mới — empty state.
+- `frontend/src/components/ProtectedRoute.tsx`: refactor children-prop → Outlet pattern, add isHydrated spinner, add location.state.from.
+- `frontend/src/App.tsx`: nest ProtectedRoute parent + ConversationsLayout + index/:id.
+- `frontend/src/pages/LoginPage.tsx`: đọc location.state.from để redirect sau login, default /conversations.
+- `frontend/src/pages/HomePage.tsx`: thêm CTA "Vào Chat →".
+
+### Issues found
+
+#### Blocking
+- (không có)
+
+#### Warnings (non-blocking, nên log lại để revisit nếu hit bug)
+
+1. **[BE][W3-BE-1] `Conversation.java:33` + `ConversationMember.java:36` — `@GeneratedValue(strategy=GenerationType.UUID)` + `@Column(insertable=false, updatable=false)` có thể conflict.**
+   - `@GeneratedValue(UUID)` yêu cầu Hibernate tự sinh UUID (provider side) — giống strategy IDENTITY. Nhưng `insertable=false` nói Hibernate "đừng include cột này trong INSERT". Kết quả phụ thuộc phiên bản Hibernate: Hibernate 6 có thể throw `MappingException` hoặc im lặng pass nhưng miss ID ở INSERT rồi hit DB default (gen_random_uuid). Nếu lucky (DB default fire) thì Hibernate vẫn cần refresh để đọc ID ra.
+   - **Khuyến nghị**: hoặc (a) giữ `@GeneratedValue(UUID)` và bỏ `insertable=false` + `updatable=false` để Hibernate đóng role generator; hoặc (b) bỏ `@GeneratedValue` hoàn toàn, chỉ dùng `insertable=false` + dựa vào DB default `gen_random_uuid()` kèm `@Column(... columnDefinition="UUID")` — nhưng khi đó sau `save()` entity không có ID, cần `entityManager.refresh()`.
+   - **Test cần có ở Ngày 2**: integration test `repository.save(Conversation.builder().type(GROUP).build())` rồi assert `id != null`. Hiện W3D1 chỉ có test schema + entity load, chưa test insert end-to-end — nên warning chưa bị trigger. Khi BE viết service Ngày 2, nếu hit MappingException hoặc NullPointerException khi access `saved.getId()` → fix theo (a) hoặc (b).
+
+2. **[BE][W3-BE-2] `Conversation.java:61` — `@ManyToOne(LAZY) private User createdBy` nhưng DB column `created_by UUID REFERENCES users(id) ON DELETE SET NULL`.**
+   - `createdBy` nullable đúng, nhưng khi user bị xóa (V1 chưa có hard-delete users; có `status='deleted'` soft-delete pattern) DB không fire `SET NULL` vì không có DELETE thật. Kết quả: pattern `ON DELETE SET NULL` hiện là **dead code** cho V1. OK để giữ (tương lai-proof), chỉ log vào knowledge.
+   - Không blocking. Documented rationale OK.
+
+3. **[BE][W3-BE-3] Schema V3 không có `CREATE EXTENSION IF NOT EXISTS pgcrypto`.**
+   - V2 comment "pgcrypto extension đã có sẵn" — nghĩa là được tạo manual trước. Nếu team mới clone repo setup fresh DB → Flyway V2 dùng `gen_random_uuid()` fail, V3 cũng fail.
+   - **Khuyến nghị**: thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu V2 (không phải V3, vì V2 là nơi đầu tiên dùng). An toàn idempotent. Non-blocking nếu team đã setup local DB rồi; blocking cho developer mới onboard.
+
+4. **[BE][W3-BE-4] `ConversationMemberRepository.findByUser_IdOrderByJoinedAtDesc` trả về `Page<ConversationMember>` — kéo theo `ConversationMember` entity.**
+   - Để serve `GET /api/conversations` response có `displayName` / `unreadCount` / `memberCount` cần JOIN thêm conversation + aggregate. Method hiện tại không đủ. Ngày 2 BE sẽ viết `@Query` custom (hoặc query trên `Conversation` entity filter theo members). Không cần sửa method này ngay.
+
+5. **[BE][W3-BE-5] Không có `updated_at` và trigger `BEFORE UPDATE` cho `conversation_members`.**
+   - Khi member thay đổi role hoặc `last_read_message_id`, không có cột để track "lần cập nhật gần nhất". Có thể OK vì chúng ta có `joined_at` immutable + `last_read_message_id` tự track thay đổi. Non-blocking V1.
+
+6. **[BE][Architecture drift] V3 thiếu các field `left_at`, `leave_reason`, `is_hidden`, `cleared_at`, `mute_until` (V3 dùng `muted_until`).**
+   - So với ARCHITECTURE.md mục 3.2: V3 **đơn giản hóa intentional** — soft-leave và soft-hide out-of-scope tuần 3. Contract v0.5.0 đã documented. Khi cần tính năng "rời nhóm" và "xóa chat" ở tuần 5-6 → migration V4.
+   - `muted_until` (V3) vs `mute_until` (ARCHITECTURE): V3 chọn `muted_until` (past participle — grammatically đúng hơn). OK giữ V3.
+
+7. **[FE][W3-FE-1] `ProtectedRoute.tsx:19` + `App.tsx:23` — hai tầng "gate hydration" chồng lấn.**
+   - App.tsx có `isInitialized` gate (không render `BrowserRouter` cho đến khi `authService.init()` xong). ProtectedRoute có `isHydrated` check riêng.
+   - Thực tế: Zustand persist hydrate **synchronously** khi storage = localStorage → tại thời điểm `App.tsx:useEffect` chạy, `isHydrated` đã `true`. Và `authService.init()` await xong → `setIsInitialized(true)` → routes render. Khi ProtectedRoute mount, `isHydrated` **luôn = true** → nhánh spinner trong ProtectedRoute là **dead code**.
+   - Không blocking (defense-in-depth) nhưng khiến review sau dễ nhầm. Options: (a) xóa nhánh spinner trong ProtectedRoute, tin tưởng gate ở App.tsx; (b) giữ nhưng comment rõ "defensive — App.tsx đã gate, đây là safety net nếu sau này bỏ gate ở App.tsx". Reviewer không enforce, FE tự chọn.
+
+8. **[FE][W3-FE-2] `ConversationsLayout.tsx:17-18` — mobile responsive dùng `useParams().id`.**
+   - OK hoạt động. Nhưng khi routes nested có path phức tạp hơn (ví dụ `/conversations/:id/settings` ở tuần 5), `useParams().id` vẫn có giá trị khi user ở trang settings → sidebar vẫn bị ẩn mobile. Có thể đúng UX (đang deep trong conv). Non-blocking.
+
+9. **[FE][W3-FE-3] `ConversationsLayout.tsx:38-42` — fallback `?` cho avatar khi `user?.fullName` rỗng.**
+   - Edge case: user vừa tạo không có fullName → BE validation chặn rồi (`fullName` required 1..100). OK. Non-blocking.
+
+### Contract check
+- ✅ Schema V3 khớp domain model (entities + repositories map đúng tables).
+- ✅ Enum UPPERCASE thống nhất cả SQL CHECK + Java enum + JSON (sắp bắt đầu trong contract mới).
+- ℹ️ Contract Conversations chưa từng tồn tại trước W3D1 → không có "lệch contract" để check. Đã viết mới ở v0.5.0-conversations.
+- ℹ️ ARCHITECTURE.md mục 3.2 lệch với V3 (lowercase → UPPERCASE + bỏ vài cột). Đã log ADR-012 + note trong contract header. KHÔNG sửa ARCHITECTURE (giữ tài liệu gốc, contract thắng).
+
+### Answered checklist items
+1. **Indexes đủ cho query list conversations của 1 user?** — Có `idx_members_user (user_id, joined_at DESC)` cho hit conversation_members. Join ngược lên conversations dùng PK. Cần thêm query plan test khi BE viết custom `@Query` Ngày 2. OK baseline.
+2. **UNIQUE (conversation_id, user_id)?** — ✅ Có `uq_members_conv_user` ở cả DB và entity annotation.
+3. **ON DELETE CASCADE members?** — ✅ Đúng (xóa conv → xóa members).
+4. **ON DELETE SET NULL created_by?** — ✅ Đúng intent (giữ conv khi user deleted). Xem warning W3-BE-2.
+5. **type enum lowercase vs UPPERCASE** — Đã chốt UPPERCASE (ADR-012).
+6. **V3 không conflict V1/V2** — ✅ Tên table không trùng, FK references đúng `users(id)`, extension pgcrypto đã cần từ V2. Xem W3-BE-3 cho setup note.
+7. **gen_random_uuid() extension** — pgcrypto. Đã log warning W3-BE-3 thêm CREATE EXTENSION vào V2.
+8. **Lazy fetch** — ✅ Cả 3 relationship LAZY.
+9. **@ToString include lazy fields** — ✅ Không dùng `@ToString` nên không lo. (Không dùng `@Data`.)
+10. **@Builder.Default cho List members** — ✅ `members = new ArrayList<>()` có Default.
+11. **isHydrated race với authService.init()** — Thực tế không có race vì persist localStorage sync. Gate App.tsx đã đủ. Xem W3-FE-1.
+12. **location.state.from pattern React Router v6** — ✅ Đúng: `<Navigate state={{ from: location }} />` + reader `(location.state as { from?: { pathname?: string } } | null)?.from?.pathname`. LoginPage đọc đúng.
+13. **W-C-4 resolved?** — ✅ Resolved. ProtectedRoute dùng Outlet pattern, có isHydrated spinner, có from redirect.
+14. **Nested routes cú pháp v6** — ✅ Đúng: parent route không path (`<Route element={<ProtectedRoute />}>`), con path="/conversations" element layout, cháu index + path=":id".
+15. **Outlet vs children consistent** — ✅ Thuần Outlet, không mix. Type signature `ProtectedRouteProps` đã xóa — OK.
+
+### Contract impact
+- ✅ Viết mới section "Conversations API (v0.5.0-conversations)" trong `docs/API_CONTRACT.md`. 4 endpoints với full error codes, rate limits, validation rules, response shape, notes. BE/FE Ngày 2 có thể implement song song.
+- ✅ Thêm ADR-012 (UPPERCASE enum) vào reviewer-knowledge.md.
+- ✅ Update contract version hiện tại → v0.5.0-conversations.
+- ✅ Contract changelog row mới cho v0.5.0.
+
+### Orchestrator decisions cần lưu ý
+- BE Ngày 2: khi implement service layer, **bắt buộc integration test insert** để validate warning W3-BE-1 (UUID generation). Nếu hit MappingException hoặc NPE trên `saved.getId()` → fix theo option (a) bỏ `insertable=false,updatable=false` trên `id`.
+- BE Ngày 2 cần confirm: **CREATE EXTENSION pgcrypto** có trong V2 hay đã được tạo manual. Nếu manual → log vào README "setup DB" để onboarding không lỡ.
+- FE Ngày 2: response shape đã cố định. `displayName` / `displayAvatarUrl` là **server-computed**, FE không compute. `unreadCount` V1 **luôn bằng 0** — FE code sẵn sàng nhưng đừng test "badge hiển thị > 0" trong tuần 3.
+
+---
+
 ## 2026-04-19 — W2D2 Review Phase A (FE authService.init) + Phase B (BE register + login)
 
 ### Verdict

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Eye, EyeOff, MessageSquare } from 'lucide-react'
@@ -18,8 +18,13 @@ export default function LoginPage() {
   const { toasts, addToast, removeToast } = useToast()
 
   const navigate = useNavigate()
+  const location = useLocation()
   const setAuth = useAuthStore((s) => s.setAuth)
   const { isAuthenticated } = useAuth()
+
+  // Trang muốn vào trước khi bị redirect về /login (từ ProtectedRoute)
+  const fromPath =
+    (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? '/conversations'
 
   const {
     register,
@@ -37,7 +42,8 @@ export default function LoginPage() {
       const response = await loginApi(data)
       setAuth(response)
       addToast('Đăng nhập thành công!', 'success')
-      navigate('/')
+      // Quay về trang user muốn vào, hoặc /conversations nếu không có
+      navigate(fromPath, { replace: true })
     } catch (error) {
       handleAuthError(error, {
         setFormError: (field, msg) =>
@@ -49,9 +55,9 @@ export default function LoginPage() {
     }
   }
 
-  // App đã chạy authService.init() (refresh) trước khi mount routes — nếu còn session thì về trang chủ
+  // App đã chạy authService.init() (refresh) trước khi mount routes — nếu còn session thì về conversations
   if (isAuthenticated) {
-    return <Navigate to="/" replace />
+    return <Navigate to="/conversations" replace />
   }
 
   return (

@@ -100,6 +100,18 @@
 - **Trade-off**: Thêm 1 file enum + refactor 2-3 call sites. Acceptable cost cho đúng business semantics.
 - **Ngày**: 2026-04-19 (Tuần 2, Ngày 1 — W-BE-3 resolved)
 
+### ADR-012: Conversation enum — UPPERCASE `ONE_ON_ONE` / `GROUP` (khác ARCHITECTURE.md gốc)
+- **Quyết định**: `conversations.type` enum dùng UPPERCASE `ONE_ON_ONE` và `GROUP`. Role enum UPPERCASE `OWNER` / `ADMIN` / `MEMBER`. ARCHITECTURE.md mục 3.2 viết lowercase `direct`/`group`/`owner`/... nhưng team chọn UPPERCASE để khớp Java enum convention và Jackson mặc định không phải custom converter.
+- **Bối cảnh**: V3 migration + Conversation entity + JSON contract đều cần thống nhất. Nếu DB lowercase nhưng Java enum UPPERCASE → `@Enumerated(EnumType.STRING)` sẽ lỗi Hibernate vì string không match.
+- **Lý do**:
+  - Java enum convention = UPPERCASE. Giữ lowercase đòi hỏi custom `AttributeConverter` hoặc viết enum name lowercase (xấu, vi phạm code style Java).
+  - Jackson serialize enum → UPPERCASE mặc định → FE TypeScript union type viết `"ONE_ON_ONE" | "GROUP"` (khớp). Đổi sang lowercase cần `@JsonValue` hoặc `@JsonCreator` cho mỗi enum → overhead.
+  - `ONE_ON_ONE` rõ hơn `direct` (dễ nhầm với "direct message" khác "direct route"). Semantics self-documenting.
+- **Trade-off**:
+  - ARCHITECTURE.md dòng 393 + 406-407 bị lệch với implementation — cần 1 ghi chú ở contract + knowledge, KHÔNG sửa ARCHITECTURE (nó là tài liệu thiết kế gốc; sửa sẽ rewrite history). WARNINGS.md sẽ log để future-self biết lý do lệch.
+  - Nếu tương lai tích hợp hệ thống khác (API gateway, export event) expect lowercase → thêm converter ở edge, không đổi DB.
+- **Ngày**: 2026-04-19 (Tuần 3, Ngày 1 — formalized khi draft Conversations contract)
+
 ### ADR-011: Blacklist check fail-open khi Redis down (trade-off intentional)
 - **Quyết định**: `JwtAuthFilter` check `redisTemplate.hasKey("jwt:blacklist:{jti}")` trước khi set SecurityContext. Nếu Redis throw `RedisConnectionFailureException` → LOG warning + SKIP check (fail-open) → token vẫn authenticate nếu JWT signature valid & chưa expire.
 - **Bối cảnh**: Redis có thể crash / maintenance / network blip → nếu fail-closed (reject mọi request khi Redis down) sẽ downtime toàn bộ app.
@@ -115,7 +127,7 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.4.0-auth-complete (POST /api/auth/oauth + /logout implemented W2D4, Firebase SDK verify, blacklist check in JwtAuthFilter with fail-open on Redis unavailable, auto-link by email for Google OAuth)
+- **API_CONTRACT.md**: v0.5.0-conversations (Conversations API đã draft W3D1: POST/GET list/GET detail/users.search — pending BE+FE implement W3D2+. Auth v0.4.0-auth-complete giữ nguyên.)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
@@ -202,6 +214,7 @@
 | 2026-04-19 | v0.2.1-auth | Thêm AUTH_TOKEN_EXPIRED error code. Note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED. |
 | 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented (W2D3.5). Rotation + reuse detection + revokeAllUserSessions. Constant-time hash compare. Note: cần sync contract dòng 337 (dùng `AUTH_REFRESH_TOKEN_INVALID` thay cho `REFRESH_TOKEN_REUSED`) và rate limit mới 10 calls/60s per-userId (contract hiện là 30/15min/IP). |
 | 2026-04-19 | v0.4.0-auth-complete | POST /api/auth/oauth + POST /api/auth/logout implemented (W2D4). Firebase Admin SDK verifyIdToken (không self-parse). FirebaseConfig lazy init — bean null khi FIREBASE_CREDENTIALS_PATH chưa set → endpoint trả 503 AUTH_FIREBASE_UNAVAILABLE. Auto-link by email thứ tự providerUid → email → new. JwtAuthFilter thêm blacklist check (Redis hasKey "jwt:blacklist:{jti}") trước set SecurityContext; fail-open khi Redis down (intentional, commented). Logout: blacklist access TTL=remaining, DELETE refresh key best-effort. Note contract: dòng 256 AUTH_FIREBASE_UNAVAILABLE hiện nói "timeout 5s" — nên mở rộng câu điều kiện cho cả case "SDK chưa init". FE dead code: check `PROVIDER_ALREADY_LINKED` error nhưng BE không emit — FE tự fallback message chung OK. |
+| 2026-04-19 | v0.5.0-conversations | Draft 4 Conversations endpoints (W3D1, pending implement): POST /api/conversations (type UPPERCASE, memberIds exclude caller, GROUP name required + 1..100, ONE_ON_ONE idempotency → 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId); GET list (offset pagination page/size, displayName/displayAvatarUrl computed, unreadCount placeholder=0 V1, sort lastMessageAt DESC NULLS LAST); GET detail (merge 404 CONV_NOT_FOUND cho cả not-exist + not-member để chống enumeration); GET /api/users/search (q ≥2 sau trim, exclude caller + non-active, sort username ASC, không trả email). Rate limits riêng từng endpoint. Documented soft-leave/soft-hide out-of-scope V1, documented race dup ONE_ON_ONE acceptable V1. |
 
 ---
 
@@ -211,4 +224,5 @@
 - 2026-04-19 (W2D1): Mark W-BE-3 RESOLVED (AuthMethod enum). Mark W-FE-2 RESOLVED (tokenStorage pattern, globalThis removed). Thêm tokenStorage.ts vào approved FE patterns. Note warning post-rehydrate auth flow.
 - 2026-04-19 (W2D3.5): Review POST /api/auth/refresh. Thêm ADR-006 (Refresh Token Rotation + Reuse Detection). Thêm Security review standards (constant-time compare, DELETE-before-SAVE, revoke-all-on-reuse, log format, error-code leak). Contract v0.2.1-auth → v0.3.0-auth. Ghi nhận 2 contract sync items cần FE/BE align (reuse error code + rate limit value).
 - 2026-04-19 (W2D4): Review POST /api/auth/oauth + POST /api/auth/logout. Thêm ADR-007 (OAuth Auto-Link by Email). Thêm 4 security standards mới (Firebase SDK verify bắt buộc, email_verified check điều kiện, blacklist TTL = remaining token TTL, blacklist-check-trước-setSecurityContext, fail-open Redis trade-off documented). Contract v0.3.0-auth → v0.4.0-auth-complete. Auth foundation Tuần 2 COMPLETE: register/login/refresh/oauth/logout đều implement + review xong.
+- 2026-04-19 (W3D1): Review V3 migration + Conversation entities/repositories + FE ProtectedRoute refactor + ConversationsLayout skeleton. APPROVE WITH COMMENTS (2 warning non-blocking: insertable=false trên @GeneratedValue UUID có thể lỗi Hibernate INSERT; CHECK constraint role `'MEMBER'` default trong SQL nhưng entity `@Builder.Default` = MEMBER → OK đồng bộ). Draft Conversations contract v0.5.0. Thêm ADR-012 (UPPERCASE enum). W-C-4 xác nhận RESOLVED.
 - 2026-04-19 (W2 Final Audit): Audit cuối Tuần 2 trước tag `v0.2.0-w2`. Formalize 4 ADR còn implicit: ADR-008 (HS256 + jjwt 0.12.x), ADR-009 (Redis key schema), ADR-010 (AuthMethod enum), ADR-011 (Fail-open blacklist trade-off). Tạo `docs/WARNINGS.md` tổng hợp 5 pre-production items (W-BE-4 race existsBy→save, W-BE-5 null passwordHash guard, W-BE-6 X-Forwarded-For sanitize, W-BE-7 fail-open monitoring, W-BE-8 generateUniqueUsername race), 8 documented-acceptable, 6 cleanup-tuần-8, 7 tech-debt-nhỏ. Controller audit: 5 auth endpoints + 1 health, 0 drift so với contract v0.4.0-auth-complete. 1 orphan TODO: `useAuth.ts:29` "TODO Tuần 2 call logout API" — logout đã implement nơi khác (HomePage.tsx), TODO lỗi thời, map vào CL-1.

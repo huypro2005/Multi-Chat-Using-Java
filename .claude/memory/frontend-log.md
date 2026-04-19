@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-04-19 (W3D1) — ProtectedRoute wired + ConversationsLayout skeleton
+
+### Xong
+- `src/components/ProtectedRoute.tsx`: Refactor dùng `<Outlet />` (layout route pattern), thêm `isHydrated` spinner, lưu `location.state.from` khi redirect /login. W-C-4 RESOLVED.
+- `src/pages/ConversationsLayout.tsx`: Tạo mới — layout 2 cột (sidebar w-80 + flex-1 main), mobile-responsive (ẩn/hiện sidebar/main theo :id param), avatar user initials.
+- `src/pages/ConversationsIndexPage.tsx`: Tạo mới — empty state với icon + text "Chọn một cuộc trò chuyện".
+- `src/App.tsx`: Thêm ProtectedRoute wrapper cho /conversations, nested routes (index + :id placeholder).
+- `src/pages/LoginPage.tsx`: Redirect về `location.state.from?.pathname ?? '/conversations'` sau login. Khi đã auth → redirect /conversations thay vì /.
+- `src/pages/HomePage.tsx`: Thêm Link "Vào Chat →" (bg-indigo-600) khi isAuthenticated.
+- `npm run build`: 0 error — PASS.
+- `npm run lint`: 0 error — PASS.
+
+### Blocker / TODO Ngày tiếp
+- Ngày 3: List conversations component (sidebar)
+- Ngày 3: Create conversation dialog
+- Ngày 4: Conversation detail (/conversations/:id)
+
+---
+
 ## 2026-04-19 (W2D4 Phase B) — Firebase OAuth + Logout wire
 
 ### Xong
