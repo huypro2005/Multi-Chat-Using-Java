@@ -104,6 +104,19 @@
 
 ---
 
+### Auth Service Pattern (Tuần 2, W2D2 Phase B)
+- Package: `com.chatapp.auth.{controller,service,dto.request,dto.response}`
+- Exception: dùng AppException có sẵn (KHÔNG tạo class riêng).
+- Error codes theo contract: `AUTH_EMAIL_TAKEN`, `AUTH_USERNAME_TAKEN`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED` (không dùng tên ngắn EMAIL_TAKEN...).
+- Security: `AUTH_INVALID_CREDENTIALS` cho cả user-not-found lẫn wrong-password — cùng message, tránh user enumeration.
+- Rate limit login: Redis GET key `rate:login:{ip}`, check >= 5 TRƯỚC khi verify password, INCR khi fail, DELETE khi success.
+- Rate limit register: Redis INCR key `rate:register:{ip}` mỗi request, check > 10, set TTL khi current == 1.
+- Refresh token Redis: key `refresh:{userId}:{jti}`, value = SHA-256 hash của raw token (không lưu raw), TTL = refreshExpirationMs/1000.
+- IP extraction: X-Forwarded-For header first (split(",")[0].trim()), fallback getRemoteAddr().
+- Pitfall quan trọng: khi thêm bean inject StringRedisTemplate vào production context, tất cả test class có `exclude=RedisAutoConfiguration` sẽ fail context load (UnsatisfiedDependency). Fix: thêm `@MockBean StringRedisTemplate` vào từng test class đó.
+
+---
+
 ### AuthMethod enum (Tuần 2, W-BE-3)
 - Enum tại `com.chatapp.user.enums.AuthMethod`: PASSWORD("password"), OAUTH2_GOOGLE("oauth2_google").
 - `generateAccessToken(User, AuthMethod)` — luôn truyền enum, không truyền string thô.

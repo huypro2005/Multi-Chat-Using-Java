@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-04-19 (W2D2 Phase A) — W2-NEW: authService.init() + AppLoadingScreen
+
+### Xong
+- `src/services/authService.ts`: init() với rawAxios riêng (không interceptors). 3 case: no refreshToken → false; có accessToken → true; có refreshToken no accessToken → call /refresh.
+- `src/components/AppLoadingScreen.tsx`: spinner Tailwind indigo-600, accessible (aria-label + role="img").
+- `src/App.tsx`: thêm useEffect + isInitialized gate. Routes chỉ render sau khi init() hoàn tất. Dùng `void authService.init().finally(...)` để tránh lint floating promise warning.
+- `frontend-knowledge.md`: thêm authService.init() pattern vào Pattern section, thêm 2 pitfall mới về rawAxios và accessToken reload.
+- `npm run build`: 0 error, 0 warning — PASS.
+- `npm run lint`: 0 error — PASS.
+
+### Dang do
+- BE chưa implement /api/auth/refresh → init() luôn rơi vào catch, clearAuth(), trả false. App vẫn chạy đúng.
+
+### Blocker
+- Không có. init() graceful khi BE chưa sẵn.
+
+### Ghi chú kỹ thuật
+- rawAxios dùng cùng baseURL với api.ts (VITE_API_BASE_URL || ''). Khi BE implement /refresh, init() sẽ tự hoạt động không cần sửa.
+- `void` operator trước `authService.init().finally(...)` là đúng pattern để tránh ESLint `@typescript-eslint/no-floating-promises` (không viết `authService.init().finally(...).catch(() => {})` — verbose thừa).
+- isInitialized = false chỉ là transient state (tồn tại < 1s nếu network bình thường). AppLoadingScreen blink nhanh, không ảnh hưởng UX.
+
+---
+
 ## 2026-04-19 (Tuần 2, Ngày 1) — W-FE-2: tokenStorage migration
 
 ### Xong

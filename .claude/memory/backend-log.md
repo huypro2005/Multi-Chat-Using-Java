@@ -32,6 +32,27 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W2D2 Phase B) — POST /api/auth/register + POST /api/auth/login
+
+### Xong
+- Tạo package `com.chatapp.auth.{controller,service,dto.{request,response}}`.
+- DTOs: RegisterRequest (email, username, password, fullName + validation), LoginRequest, UserDto.from(User), AuthResponse.
+- AuthService: register (rate limit 10/15min, unique check email trước username, bcrypt hash, generate tokens), login (rate limit check fail count, same error code user-not-found vs wrong-password security, account lock check, reset counter on success). buildAuthResponse: SHA-256 hash refresh token → Redis key `refresh:{userId}:{jti}` TTL 7 ngày.
+- AuthController: POST /register + POST /login, extractClientIp (X-Forwarded-For → remoteAddr).
+- AuthControllerTest: 14 tests (register happy, dup email, dup username, invalid email, weak password 2 cases, username starts digit, missing fullName; login happy, wrong password, user not found, rate limit 429, empty username, empty password). 14/14 PASS.
+- Fix: thêm `@MockBean StringRedisTemplate` vào JwtTokenProviderTest, SecurityConfigTest, ChatAppApplicationTests — 3 test class này exclude Redis autoconfigure nhưng AuthService bây giờ inject StringRedisTemplate → context fail. @MockBean giải quyết.
+- Tổng: 31/31 tests PASS, BUILD SUCCESS.
+
+### Đang dở
+- POST /api/auth/oauth (Firebase), /refresh, /logout — phase sau.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- Khi thêm bean inject Redis vào context, tất cả test class exclude Redis autoconfigure sẽ fail context load. Fix: thêm `@MockBean StringRedisTemplate` vào từng class đó. Đây là pitfall quan trọng — xem backend-knowledge.md.
+- Contract thắng task spec: error codes là AUTH_EMAIL_TAKEN, AUTH_USERNAME_TAKEN, AUTH_INVALID_CREDENTIALS, AUTH_ACCOUNT_LOCKED (không phải EMAIL_TAKEN, USERNAME_TAKEN, INVALID_CREDENTIALS, ACCOUNT_DISABLED). Register response HTTP 200 (không phải 201). Password regex cần 1 chữ hoa + 1 chữ số.
+
 ## 2026-04-19 (W2D1 — W-BE-3) — AuthMethod enum + refactor generateAccessToken
 
 ### Xong

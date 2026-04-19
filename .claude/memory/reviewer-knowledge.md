@@ -32,6 +32,14 @@
 - **Trade-off**: App phải có network call ngay khi load (nếu có refreshToken). Acceptable — better than persisting short-lived secrets.
 - **Ngày**: 2026-04-19 (Tuần 1)
 
+### ADR-005: Rate limit pattern — Redis INCR + TTL (set on first increment)
+- **Quyết định**: Rate limit dùng `redisTemplate.opsForValue().increment(key)`. Nếu return = 1L → set TTL lần đầu. Vượt ngưỡng → throw RATE_LIMITED với `details.retryAfterSeconds` lấy từ `getExpire(key)`.
+- **Bối cảnh**: Cần counter-based rate limit cho register (10/15min/IP, mọi request) và login (5/15min/IP, chỉ fail).
+- **Lý do**: INCR atomic — không cần lock. TTL chỉ set lần đầu tránh "slide" window (nếu set TTL mỗi lần thì user cố tình request đều đặn sẽ không bao giờ bị reset).
+- **Trade-off**: Có race window ngắn giữa `increment` và `expire` — nếu Redis crash giữa 2 lệnh, counter sẽ persist vĩnh viễn. Acceptable vì Redis bền và PERSIST key hiếm.
+- **Pattern login đặc biệt**: Tách `checkLoginRateLimit()` (chỉ GET + so sánh) khỏi `incrementLoginFailCounter()` (INCR + set TTL). Lý do: chỉ tăng counter khi fail, không tăng khi success. Thành công → `redisTemplate.delete(key)` reset counter.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 2)
+
 ### ADR-004: API Error Format — { error, message, timestamp, details }
 - **Quyết định**: Mọi error response đều dùng shape: `{ "error": "ERROR_CODE", "message": "...", "timestamp": "ISO-8601", "details": {...} }`
 - **Bối cảnh**: Cần FE dùng `error` field (string) để phân nhánh logic, `message` để hiển thị user.
@@ -66,6 +74,9 @@
 ### Vấn đề thường gặp ở BE
 - Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phải set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
 - **W-BE-3 RESOLVED**: AuthMethod enum tại com.chatapp.user.enums. generateAccessToken(User, AuthMethod) — không còn hardcode "password". getAuthMethodFromToken() có fallback về PASSWORD khi claim unknown.
+- **Race condition uniqueness check (W2D2, non-blocking V1)**: Pattern `existsByEmail` → `save` có race window khi 2 request cùng lúc. DB UNIQUE constraint throw `DataIntegrityViolationException` → service hiện không catch → GlobalExceptionHandler Exception catch-all trả 500 INTERNAL_ERROR thay vì 409 AUTH_EMAIL_TAKEN/AUTH_USERNAME_TAKEN. Fix khi scale: bắt DataIntegrityViolationException trong register(), map sang AppException dựa trên constraint name. V1 scale <1000 users traffic thấp → acceptable, documented.
+- **Transaction không bao Redis**: `@Transactional` chỉ quản lý JDBC/JPA. Write Redis SAU khi save user → nếu Redis fail, user đã tồn tại DB nhưng không có refresh token → FE phải login lại. Không dùng @Transactional với TransactionSynchronizationManager để "rollback Redis" vì phức tạp và không đảm bảo. Chấp nhận side effect.
+- **X-Forwarded-For không sanitize**: extractClientIp() lấy header[0] split(","). Attacker forge header có thể ghi Redis key rác (rate:login:arbitrary_string). Về lý thuyết không phải Redis injection (RedisSerializer escape), nhưng có thể abuse counter space. Nên validate IP format bằng InetAddressValidator trước khi dùng làm key suffix.
 
 ### Vấn đề thường gặp ở FE
 - **globalThis workaround** (api.ts <-> authStore.ts): RESOLVED trong W-FE-2. Đã migrate sang tokenStorage.ts pattern. globalThis hoàn toàn bị loại bỏ. Không còn cần check pattern này.
@@ -82,6 +93,9 @@
 ### BE patterns
 - `validateTokenDetailed()` trả enum VALID/EXPIRED/INVALID thay vì boolean. Tách biệt expired vs invalid để trả error code đúng cho FE.
 - `GlobalExceptionHandler` + `AppException` — business exception pattern. Mọi business error throw `AppException(HttpStatus, errorCode, message)`, handler convert sang `ErrorResponse`.
+- **Refresh token SHA-256 hash vào Redis (W2D2 APPROVED)**: `hashToken()` dùng MessageDigest SHA-256 + Base64. Lưu hash chứ không raw token vào Redis key `refresh:{userId}:{jti}`. Lý do: nếu Redis bị compromise, hash không dùng để forge. Khi /refresh, compare bằng cách hash lại token FE gửi và so sánh.
+- **User enumeration protection (W2D2 APPROVED)**: `findByUsername(...).orElse(null)` + cùng 1 nhánh throw `AUTH_INVALID_CREDENTIALS` cho user-not-found và wrong-password. Cùng error code + cùng message "Tên đăng nhập hoặc mật khẩu không đúng". Check account status (AUTH_ACCOUNT_LOCKED) chỉ SAU khi verify credentials đúng — không tiết lộ "username tồn tại" qua timing khác nhau.
+- **Client IP extraction pattern**: `X-Forwarded-For` header split(",")[0].trim() với fallback `getRemoteAddr()`. Chấp nhận vì reverse proxy sẽ prepend client IP. Caveat: chưa sanitize IP format (xem Vấn đề thường gặp BE).
 
 ### FE patterns
 - RHF + zodResolver + mode:'onTouched' — validate khi blur, không mỗi keystroke. Ít re-render.

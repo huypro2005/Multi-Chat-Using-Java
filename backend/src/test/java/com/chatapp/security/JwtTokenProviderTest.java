@@ -7,6 +7,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.UUID;
@@ -16,6 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Integration test cho JwtTokenProvider — dùng Spring context để load @Value properties.
  * Exclude Redis autoconfigure vì JWT test không cần Redis.
+ * @MockBean StringRedisTemplate để AuthService có thể wire (AuthService inject StringRedisTemplate).
  */
 @SpringBootTest(properties = {
         "spring.autoconfigure.exclude=" +
@@ -27,6 +30,11 @@ class JwtTokenProviderTest {
 
     @Autowired
     private JwtTokenProvider jwtTokenProvider;
+
+    // AuthService inject StringRedisTemplate — phải mock để context start được khi Redis bị exclude
+    @MockBean
+    @SuppressWarnings("unused")
+    private StringRedisTemplate stringRedisTemplate;
 
     private User testUser;
 
