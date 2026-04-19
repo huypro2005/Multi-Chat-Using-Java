@@ -53,10 +53,14 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers(
-                            "/api/auth/**",
+                            "/api/auth/register",
+                            "/api/auth/login",
+                            "/api/auth/oauth",
+                            "/api/auth/refresh",
                             "/api/health",
                             "/actuator/health"
                     ).permitAll()
+                    // /api/auth/logout KHÔNG trong whitelist — yêu cầu JWT hợp lệ
                     .anyRequest().authenticated()
             )
             .exceptionHandling(ex -> ex

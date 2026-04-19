@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -30,6 +31,20 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(ex.getStatus())
                 .body(ErrorResponse.of(ex.getErrorCode(), ex.getMessage()));
+    }
+
+    /**
+     * Không có handler cho URL/method (Spring 6 ném NoResourceFoundException thay vì 404 mặc định).
+     * Thường gặp khi gọi GET thay vì POST, hoặc sai path — tránh 500 INTERNAL_ERROR gây hiểu nhầm.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoResourceFound(NoResourceFoundException ex) {
+        String path = ex.getResourcePath();
+        log.debug("No handler for resource path: {}", path);
+        String hint = "Kiểm tra HTTP method và đường dẫn (ví dụ POST /api/auth/refresh với JSON body).";
+        return ResponseEntity
+                .status(HttpStatus.NOT_FOUND)
+                .body(ErrorResponse.of("NOT_FOUND", "Không tìm thấy tài nguyên: " + path + ". " + hint));
     }
 
     /**

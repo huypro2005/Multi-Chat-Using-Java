@@ -40,6 +40,19 @@
 - **Pattern login đặc biệt**: Tách `checkLoginRateLimit()` (chỉ GET + so sánh) khỏi `incrementLoginFailCounter()` (INCR + set TTL). Lý do: chỉ tăng counter khi fail, không tăng khi success. Thành công → `redisTemplate.delete(key)` reset counter.
 - **Ngày**: 2026-04-19 (Tuần 2, Ngày 2)
 
+### ADR-007: OAuth Auto-Link by Email (Firebase Google)
+- **Quyết định**: Thứ tự kiểm tra khi nhận Firebase ID token đã verify: (1) `user_auth_providers` by `(provider='google', providerUid)` → returning OAuth user; (2) `users` by `email` → existing password user, AUTO-LINK bằng cách insert thêm row vào `user_auth_providers`; (3) không tìm thấy cả hai → tạo user mới (users + user_auth_providers), `isNewUser=true`.
+- **Bối cảnh**: Người dùng đăng ký email `foo@gmail.com` bằng password, sau đó click "Login with Google" cùng email. Nếu không auto-link sẽ tạo 2 user riêng biệt cùng email → UNIQUE email violate hoặc phân tách danh tính.
+- **Lý do**:
+  - Google account có `email_verified=true` mặc định (Google đã sở hữu email) → an toàn auto-link bằng email.
+  - Giảm friction cho user — không cần "đã có tài khoản? click đây để link".
+  - Password hash vẫn giữ nguyên — user có thể login cả 2 cách.
+- **Điều kiện bắt buộc nếu sau này thêm provider khác (Facebook, Apple, v.v.)**: PHẢI check `firebaseToken.isEmailVerified()` hoặc `email_verified` claim trước khi auto-link. Provider không verify email → attacker có thể claim email không thuộc họ → chiếm tài khoản của user khác. Hiện V1 chỉ có Google nên chưa implement check này, DOCUMENTED trong knowledge (reviewer standards).
+- **Trade-off**:
+  - `password_hash = null` cho user tạo mới qua OAuth-only → `login()` endpoint phải guard null trước khi gọi `passwordEncoder.matches()` (nếu không BCrypt throw IllegalArgumentException → 500). Hiện chưa implement guard → pending fix ở touch login tiếp theo.
+  - generateUniqueUsername race: 2 OAuth concurrent có thể chọn trùng username → UNIQUE violate 500. V1 traffic thấp acceptable; DB UNIQUE là guard cuối.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 4)
+
 ### ADR-006: Refresh Token Rotation + Reuse Detection
 - **Quyết định**: Mỗi lần `/refresh` thành công → DELETE old redis key TRƯỚC khi buildAuthResponse sinh refresh token mới với jti mới. Hash mismatch (storedHash=null hoặc không match) → detect reuse → revokeAllUserSessions(userId) trước khi throw `AUTH_REFRESH_TOKEN_INVALID`.
 - **Bối cảnh**: Refresh token nếu dùng lại (replay) là dấu hiệu attacker đã có token → phải revoke all sessions của user đó, không chỉ token đó.
@@ -64,7 +77,7 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.3.0-auth (POST /api/auth/refresh implemented W2D3.5, constant-time hash compare, reuse detection + revokeAllUserSessions)
+- **API_CONTRACT.md**: v0.4.0-auth-complete (POST /api/auth/oauth + /logout implemented W2D4, Firebase SDK verify, blacklist check in JwtAuthFilter with fail-open on Redis unavailable, auto-link by email for Google OAuth)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
@@ -90,6 +103,11 @@
 - **Reuse detection phải revoke ALL sessions của user đó**: phát hiện 1 token bị reuse = giả định toàn bộ sessions của user đó đã bị compromise. KHÔNG chỉ delete token hiện tại. Pattern: `redisTemplate.keys("refresh:{userId}:*")` → `redisTemplate.delete(keys)`.
 - **Log SECURITY events với context**: WARN level, có userId + jti + action, KHÔNG có raw token/password. Format: `"[SECURITY] Refresh token reuse/invalid detected for userId={}, jti={}. Revoking all sessions."`.
 - **Error code phân biệt phải rõ ràng và KHÔNG leak**: INVALID (malformed/sig-sai/reused/user-not-found) — tất cả dùng cùng 1 code để không tiết lộ "token tồn tại nhưng đã reused" vs "token không bao giờ tồn tại"; EXPIRED (valid sig + valid signature, chỉ exp quá hạn) — code riêng để FE biết đăng nhập lại thay vì retry.
+- **Firebase ID token phải verify qua Admin SDK, KHÔNG tự parse JWT**: bắt buộc gọi `FirebaseAuth.getInstance().verifyIdToken(idToken)` (hoặc method tương đương). Tự parse JWT với jjwt sẽ bỏ qua check signature với Google public keys (rotation) + audience check + issuer check. BLOCKING nếu vi phạm. Pattern đúng: inject `FirebaseAuth` qua `@Bean`, nullable với `@Autowired(required=false)`; null-check trước khi gọi → throw `AUTH_FIREBASE_UNAVAILABLE` 503 nếu chưa init.
+- **OAuth auto-link theo email CHỈ an toàn khi provider verify email**: với Google luôn verified. Nếu sau V2 thêm Facebook/Apple/email OAuth khác → phải check `firebaseToken.isEmailVerified()` (hoặc claim tương đương) TRƯỚC khi auto-link vào user hiện có. Không check → attacker tạo Facebook account với email chưa xác nhận, claim chiếm account password user khác.
+- **Access token blacklist TTL phải = remaining TTL của token**: `SET "jwt:blacklist:{jti}" "" EX {remainingSeconds}` — không dài hơn (lãng phí Redis), không ngắn hơn (token hết blacklist trước khi tự expire → attacker dùng lại). Lấy remaining bằng `exp - now()` từ JWT claims.
+- **Blacklist check trong JwtAuthFilter phải CHẠY TRƯỚC set SecurityContext**: thứ tự đúng: extract token → validateTokenDetailed VALID → check Redis blacklist → (nếu blacklisted set attribute 'jwt_expired' + filterChain.doFilter + return) → load User + set Authentication. Ngược lại → logged-out token vẫn authenticate được. BLOCKING nếu sai thứ tự.
+- **Fail-open vs fail-closed cho Redis blacklist**: có thể accept fail-open (Redis down → skip blacklist check, token vẫn valid đến natural expiry) với comment rõ trong code. Trade-off: service tiếp tục hoạt động khi Redis down, nhưng blacklist không enforce trong window đó. Phải documented intent trong log + comment. Nếu không comment → treat như bug (unintentional fail-open).
 
 ### Vấn đề thường gặp ở BE
 - Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phải set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
@@ -145,6 +163,7 @@
 | 2026-04-19 | v0.2-auth | Thêm Refresh Queue Pattern note vào /refresh. Xác nhận isNewUser field trong /oauth. |
 | 2026-04-19 | v0.2.1-auth | Thêm AUTH_TOKEN_EXPIRED error code. Note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED. |
 | 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented (W2D3.5). Rotation + reuse detection + revokeAllUserSessions. Constant-time hash compare. Note: cần sync contract dòng 337 (dùng `AUTH_REFRESH_TOKEN_INVALID` thay cho `REFRESH_TOKEN_REUSED`) và rate limit mới 10 calls/60s per-userId (contract hiện là 30/15min/IP). |
+| 2026-04-19 | v0.4.0-auth-complete | POST /api/auth/oauth + POST /api/auth/logout implemented (W2D4). Firebase Admin SDK verifyIdToken (không self-parse). FirebaseConfig lazy init — bean null khi FIREBASE_CREDENTIALS_PATH chưa set → endpoint trả 503 AUTH_FIREBASE_UNAVAILABLE. Auto-link by email thứ tự providerUid → email → new. JwtAuthFilter thêm blacklist check (Redis hasKey "jwt:blacklist:{jti}") trước set SecurityContext; fail-open khi Redis down (intentional, commented). Logout: blacklist access TTL=remaining, DELETE refresh key best-effort. Note contract: dòng 256 AUTH_FIREBASE_UNAVAILABLE hiện nói "timeout 5s" — nên mở rộng câu điều kiện cho cả case "SDK chưa init". FE dead code: check `PROVIDER_ALREADY_LINKED` error nhưng BE không emit — FE tự fallback message chung OK. |
 
 ---
 
@@ -153,3 +172,4 @@
 - 2026-04-19 (Ngày 4): Điền ADR-001 đến ADR-004. Thêm FE review standards từ Phase 3B review. Điền contract changelog. Thêm approved patterns BE + FE.
 - 2026-04-19 (W2D1): Mark W-BE-3 RESOLVED (AuthMethod enum). Mark W-FE-2 RESOLVED (tokenStorage pattern, globalThis removed). Thêm tokenStorage.ts vào approved FE patterns. Note warning post-rehydrate auth flow.
 - 2026-04-19 (W2D3.5): Review POST /api/auth/refresh. Thêm ADR-006 (Refresh Token Rotation + Reuse Detection). Thêm Security review standards (constant-time compare, DELETE-before-SAVE, revoke-all-on-reuse, log format, error-code leak). Contract v0.2.1-auth → v0.3.0-auth. Ghi nhận 2 contract sync items cần FE/BE align (reuse error code + rate limit value).
+- 2026-04-19 (W2D4): Review POST /api/auth/oauth + POST /api/auth/logout. Thêm ADR-007 (OAuth Auto-Link by Email). Thêm 4 security standards mới (Firebase SDK verify bắt buộc, email_verified check điều kiện, blacklist TTL = remaining token TTL, blacklist-check-trước-setSecurityContext, fail-open Redis trade-off documented). Contract v0.3.0-auth → v0.4.0-auth-complete. Auth foundation Tuần 2 COMPLETE: register/login/refresh/oauth/logout đều implement + review xong.

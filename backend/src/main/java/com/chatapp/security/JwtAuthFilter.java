@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
@@ -39,6 +40,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtTokenProvider jwtTokenProvider;
     private final UserRepository userRepository;
+    private final StringRedisTemplate redisTemplate;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
@@ -67,7 +69,24 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        // result == VALID: tiếp tục load user và set authentication
+        // result == VALID: kiểm tra blacklist trước khi set authentication
+
+        // Check JWT blacklist (set khi logout)
+        try {
+            String jti = jwtTokenProvider.getJtiFromToken(token);
+            Boolean isBlacklisted = redisTemplate.hasKey("jwt:blacklist:" + jti);
+            if (Boolean.TRUE.equals(isBlacklisted)) {
+                // Token bị blacklist sau khi logout — treat như expired/invalid
+                log.debug("JWT blacklisted (after logout), jti={}", jti);
+                request.setAttribute("jwt_expired", true);
+                filterChain.doFilter(request, response);
+                return;
+            }
+        } catch (Exception e) {
+            // Redis unavailable — fail-open: tiếp tục xử lý bình thường
+            // Production: có thể cân nhắc fail-closed nếu cần strict security
+            log.warn("Could not check JWT blacklist (Redis unavailable?): {}", e.getMessage());
+        }
 
         try {
             UUID userId = jwtTokenProvider.getUserIdFromToken(token);

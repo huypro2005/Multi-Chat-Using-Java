@@ -25,10 +25,12 @@ function processQueue(error: unknown, token: string | null = null): void {
 // ---------------------------------------------------------------------------
 // Axios singleton instance
 // ---------------------------------------------------------------------------
+const apiBaseURL = import.meta.env.VITE_API_BASE_URL || ''
+
 const api: AxiosInstance = axios.create({
   // VITE_API_BASE_URL nếu set thì dùng (ví dụ staging/prod).
   // Nếu không set → dùng '' (empty string) để tận dụng Vite proxy /api → localhost:8080
-  baseURL: import.meta.env.VITE_API_BASE_URL || '',
+  baseURL: apiBaseURL,
   timeout: 10_000,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -89,13 +91,15 @@ api.interceptors.response.use(
           }
 
           // Dùng axios thuần (KHÔNG dùng api instance) để tránh interceptor loop
+          // Phải dùng cùng baseURL với `api` — nếu không, khi VITE_API_BASE_URL trỏ thẳng BE,
+          // request refresh sẽ gửi nhầm lên origin của SPA và không tới AuthController.
           const { data } = await axios.post<{
             accessToken: string
             refreshToken: string
             tokenType: string
             expiresIn: number
             user: unknown
-          }>('/api/auth/refresh', { refreshToken })
+          }>(`${apiBaseURL}/api/auth/refresh`, { refreshToken })
 
           // Cập nhật tokenStorage với token mới.
           // authStore.setAuth() sẽ được gọi bởi caller nếu cần sync store,

@@ -31,6 +31,11 @@ export interface AuthResponse {
   user: UserDto
 }
 
+// OAuth response — extends AuthResponse với isNewUser flag
+export interface OAuthResponse extends AuthResponse {
+  isNewUser: boolean
+}
+
 // API error shape từ backend (chuẩn toàn hệ thống)
 export interface ApiError {
   error: string

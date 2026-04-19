@@ -209,8 +209,32 @@ Username regex: `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` — khớp BE regex (3-50 ký 
 
 ---
 
+## Firebase JS SDK pattern
+
+`src/lib/firebase.ts` — lazy init (check `getApps().length === 0` trước `initializeApp`).
+VITE_ env vars: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`.
+Lấy config: Firebase Console → Project Settings → Your apps → Web app → firebaseConfig.
+Nếu env chưa có → Firebase vẫn init với giá trị undefined, KHÔNG crash khi build — chỉ crash lúc runtime khi thực sự gọi `signInWithPopup`.
+
+## OAuth Popup pattern
+
+`signInWithPopup` → `getIdToken()` → `oauthApi({ firebaseIdToken })` → `setAuth(response)` → `navigate('/')`.
+Edge case 'popup closed': catch `error.code === 'auth/popup-closed-by-user'` hoặc `'auth/cancelled-popup-request'` → return silently, KHÔNG gọi `onError`.
+Google SVG logo hard-coded trong component (không cần thêm library cho icon Google).
+`OAuthResponse extends AuthResponse` — thêm `isNewUser: boolean` — nằm trong `src/types/auth.ts`.
+`setAuth(response)` từ authStore nhận `AuthResponse` (structural typing) — `OAuthResponse` có thêm field `isNewUser` vẫn pass vì TS dùng structural subtyping.
+
+## Logout pattern
+
+Best-effort: `logoutApi({ refreshToken })` (có thể fail nếu offline/BE unavailable).
+Luôn `clearAuth()` + `navigate('/login')` trong `finally` — local state được clear dù API fail.
+Toast khác nhau: `'success'` khi API ok, `'info'` khi offline/catch.
+`tokenStorage.getRefreshToken()` — lấy refreshToken từ in-memory cache để gửi lên BE.
+W-C-3 logout **RESOLVED**.
+
 ## Changelog file này
 
+- 2026-04-19 (W2D4 Phase B): Firebase SDK + GoogleLoginButton + oauthApi + logoutApi. Wire Login/Register/HomePage. build + lint: 0 error.
 - 2026-04-19 (W2D3 Phase C): Wire Login + Register với API thật. handleAuthError utility. ProtectedRoute. W-FE-1 fix (username regex). build + lint: 0 error.
 - 2026-04-19 (W2D2 Phase A): authService.init() + AppLoadingScreen. isInitialized gate trong App.tsx. rawAxios pattern tránh interceptor loop. build + lint: 0 error.
 - 2026-04-19 (Tuần 2, Ngày 1): W-FE-2 done. Migrate TODO → implemented section. Cập nhật Auth Store pattern (xóa globalThis, dùng tokenStorage). Thêm pitfall authStore ↔ tokenStorage sync.

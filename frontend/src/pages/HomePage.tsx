@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import api from '@/lib/api'
 import { useAuthStore } from '@/stores/authStore'
+import { logoutApi } from '@/features/auth/api'
+import { tokenStorage } from '@/lib/tokenStorage'
+import { useToast } from '@/hooks/useToast'
+import { ToastContainer } from '@/components/Toast'
 
 type HealthState =
   | { status: 'loading' }
@@ -9,10 +14,29 @@ type HealthState =
 
 export default function HomePage() {
   const [health, setHealth] = useState<HealthState>({ status: 'loading' })
+  const { toasts, addToast, removeToast } = useToast()
 
+  const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const accessToken = useAuthStore((s) => s.accessToken)
+  const clearAuth = useAuthStore((s) => s.clearAuth)
   const isAuthenticated = !!accessToken
+
+  const handleLogout = async () => {
+    const refreshToken = tokenStorage.getRefreshToken()
+    try {
+      if (refreshToken) {
+        await logoutApi({ refreshToken })
+      }
+      addToast('Đăng xuất thành công', 'success')
+    } catch {
+      addToast('Đăng xuất local — có thể session vẫn active nếu mạng lỗi', 'info')
+    } finally {
+      // Luôn clear local state dù API fail
+      clearAuth()
+      navigate('/login')
+    }
+  }
 
   useEffect(() => {
     api.get<{ status: string; service: string }>('/api/health')
@@ -74,7 +98,7 @@ export default function HomePage() {
             <p className="text-xs text-gray-400 mt-1">@{user.username}</p>
             <button
               type="button"
-              onClick={() => { /* stub — logout Ngày 5 */ }}
+              onClick={handleLogout}
               className="mt-3 text-sm text-red-500 hover:underline"
             >
               Đăng xuất
@@ -88,6 +112,8 @@ export default function HomePage() {
           <a href="/register" className="text-sm text-indigo-600 hover:underline">Đăng ký</a>
         </div>
       </div>
+
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
     </div>
   )
 }

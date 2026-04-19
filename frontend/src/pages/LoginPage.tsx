@@ -9,6 +9,7 @@ import { handleAuthError } from '@/features/auth/utils/handleAuthError'
 import { useAuthStore } from '@/stores/authStore'
 import { ToastContainer } from '@/components/Toast'
 import { useToast } from '@/hooks/useToast'
+import GoogleLoginButton from '@/features/auth/components/GoogleLoginButton'
 
 export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
@@ -178,6 +179,26 @@ export default function LoginPage() {
             )}
           </button>
         </form>
+
+        {/* Google OAuth divider + button */}
+        <div className="mt-4">
+          <div className="relative flex items-center gap-3 my-4">
+            <div className="flex-1 h-px bg-gray-200" />
+            <span className="text-xs text-gray-400 uppercase tracking-wide">hoặc</span>
+            <div className="flex-1 h-px bg-gray-200" />
+          </div>
+
+          <GoogleLoginButton
+            onError={(err) => {
+              const apiErr = (err as { response?: { data?: { error?: string } } })?.response?.data
+              if (apiErr?.error === 'PROVIDER_ALREADY_LINKED') {
+                addToast('Tài khoản Google này đã liên kết với user khác', 'error')
+              } else {
+                addToast('Đăng nhập Google thất bại, vui lòng thử lại', 'error')
+              }
+            }}
+          />
+        </div>
 
         {/* Register link */}
         <p className="mt-6 text-center text-sm text-gray-500">

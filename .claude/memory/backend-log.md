@@ -32,6 +32,30 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W2D4) — OAuth (Firebase) + Logout (blacklist jti)
+
+### Xong
+- FirebaseConfig: `@PostConstruct` init SDK, expose `FirebaseAuth` bean (null nếu chưa init). Lazy init để app start dù không có credentials.
+- UserAuthProviderRepository: thêm `existsByProviderAndProviderUidAndUser_IdNot()`.
+- DTOs: OAuthRequest, OAuthResponse (isNewUser field), LogoutRequest.
+- AuthService: thêm `oauth()` (verify Firebase → auto-link logic 3 bước), `logout()` (best-effort delete refresh + blacklist access), `generateUniqueUsername()`, `toOAuthResponse()`. Refactor constructor thủ công + setter `@Autowired(required=false)` cho FirebaseAuth (testability).
+- JwtTokenProvider: thêm `getRemainingMs(String token)`.
+- JwtAuthFilter: thêm blacklist check sau validate VALID — `redisTemplate.hasKey("jwt:blacklist:{jti}")`. Inject `StringRedisTemplate`. Fail-open nếu Redis unavailable.
+- SecurityConfig: narrow whitelist từ `/api/auth/**` thành từng path explicit; `/api/auth/logout` KHÔNG trong whitelist (cần JWT).
+- AuthController: thêm `POST /oauth` và `POST /logout`.
+- AuthControllerTest: thêm 10 tests (oauth new user, returning user, auto-link, invalid token, missing email, missing body; logout happy, invalid refresh still 200, no auth 401, blacklist test). 33/33 PASS, tổng 50/50 PASS, BUILD SUCCESS.
+
+### Đang dở
+- Không có trong phase A.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- KHÔNG dùng `FirebaseAuth.getInstance()` trực tiếp trong Service — không testable. Dùng injected bean qua setter `@Autowired(required=false)`. `@MockBean FirebaseAuth` trong test sẽ replace bean và được inject vào AuthService.
+- `@Bean` trả null trong Spring được bỏ qua (bean không được đăng ký). Các nơi `@Autowired(required=false)` sẽ nhận null → handle gracefully.
+- Test 33 (blacklist check): mock `redisTemplate.hasKey(eq(blacklistKey)).thenReturn(true)` sau logout → JwtAuthFilter detect và set `jwt_expired=true` → request tới protected endpoint → 401.
+
 ## 2026-04-19 (W2D3.5) — POST /api/auth/refresh với token rotation + reuse detection
 
 ### Xong

@@ -1,15 +1,22 @@
 package com.chatapp.auth.controller;
 
 import com.chatapp.auth.dto.request.LoginRequest;
+import com.chatapp.auth.dto.request.LogoutRequest;
+import com.chatapp.auth.dto.request.OAuthRequest;
 import com.chatapp.auth.dto.request.RefreshRequest;
 import com.chatapp.auth.dto.request.RegisterRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
+import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.service.AuthService;
+import com.chatapp.security.JwtTokenProvider;
+import com.chatapp.user.entity.User;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
 
 /**
  * REST controller cho auth endpoints.
@@ -27,6 +34,7 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
 
     private final AuthService authService;
+    private final JwtTokenProvider jwtTokenProvider;
 
     /**
      * POST /api/auth/register
@@ -67,6 +75,43 @@ public class AuthController {
     ) {
         String clientIp = extractClientIp(servletRequest);
         return authService.refresh(req.refreshToken(), clientIp);
+    }
+
+    /**
+     * POST /api/auth/oauth
+     * Đăng nhập hoặc đăng ký bằng Google OAuth thông qua Firebase ID Token.
+     * Trả về OAuthResponse kèm isNewUser flag.
+     */
+    @PostMapping("/oauth")
+    public OAuthResponse oauth(
+            @Valid @RequestBody OAuthRequest req,
+            HttpServletRequest servletRequest
+    ) {
+        String clientIp = extractClientIp(servletRequest);
+        return authService.oauth(req.firebaseIdToken(), clientIp);
+    }
+
+    /**
+     * POST /api/auth/logout
+     * Đăng xuất phiên hiện tại: blacklist access token + delete refresh token.
+     * Yêu cầu JWT hợp lệ trong Authorization header (endpoint không trong permitAll whitelist).
+     */
+    @PostMapping("/logout")
+    public Map<String, String> logout(
+            @Valid @RequestBody LogoutRequest req,
+            Authentication authentication,
+            HttpServletRequest servletRequest
+    ) {
+        User user = (User) authentication.getPrincipal();
+
+        // Extract access token từ Authorization header để lấy jti và remaining TTL
+        String authHeader = servletRequest.getHeader("Authorization");
+        String accessToken = authHeader.substring(7); // strip "Bearer "
+        String jti = jwtTokenProvider.getJtiFromToken(accessToken);
+        long remainingMs = jwtTokenProvider.getRemainingMs(accessToken);
+
+        authService.logout(req.refreshToken(), user.getId(), jti, remainingMs);
+        return Map.of("message", "Đăng xuất thành công");
     }
 
     /**

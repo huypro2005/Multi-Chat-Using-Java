@@ -1,15 +1,17 @@
 package com.chatapp.auth;
 
 import com.chatapp.security.JwtTokenProvider;
+import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseToken;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.MediaType;
@@ -69,10 +71,24 @@ class AuthControllerTest {
     private UserRepository userRepository;
 
     @Autowired
+    private UserAuthProviderRepository userAuthProviderRepository;
+
+    @Autowired
+    private JwtTokenProvider jwtTokenProvider;
+
+    @Autowired
     private ObjectMapper objectMapper;
 
     @MockBean
     private StringRedisTemplate redisTemplate;
+
+    /**
+     * Mock FirebaseAuth — @MockBean replaces the FirebaseAuth singleton in Spring context.
+     * AuthService gọi FirebaseAuth.getInstance() — vì singleton pattern, cần mock static method.
+     * Dùng mockStatic trong từng test method để kiểm soát output.
+     */
+    @MockBean
+    private FirebaseAuth firebaseAuth;
 
     @SuppressWarnings("unchecked")
     private ValueOperations<String, String> valueOps;
@@ -80,7 +96,8 @@ class AuthControllerTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        // Xóa toàn bộ user trước mỗi test để đảm bảo idempotent
+        // Xóa toàn bộ data trước mỗi test để đảm bảo idempotent
+        userAuthProviderRepository.deleteAll();
         userRepository.deleteAll();
 
         // Mock ValueOperations — mọi Redis operation đều no-op theo mặc định
@@ -647,5 +664,274 @@ class AuthControllerTest {
         // Verify: revokeAllUserSessions() được gọi — phải gọi keys() và delete(collection)
         verify(redisTemplate, atLeastOnce()).keys(anyString());
         verify(redisTemplate, atLeastOnce()).delete(eq(fakeSessionKeys));
+    }
+
+    // =========================================================================
+    // OAuth tests (Tests 24-29)
+    // =========================================================================
+
+    /**
+     * Helper: tạo FirebaseToken mock với các fields cần thiết.
+     */
+    private FirebaseToken mockFirebaseToken(String uid, String email, String displayName, String photoUrl) {
+        FirebaseToken token = mock(FirebaseToken.class);
+        when(token.getUid()).thenReturn(uid);
+        when(token.getEmail()).thenReturn(email);
+        when(token.getName()).thenReturn(displayName);
+        when(token.getPicture()).thenReturn(photoUrl);
+        return token;
+    }
+
+    /**
+     * Test 24: OAuth với user hoàn toàn mới — tạo user, isNewUser=true.
+     * @MockBean FirebaseAuth được inject vào AuthService qua setter @Autowired(required=false).
+     */
+    @Test
+    void oauthWithNewUser_createsUserAndReturnsIsNewUserTrue() throws Exception {
+        FirebaseToken mockToken = mockFirebaseToken(
+                "google-uid-newuser", "newuser@gmail.com", "New User", "https://photo.url/pic.jpg");
+        when(firebaseAuth.verifyIdToken("valid-firebase-token")).thenReturn(mockToken);
+
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "valid-firebase-token"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accessToken").isNotEmpty())
+                .andExpect(jsonPath("$.refreshToken").isNotEmpty())
+                .andExpect(jsonPath("$.isNewUser").value(true))
+                .andExpect(jsonPath("$.user.email").value("newuser@gmail.com"))
+                .andExpect(jsonPath("$.user.avatarUrl").value("https://photo.url/pic.jpg"));
+    }
+
+    /**
+     * Test 25: OAuth với user đã có provider_uid → returning user, isNewUser=false.
+     */
+    @Test
+    void oauthWithReturningUser_returnsIsNewUserFalse() throws Exception {
+        FirebaseToken mockToken = mockFirebaseToken(
+                "google-uid-returning", "returning@gmail.com", "Returning User", null);
+        when(firebaseAuth.verifyIdToken("valid-firebase-token-2")).thenReturn(mockToken);
+
+        // First call: tạo user mới
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "valid-firebase-token-2"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.isNewUser").value(true));
+
+        // Second call với cùng provider_uid: returning user
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "valid-firebase-token-2"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.isNewUser").value(false))
+                .andExpect(jsonPath("$.user.email").value("returning@gmail.com"));
+    }
+
+    /**
+     * Test 26: OAuth auto-link — email tồn tại (đăng ký bằng password trước) → auto-link, isNewUser=false.
+     */
+    @Test
+    void oauthAutoLinkExistingEmailUser_linksAndReturnsIsNewUserFalse() throws Exception {
+        // Đăng ký bằng password trước
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "email": "autolink@example.com",
+                                  "username": "autolink_user",
+                                  "password": "Password123",
+                                  "fullName": "Auto Link User"
+                                }
+                                """))
+                .andExpect(status().isOk());
+
+        // OAuth với cùng email nhưng provider_uid mới (Google link)
+        FirebaseToken mockToken = mockFirebaseToken(
+                "google-uid-autolink", "autolink@example.com", "Auto Link User", null);
+        when(firebaseAuth.verifyIdToken("valid-firebase-token-autolink")).thenReturn(mockToken);
+
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "valid-firebase-token-autolink"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.isNewUser").value(false))
+                .andExpect(jsonPath("$.user.email").value("autolink@example.com"))
+                .andExpect(jsonPath("$.user.username").value("autolink_user"));
+    }
+
+    /**
+     * Test 27: OAuth với Firebase token không hợp lệ → 401 AUTH_FIREBASE_TOKEN_INVALID.
+     */
+    @Test
+    void oauthWithInvalidToken_returns401() throws Exception {
+        when(firebaseAuth.verifyIdToken("invalid-firebase-token"))
+                .thenThrow(new com.google.firebase.auth.FirebaseAuthException(
+                        com.google.firebase.ErrorCode.INVALID_ARGUMENT, "Invalid token", null, null, null));
+
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "invalid-firebase-token"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("AUTH_FIREBASE_TOKEN_INVALID"));
+    }
+
+    /**
+     * Test 28: OAuth với Firebase token verify thành công nhưng email null → 401.
+     */
+    @Test
+    void oauthWithMissingEmail_returns401() throws Exception {
+        FirebaseToken mockToken = mockFirebaseToken("google-uid-noemail", null, "No Email User", null);
+        when(firebaseAuth.verifyIdToken("token-no-email")).thenReturn(mockToken);
+
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": "token-no-email"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("AUTH_FIREBASE_TOKEN_INVALID"));
+    }
+
+    /**
+     * Test 29: OAuth với body thiếu firebaseIdToken (empty string) → 400 VALIDATION_FAILED.
+     */
+    @Test
+    void oauthWithMissingBody_returns400() throws Exception {
+        mockMvc.perform(post("/api/auth/oauth")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firebaseIdToken": ""}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+    }
+
+    // =========================================================================
+    // Logout tests (Tests 30-33)
+    // =========================================================================
+
+    /**
+     * Helper: đăng ký và trả về cả accessToken và refreshToken.
+     */
+    private record TokenPair(String accessToken, String refreshToken) {}
+
+    private TokenPair registerAndGetTokens(String email, String username) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "email": "%s",
+                                  "username": "%s",
+                                  "password": "Password123",
+                                  "fullName": "Test User"
+                                }
+                                """.formatted(email, username)))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        var tree = objectMapper.readTree(result.getResponse().getContentAsString());
+        return new TokenPair(
+                tree.get("accessToken").asText(),
+                tree.get("refreshToken").asText()
+        );
+    }
+
+    /**
+     * Test 30: Logout happy path — trả về 200 với message.
+     */
+    @Test
+    void logoutHappyPath_returns200() throws Exception {
+        TokenPair tokens = registerAndGetTokens("logout_happy@example.com", "logout_happy");
+
+        mockMvc.perform(post("/api/auth/logout")
+                        .header("Authorization", "Bearer " + tokens.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "%s"}
+                                """.formatted(tokens.refreshToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.message").value("Đăng xuất thành công"));
+    }
+
+    /**
+     * Test 31: Logout với refreshToken malformed — vẫn trả 200 (best-effort).
+     * Logout không fail dù refreshToken không parse được.
+     */
+    @Test
+    void logoutWithInvalidRefreshToken_stillReturns200() throws Exception {
+        TokenPair tokens = registerAndGetTokens("logout_badrefresh@example.com", "logout_badrefresh");
+
+        mockMvc.perform(post("/api/auth/logout")
+                        .header("Authorization", "Bearer " + tokens.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "this.is.not.a.valid.refresh.token"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.message").value("Đăng xuất thành công"));
+    }
+
+    /**
+     * Test 32: Logout không có Authorization header → 401 AUTH_REQUIRED.
+     */
+    @Test
+    void logoutWithoutAuth_returns401() throws Exception {
+        mockMvc.perform(post("/api/auth/logout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "some-refresh-token"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("AUTH_REQUIRED"));
+    }
+
+    /**
+     * Test 33: Sau khi logout, access token bị blacklist → 401 khi dùng lại để gọi protected endpoint.
+     * Verify: JwtAuthFilter check "jwt:blacklist:{jti}" và treat token như expired → 401.
+     * Setup: mock Redis để hasKey trả true sau logout → filter block.
+     */
+    @Test
+    void logoutThenUseOldAccessToken_returns401() throws Exception {
+        TokenPair tokens = registerAndGetTokens("logout_blacklist@example.com", "logout_blacklist");
+
+        // Lấy jti của access token
+        String jti = jwtTokenProvider.getJtiFromToken(tokens.accessToken());
+        String blacklistKey = "jwt:blacklist:" + jti;
+
+        // Trước logout: hasKey trả false (token chưa blacklisted)
+        when(redisTemplate.hasKey(eq(blacklistKey))).thenReturn(false);
+
+        // Logout thành công
+        mockMvc.perform(post("/api/auth/logout")
+                        .header("Authorization", "Bearer " + tokens.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "%s"}
+                                """.formatted(tokens.refreshToken())))
+                .andExpect(status().isOk());
+
+        // Sau logout: mock Redis trả true cho blacklist key
+        when(redisTemplate.hasKey(eq(blacklistKey))).thenReturn(true);
+
+        // Dùng access token cũ cho protected endpoint (logout itself) → phải 401
+        // /api/auth/logout cần auth, nên dùng blacklisted token sẽ bị chặn
+        mockMvc.perform(post("/api/auth/logout")
+                        .header("Authorization", "Bearer " + tokens.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "some-token"}
+                                """))
+                .andExpect(status().isUnauthorized());
     }
 }

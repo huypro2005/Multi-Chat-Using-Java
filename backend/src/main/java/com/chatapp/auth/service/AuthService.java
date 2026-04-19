@@ -4,18 +4,25 @@ import com.chatapp.auth.dto.request.LoginRequest;
 import com.chatapp.auth.dto.request.RefreshRequest;
 import com.chatapp.auth.dto.request.RegisterRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
+import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.dto.response.UserDto;
 import com.chatapp.exception.AppException;
 import com.chatapp.security.JwtTokenProvider;
 import com.chatapp.security.JwtTokenProvider.TokenValidationResult;
 import com.chatapp.user.entity.User;
+import com.chatapp.user.entity.UserAuthProvider;
 import com.chatapp.user.enums.AuthMethod;
+import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseAuthException;
+import com.google.firebase.auth.FirebaseToken;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.lang.Nullable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,9 +30,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
-import java.util.Base64;
+import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
+import java.util.Base64;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -40,13 +48,39 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AuthService {
 
     private final UserRepository userRepository;
+    private final UserAuthProviderRepository userAuthProviderRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider jwtTokenProvider;
     private final StringRedisTemplate redisTemplate;
+
+    /**
+     * FirebaseAuth bean — nullable vì FirebaseConfig có thể không init SDK
+     * (khi FIREBASE_CREDENTIALS_PATH không set hoặc file không tồn tại).
+     * @Autowired(required=false) để Spring không fail khi bean FirebaseAuth không có.
+     */
+    @Nullable
+    private FirebaseAuth firebaseAuth;
+
+    public AuthService(
+            UserRepository userRepository,
+            UserAuthProviderRepository userAuthProviderRepository,
+            PasswordEncoder passwordEncoder,
+            JwtTokenProvider jwtTokenProvider,
+            StringRedisTemplate redisTemplate) {
+        this.userRepository = userRepository;
+        this.userAuthProviderRepository = userAuthProviderRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtTokenProvider = jwtTokenProvider;
+        this.redisTemplate = redisTemplate;
+    }
+
+    @Autowired(required = false)
+    public void setFirebaseAuth(FirebaseAuth firebaseAuth) {
+        this.firebaseAuth = firebaseAuth;
+    }
 
     /** TTL cho rate limit windows: 15 phút = 900 giây. */
     private static final long RATE_LIMIT_TTL_SECONDS = 900L;
@@ -130,8 +164,9 @@ public class AuthService {
         // 2. Find user — KHÔNG tiết lộ user có tồn tại hay không
         User user = userRepository.findByUsername(req.username()).orElse(null);
 
-        if (user == null || !passwordEncoder.matches(req.password(), user.getPasswordHash())) {
-            // Tăng fail counter khi user not found hoặc wrong password
+        // OAuth-only users có passwordHash = null — treat như wrong password (không leak)
+        if (user == null || user.getPasswordHash() == null
+                || !passwordEncoder.matches(req.password(), user.getPasswordHash())) {
             incrementLoginFailCounter(clientIp);
             throw new AppException(HttpStatus.UNAUTHORIZED, "AUTH_INVALID_CREDENTIALS",
                     "Tên đăng nhập hoặc mật khẩu không đúng");
@@ -248,6 +283,214 @@ public class AuthService {
         // h. Generate new tokens (buildAuthResponse tự lưu refresh token mới vào Redis)
         log.debug("Refresh token rotated for userId={}", userId);
         return buildAuthResponse(user, AuthMethod.PASSWORD);
+    }
+
+    // -------------------------------------------------------------------------
+    // OAuth (Google via Firebase)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Đăng nhập / đăng ký bằng Google OAuth thông qua Firebase ID Token.
+     *
+     * Auto-link logic (theo contract):
+     * 1. Tìm theo provider_uid → returning OAuth user → phát token.
+     * 2. Tìm theo email → user đã đăng ký password → auto-link provider, phát token.
+     * 3. Không tìm thấy → tạo user mới, isNewUser = true.
+     *
+     * @param firebaseIdToken token JWT phát bởi Firebase Auth phía client
+     * @param clientIp        IP của client để rate limit (không implement limit trong method này)
+     * @return OAuthResponse kèm isNewUser flag
+     */
+    @Transactional
+    public OAuthResponse oauth(String firebaseIdToken, String clientIp) {
+        // 1. Verify Firebase token
+        if (firebaseAuth == null) {
+            throw new AppException(HttpStatus.SERVICE_UNAVAILABLE, "AUTH_FIREBASE_UNAVAILABLE",
+                    "Firebase Admin SDK chưa được khởi tạo — OAuth endpoint không khả dụng");
+        }
+
+        FirebaseToken firebaseToken;
+        try {
+            firebaseToken = firebaseAuth.verifyIdToken(firebaseIdToken);
+        } catch (FirebaseAuthException e) {
+            String code = e.getAuthErrorCode() != null ? e.getAuthErrorCode().name() : "";
+            if (code.contains("EXPIRED") || code.contains("TOKEN_EXPIRED")) {
+                throw new AppException(HttpStatus.UNAUTHORIZED, "AUTH_FIREBASE_TOKEN_INVALID",
+                        "Firebase token đã hết hạn");
+            }
+            throw new AppException(HttpStatus.UNAUTHORIZED, "AUTH_FIREBASE_TOKEN_INVALID",
+                    "Firebase token không hợp lệ");
+        }
+
+        // 2. Extract claims
+        String providerUid = firebaseToken.getUid();
+        String email = firebaseToken.getEmail();
+        String displayName = firebaseToken.getName();
+        String photoUrl = firebaseToken.getPicture();
+
+        if (email == null || email.isBlank()) {
+            throw new AppException(HttpStatus.UNAUTHORIZED, "AUTH_FIREBASE_TOKEN_INVALID",
+                    "Không thể xác minh email từ Firebase token");
+        }
+
+        // 3. Check by provider_uid (returning OAuth user)
+        Optional<UserAuthProvider> existingProvider =
+                userAuthProviderRepository.findByProviderAndProviderUid("google", providerUid);
+        if (existingProvider.isPresent()) {
+            User user = existingProvider.get().getUser();
+            if (!user.isActive()) {
+                throw new AppException(HttpStatus.FORBIDDEN, "AUTH_ACCOUNT_LOCKED",
+                        "Tài khoản bị khóa bởi admin");
+            }
+            AuthResponse authResp = buildAuthResponse(user, AuthMethod.OAUTH2_GOOGLE);
+            return toOAuthResponse(authResp, false);
+        }
+
+        // 4. Check by email (auto-link existing password user)
+        Optional<User> existingUser = userRepository.findByEmail(email);
+        if (existingUser.isPresent()) {
+            User user = existingUser.get();
+            if (!user.isActive()) {
+                throw new AppException(HttpStatus.FORBIDDEN, "AUTH_ACCOUNT_LOCKED",
+                        "Tài khoản bị khóa bởi admin");
+            }
+            // Auto-link Google provider
+            UserAuthProvider newProvider = UserAuthProvider.builder()
+                    .user(user)
+                    .provider("google")
+                    .providerUid(providerUid)
+                    .build();
+            userAuthProviderRepository.save(newProvider);
+            log.info("[OAuth] Auto-linked Google provider to existing userId={}", user.getId());
+            AuthResponse authResp = buildAuthResponse(user, AuthMethod.OAUTH2_GOOGLE);
+            return toOAuthResponse(authResp, false);
+        }
+
+        // 5. Create new user
+        String username = generateUniqueUsername(email, displayName);
+        User newUser = User.builder()
+                .email(email)
+                .username(username)
+                .fullName(displayName != null && !displayName.isBlank()
+                        ? displayName : email.split("@")[0])
+                .avatarUrl(photoUrl)
+                .status("active")
+                .build();
+        newUser = userRepository.save(newUser);
+
+        UserAuthProvider provider = UserAuthProvider.builder()
+                .user(newUser)
+                .provider("google")
+                .providerUid(providerUid)
+                .build();
+        userAuthProviderRepository.save(provider);
+
+        log.info("[OAuth] Created new user userId={}, username={}", newUser.getId(), newUser.getUsername());
+        AuthResponse authResp = buildAuthResponse(newUser, AuthMethod.OAUTH2_GOOGLE);
+        return toOAuthResponse(authResp, true);
+    }
+
+    /**
+     * Convert AuthResponse → OAuthResponse với isNewUser flag.
+     */
+    private OAuthResponse toOAuthResponse(AuthResponse base, boolean isNewUser) {
+        return new OAuthResponse(
+                base.accessToken(),
+                base.refreshToken(),
+                base.tokenType(),
+                base.expiresIn(),
+                isNewUser,
+                base.user()
+        );
+    }
+
+    /**
+     * Tạo username unique từ email prefix.
+     * - Sanitize: chỉ giữ [a-z0-9_], chuyển về lowercase.
+     * - Đảm bảo không bắt đầu bằng số (prefix "_").
+     * - Thử tối đa 5 lần với suffix ngẫu nhiên 4 số, sau đó fallback UUID.
+     */
+    private String generateUniqueUsername(String email, String displayName) {
+        String base = email.split("@")[0]
+                .replaceAll("[^a-zA-Z0-9_]", "_")
+                .toLowerCase();
+
+        // Đảm bảo đủ dài tối thiểu
+        if (base.length() < 3) {
+            base = base + "_usr";
+        }
+        // Cắt tối đa 40 ký tự (để chừa chỗ cho suffix)
+        base = base.substring(0, Math.min(base.length(), 40));
+        // Đảm bảo không bắt đầu bằng số
+        if (!base.isEmpty() && Character.isDigit(base.charAt(0))) {
+            base = "_" + base;
+        }
+
+        // Thử không suffix trước
+        if (!userRepository.existsByUsername(base)) {
+            return base;
+        }
+        // Thử 4 lần với suffix ngẫu nhiên
+        Random random = new Random();
+        for (int i = 0; i < 4; i++) {
+            String candidate = base + "_" + (1000 + random.nextInt(9000));
+            if (!userRepository.existsByUsername(candidate)) {
+                return candidate;
+            }
+        }
+        // Ultimate fallback: UUID suffix 8 ký tự (cực kỳ hiếm xảy ra)
+        return base + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    }
+
+    // -------------------------------------------------------------------------
+    // Logout
+    // -------------------------------------------------------------------------
+
+    /**
+     * Đăng xuất phiên hiện tại — best-effort delete refresh token + blacklist access token.
+     *
+     * Không ném exception nếu refresh token không hợp lệ/không tồn tại trong Redis
+     * — logout luôn trả 200 miễn là access token valid (đã verify ở filter trước đó).
+     *
+     * Side effects:
+     * 1. DELETE "refresh:{userId}:{refreshJti}" khỏi Redis.
+     * 2. SET "jwt:blacklist:{accessJti}" "" EX {remaining_ttl} — chặn tái sử dụng access token.
+     *
+     * @param rawRefreshToken raw refresh token từ client body
+     * @param userId          userId từ security context (đã verify JWT)
+     * @param accessTokenJti  jti của access token đang dùng
+     * @param accessTokenRemainingMs thời gian còn lại của access token tính bằng ms
+     */
+    public void logout(String rawRefreshToken, UUID userId, String accessTokenJti, long accessTokenRemainingMs) {
+        // 1. Best-effort: delete refresh token từ Redis
+        try {
+            TokenValidationResult result = jwtTokenProvider.validateTokenDetailed(rawRefreshToken);
+            if (result != TokenValidationResult.INVALID) {
+                String jti = jwtTokenProvider.getJtiFromToken(rawRefreshToken);
+                String key = "refresh:" + userId + ":" + jti;
+                redisTemplate.delete(key);
+                log.debug("[Logout] Deleted refresh token key={} for userId={}", key, userId);
+            } else {
+                log.warn("[Logout] Refresh token invalid/malformed for userId={} — skipping Redis delete", userId);
+            }
+        } catch (Exception e) {
+            // Best-effort: không block logout nếu refresh token operation fail
+            log.warn("[Logout] Could not delete refresh token for userId={}: {}", userId, e.getMessage());
+        }
+
+        // 2. Blacklist access token (nếu còn thời gian sống)
+        if (accessTokenRemainingMs > 0) {
+            long ttlSeconds = accessTokenRemainingMs / 1000;
+            if (ttlSeconds > 0) {
+                redisTemplate.opsForValue().set(
+                        "jwt:blacklist:" + accessTokenJti,
+                        "",
+                        ttlSeconds,
+                        TimeUnit.SECONDS
+                );
+                log.debug("[Logout] Blacklisted access token jti={} TTL={}s", accessTokenJti, ttlSeconds);
+            }
+        }
     }
 
     /**

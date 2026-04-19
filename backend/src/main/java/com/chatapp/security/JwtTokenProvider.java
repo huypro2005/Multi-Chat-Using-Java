@@ -187,6 +187,16 @@ public class JwtTokenProvider {
      * Fallback về PASSWORD nếu claim không tồn tại hoặc giá trị không khớp enum nào.
      * Dùng ở Tuần 2 khi cần phân biệt flow OAuth vs password trong các endpoint bảo vệ.
      */
+    /**
+     * Tính số milliseconds còn lại trước khi access token hết hạn.
+     * Dùng trong logout để set TTL blacklist Redis đúng bằng remaining TTL của token.
+     * Trả về số âm nếu token đã expired.
+     */
+    public long getRemainingMs(String token) {
+        Date exp = getClaims(token).getExpiration();
+        return exp.getTime() - System.currentTimeMillis();
+    }
+
     public AuthMethod getAuthMethodFromToken(String token) {
         String value = getClaims(token).get("auth_method", String.class);
         if (value != null) {

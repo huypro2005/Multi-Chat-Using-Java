@@ -152,8 +152,32 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### Firebase Admin SDK + OAuth (W2D4)
+- FirebaseConfig: @PostConstruct init, kiểm tra file tồn tại trước, log WARN nếu thiếu credentials. Expose `FirebaseAuth` làm `@Bean` (trả null nếu chưa init).
+- AuthService inject FirebaseAuth qua setter `@Autowired(required=false)` — KHÔNG dùng `FirebaseAuth.getInstance()` trực tiếp (không testable). Nếu firebaseAuth null → throw 503 AUTH_FIREBASE_UNAVAILABLE.
+- Error code OAuth: `AUTH_FIREBASE_TOKEN_INVALID` (cả expired lẫn invalid), `AUTH_FIREBASE_UNAVAILABLE` (SDK chưa init).
+- Auto-link order: provider_uid → email → create new. Check user.isActive() sau mỗi bước tìm thấy.
+- username generation: email prefix → sanitize [^a-z0-9_] → underscore → lowercase → prefix "_" nếu bắt đầu số → thử 4 suffix ngẫu nhiên 4 số → fallback UUID 8 chars.
+- Test mock: `@MockBean FirebaseAuth` — Spring inject vào AuthService qua setter. KHÔNG cần mockStatic.
+
+### Logout Pattern (W2D4)
+- Best-effort: delete refresh token Redis, không fail nếu token invalid.
+- Blacklist access token: `SET 'jwt:blacklist:{jti}' '' EX {remaining_ttl_seconds}`.
+- JwtAuthFilter check: `redisTemplate.hasKey('jwt:blacklist:{jti}')` NGAY SAU khi validate VALID — nếu true, set `jwt_expired=true` attribute và skip authentication.
+- Fail-open: nếu Redis unavailable khi check blacklist → log warn, tiếp tục xử lý (không block user vì Redis down).
+- SecurityConfig: `/api/auth/logout` KHÔNG trong permitAll whitelist — cần JWT valid.
+- Endpoint whitelist đầy đủ: /api/auth/register, /api/auth/login, /api/auth/oauth, /api/auth/refresh, /api/health, /actuator/health.
+
+### OAuthResponse vs AuthResponse
+- AuthResponse: record 5 fields (accessToken, refreshToken, tokenType, expiresIn, user).
+- OAuthResponse: record 6 fields = AuthResponse fields + isNewUser boolean.
+- Dùng toOAuthResponse(AuthResponse, boolean) helper trong AuthService để convert.
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W2D4: Thêm Firebase OAuth pattern, Logout + blacklist, OAuthResponse shape, JwtAuthFilter blacklist check.
 - 2026-04-19 W2D3.5: Thêm Refresh Token Rotation Pattern, constant-time comparison, getClaimsAllowExpired pattern.
 - 2026-04-19 W2D1: Thêm AuthMethod enum pattern (W-BE-3).
 - 2026-04-19 W1 Fix: Thêm JWT Token Validation Pattern (validateTokenDetailed, AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED).

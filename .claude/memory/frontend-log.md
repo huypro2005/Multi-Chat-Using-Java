@@ -5,6 +5,27 @@
 
 ---
 
+## 2026-04-19 (W2D4 Phase B) — Firebase OAuth + Logout wire
+
+### Xong
+- `frontend/.env.local`: Thêm 3 VITE_FIREBASE_* env vars (placeholder, cần thay bằng config thật).
+- `src/lib/firebase.ts`: Tạo mới — lazy init với `getApps().length === 0`, export `auth`, `googleProvider`, `signInWithPopup`.
+- `src/types/auth.ts`: Thêm `OAuthResponse extends AuthResponse { isNewUser: boolean }`.
+- `src/features/auth/api.ts`: Thêm `oauthApi({ firebaseIdToken })` và `logoutApi({ refreshToken })`.
+- `src/features/auth/components/GoogleLoginButton.tsx`: Tạo mới — popup flow, silent cancel, onError callback, Google SVG logo hard-coded.
+- `src/pages/LoginPage.tsx`: Tích hợp GoogleLoginButton sau form, divider "hoặc", onError handler.
+- `src/pages/RegisterPage.tsx`: Tích hợp GoogleLoginButton sau form, divider "hoặc", onError handler.
+- `src/pages/HomePage.tsx`: Wire handleLogout thật — logoutApi best-effort, clearAuth + navigate('/login') trong finally. Thêm ToastContainer.
+- `npm run build`: 0 error — PASS.
+- `npm run lint`: 0 error — PASS.
+
+### Lưu ý
+- Firebase KHÔNG crash khi env placeholder — chỉ fail lúc runtime khi user click Google button.
+- `OAuthResponse` structural subtype của `authStore.AuthResponse` → TypeScript chấp nhận `setAuth(oauthResponse)` không cần cast.
+- W-C-3 logout RESOLVED.
+
+---
+
 ## 2026-04-19 (W2D3 Phase C) — Wire Login + Register với API thật
 
 ### Xong
