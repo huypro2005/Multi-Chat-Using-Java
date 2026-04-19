@@ -12,10 +12,12 @@
 *(Điền khi team chốt một lựa chọn quan trọng. Ghi ngắn gọn: quyết định là gì, lý do chính, tuần đã chốt.)*
 
 ### Security
-- (chưa chốt)
+- SecurityConfig dùng lambda DSL (Spring Security 6), KHÔNG dùng WebSecurityConfigurerAdapter. Tuần 1.
+- Tạm thời permitAll cho đến Ngày 3 khi implement JWT filter.
 
 ### Database
-- (chưa chốt)
+- ddl-auto: validate — Hibernate KHÔNG tự alter schema. Mọi thay đổi qua Flyway migration. Tuần 1.
+- JAVA_HOME phải trỏ đúng vào jdk-21.0.10 mới chạy được mvn.
 
 ### WebSocket / STOMP
 - (chưa chốt)
@@ -51,7 +53,10 @@
 
 | Library | Version | Lý do chọn |
 |---------|---------|------------|
-| (chưa có) | | |
+| spring-boot-starter-parent | 3.4.4 | Latest stable Spring Boot 3.x tại thời điểm khởi tạo (Tuần 1) |
+| jjwt-api/impl/jackson | 0.12.6 | Latest stable jjwt 0.12.x, API mới dùng builder pattern rõ ràng |
+| firebase-admin | 9.4.1 | Latest stable 9.x, verify Google OAuth token |
+| flyway-core + flyway-database-postgresql | BOM managed | Cần cả 2 artifact cho PostgreSQL support trong Flyway 10+ |
 
 ---
 

@@ -1,0 +1,33 @@
+# Environment & secrets
+**/.env
+**/.env.local
+.env.local
+.env.*.local
+*.json.key
+chat-app-a34c2-firebase-adminsdk-fbsvc-2ce6b6fe9b.json
+
+# Java / Maven
+backend/target/
+backend/.mvn/
+*.class
+*.jar
+!*-sources.jar
+
+# Node / npm
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker local state
+docker-data/

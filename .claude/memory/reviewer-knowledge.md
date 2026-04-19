@@ -22,10 +22,19 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.1 (skeleton, chưa có endpoint)
+- **API_CONTRACT.md**: v0.2-auth (5 Auth endpoints: register, login, oauth, refresh, logout — chốt 2026-04-19)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
+
+## Auth contract — quyết định thiết kế đã chốt
+
+- **Refresh token rotation**: mỗi lần `/refresh` phát token mới, invalidate token cũ trong Redis. BE phải implement atomic check-and-rotate.
+- **Rate limit login**: chỉ tính lần thất bại (sai credentials), không tính thành công.
+- **User enumeration protection**: `/login` trả `AUTH_INVALID_CREDENTIALS` cho cả sai username lẫn sai password, cùng 1 message.
+- **OAuth auto-link**: nếu email từ Firebase đã có trong `users` table → link provider tự động, không tạo user mới. Thứ tự kiểm tra: `user_auth_providers` (by googleUid) → `users` (by email) → tạo mới.
+- **Logout yêu cầu refreshToken trong body**: để server xóa đúng token khỏi Redis (single-device logout). Logout all devices là endpoint riêng, ngoài scope tuần 1.
+- **isNewUser field**: `/oauth` response thêm field `isNewUser: boolean` ngoài token shape chuẩn — đây là exception có documented intent, không phải contract drift.
 
 ---
 

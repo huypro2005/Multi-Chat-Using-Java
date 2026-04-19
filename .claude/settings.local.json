@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(java -version)",
+      "Bash(mkdir -p \"D:/CodeMonHoc/SE330/chat-app/frontend/src/components\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/hooks\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/stores\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/services\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/types\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/lib\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/pages\")",
+      "Bash(touch \"D:/CodeMonHoc/SE330/chat-app/frontend/src/components/.gitkeep\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/hooks/.gitkeep\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/stores/.gitkeep\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/services/.gitkeep\" \"D:/CodeMonHoc/SE330/chat-app/frontend/src/types/.gitkeep\")",
+      "Bash(export JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\")",
+      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/java/com/chatapp/controller\")",
+      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/java/com/chatapp/config\")",
+      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/resources/db/migration\")",
+      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/test/java/com/chatapp\")"
+    ]
+  }
+}
