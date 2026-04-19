@@ -28,7 +28,13 @@
       "Bash(mkdir -p /d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/exception)",
       "Bash(git tag *)",
       "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn test -Dtest=AuthControllerTest -q)",
-      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn test -Dtest=AuthControllerTest)"
+      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn test -Dtest=AuthControllerTest)",
+      "Bash(mkdir -p \"/d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/conversation/enums\")",
+      "Bash(mkdir -p \"/d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/conversation/entity\")",
+      "Bash(mkdir -p \"/d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/conversation/repository\")",
+      "Bash(echo \"EXIT_CODE: $?\")",
+      "Bash(export DB_PASSWORD=123456 DB_HOST=localhost DB_PORT=5432 DB_NAME=chatapp DB_USER=postgres)",
+      "Bash(export DB_PASSWORD=123456 DB_HOST=localhost DB_PORT=5432 DB_NAME=chatapp DB_USER=postgres REDIS_HOST=localhost REDIS_PORT=6379 JWT_SECRET=\"test-secret-key-for-testing-purposes-only-32chars\" FIREBASE_CREDENTIALS_PATH=/dev/null)"
     ]
   }
 }
