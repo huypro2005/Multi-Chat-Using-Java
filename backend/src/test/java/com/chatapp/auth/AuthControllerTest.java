@@ -1,8 +1,8 @@
 package com.chatapp.auth;
 
-import com.chatapp.repository.UserAuthProviderRepository;
-import com.chatapp.repository.UserRepository;
 import com.chatapp.security.JwtTokenProvider;
+import com.chatapp.user.repository.UserAuthProviderRepository;
+import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseToken;

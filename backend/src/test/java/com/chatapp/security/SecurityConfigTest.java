@@ -10,7 +10,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
-import com.chatapp.model.entity.User;
+import com.chatapp.user.entity.User;
 
 import java.util.UUID;
 

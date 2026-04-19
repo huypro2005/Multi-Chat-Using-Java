@@ -1,7 +1,8 @@
 package com.chatapp.conversation.entity;
 
 import com.chatapp.conversation.enums.MemberRole;
-import com.chatapp.model.entity.User;
+import com.chatapp.user.entity.User;
+
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -32,8 +33,7 @@ import java.util.UUID;
 public class ConversationMember {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(name = "id", insertable = false, updatable = false)
+    @Column(name = "id", updatable = false, nullable = false)
     private UUID id;
 
     /**
@@ -78,6 +78,7 @@ public class ConversationMember {
 
     @PrePersist
     protected void onCreate() {
+        if (id == null) id = UUID.randomUUID();
         if (joinedAt == null) joinedAt = OffsetDateTime.now();
     }
 

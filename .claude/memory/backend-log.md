@@ -32,6 +32,72 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (Tuần 3, Ngày 2 — fix) — GROUP conversation validation hardening
+
+### Xong
+- [BE][W3-D2-fix][2026-04-19] fix: GROUP validation — dedupe memberIds, reject caller-in-members, max 50 members
+  - `ConversationService.createGroup`: thêm 3 guard: (1) caller-in-memberIds → 400 VALIDATION_FAILED, (2) dedupe via `.distinct()`, (3) max 49 other members → 400 VALIDATION_FAILED.
+  - `ConversationControllerTest`: thêm T07b (caller in memberIds), T07c (dedup still valid), T07d (dedup too few unique). Tổng: 68 tests, BUILD SUCCESS.
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- Validation thứ tự: null-check → caller-check → distinct → size-check-min → size-check-max → existence-check. Thứ tự quan trọng để error message rõ ràng.
+
+## 2026-04-19 (W3-D2) — feat: 4 conversation endpoints + 15 tests, W3-BE-1 verified/fixed
+
+### Xong
+- `AppException`: thêm constructor `(status, errorCode, message, details)` + `getDetails()` field.
+- `GlobalExceptionHandler`: truyền `ex.getDetails()` vào `ErrorResponse.of()` để serialize details.
+- `Conversation` + `ConversationMember` entities: W3-BE-1 fix — xóa `@GeneratedValue`, thêm `@PrePersist if (id==null) id = UUID.randomUUID()`.
+- `ConversationRepository`: thêm `findExistingOneOnOne(String, String)` native SQL double-join, `findConversationsByUserPaginated(String, int, int)`, `countConversationsByUser(String)`. Cập nhật JOIN FETCH query để fetch `m.user`.
+- `ConversationMemberRepository`: thêm `findByConversation_IdAndUser_Id(UUID, UUID)`.
+- `UserRepository`: thêm `searchUsers(String q, UUID currentUserId, Pageable)` JPQL.
+- DTOs package `com.chatapp.conversation.dto`: `CreateConversationRequest`, `MemberDto`, `CreatedByDto`, `ConversationDto`, `ConversationSummaryDto`, `ConversationListResponse`, `UserSearchDto`.
+- `ConversationService`: createOneOnOne (check existing + 409), createGroup, listConversations (native query + batch load), getConversation (anti-enumeration 404), searchUsers.
+- `ConversationController` (`/api/conversations`): POST (201), GET (?page&size), GET /{id}.
+- `UserController` (`/api/users`): GET /search?q=&limit=.
+- `ConversationControllerTest`: 15 tests — W3-BE-1 + T01-T14, tất cả PASS.
+- `mvn test`: 65 tests, 0 failures, BUILD SUCCESS.
+
+### Đang dở
+- WebSocket / messaging (tuần 4).
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- H2 native query UUID pitfall: trả `byte[]` thay vì `UUID`/`String` → fix bằng `CAST(c.id AS VARCHAR)` trong SELECT và `CAST(:param AS UUID)` trong WHERE, dùng `String` parameter thay vì `UUID`.
+- Flush+clear EntityManager pattern: cần thiết trong @Transactional sau save khi muốn reload bằng custom JPQL — tránh stale 1st-level cache trả empty collection.
+- ConversationListResponse shape theo contract: `content/page/size/totalElements/totalPages` (không phải `items/total/pageSize`).
+
+---
+
+## 2026-04-19 (W3-BE-3 fix) — fix: thêm pgcrypto extension vào V2 migration
+
+### Xong
+- `V2__create_users_and_auth_providers.sql`: thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu file.
+- `application.yml`: thêm `repair-on-migrate: true` vào Flyway config — developer có DB cũ tự repair checksum khi start app.
+- `docs/WARNINGS.md`: thêm mục "Resolved", ghi W3-BE-3 RESOLVED với giải thích fix.
+- `mvn test`: 50/50 tests pass, BUILD SUCCESS.
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `flyway:repair` Maven plugin cần `-Dflyway.url/-Dflyway.user/-Dflyway.password` riêng (không đọc application.yml). Dùng `repair-on-migrate: true` trong Spring Boot config thay thế — Spring Boot tự pass connection đến Flyway.
+- Test profile (`application-test.yml`) có `flyway.enabled: false` → test không validate Flyway checksum. Verify thực tế bằng `mvn test` pass + kiểm tra logic V2 file.
+- Developer mới fresh DB: `CREATE EXTENSION IF NOT EXISTS pgcrypto` là idempotent — an toàn dù extension đã có hoặc chưa.
+
+---
+
 ## 2026-04-19 (W3-D1) — feat: V3 migration conversations + conversation_members, entities, repositories
 
 ### Xong

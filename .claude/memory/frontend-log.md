@@ -5,6 +5,28 @@
 
 ---
 
+[FE][W3-D2-fix][2026-04-19] fix: 409 error field name (code→error), ConversationDto remove server-only fields, add getConversationDisplayName helper
+- Sửa: src/features/conversations/api.ts — 409 catch dùng `err.response.data.error` (KHÔNG phải `.code`) khớp BE ErrorResponse record
+- Sửa: src/types/conversation.ts — ConversationDto xóa 4 fields không có trong BE (displayName, displayAvatarUrl, unreadCount, mutedUntil); thêm createdBy: CreatedByDto | null; thêm CreatedByDto interface
+- Tạo: src/types/api.ts — ApiErrorBody interface (error, message, timestamp, details?) làm common error shape
+- Thêm: getConversationDisplayName(conv, currentUserId) helper trong conversation.ts — derive display name ở FE runtime
+- build: 0 TypeScript error | lint: 0 ESLint error
+
+[FE][W3-D2][2026-04-19] feat: conversation types, api functions, React Query hooks scaffold, useDebounce, queryKeys
+- Tạo: src/types/conversation.ts (ConversationType, MemberRole, MemberDto, ConversationDto, ConversationSummaryDto, PageResponse, CreateConversationRequest, UserSearchDto)
+- Tạo: src/features/conversations/api.ts (createConversation, listConversations, getConversation)
+- Tạo: src/features/conversations/queryKeys.ts (conversationKeys factory, userKeys)
+- Tạo: src/features/conversations/hooks.ts (useConversations, useConversation, useCreateConversation)
+- Tạo: src/features/users/api.ts (searchUsers)
+- Tạo: src/features/users/hooks.ts (useUserSearch với debounce)
+- Tạo: src/hooks/useDebounce.ts
+- Tạo: src/lib/queryClient.ts — extract từ main.tsx
+- Sửa: src/main.tsx — import queryClient từ lib/queryClient
+- Pitfall: TypeScript erasableSyntaxOnly không cho phép `enum` — dùng const object + type pattern
+- build: 0 TypeScript error | lint: 0 ESLint error
+
+---
+
 ## 2026-04-19 (W3D1) — ProtectedRoute wired + ConversationsLayout skeleton
 
 ### Xong

@@ -30,7 +30,7 @@ public class GlobalExceptionHandler {
         log.debug("AppException: {} - {}", ex.getErrorCode(), ex.getMessage());
         return ResponseEntity
                 .status(ex.getStatus())
-                .body(ErrorResponse.of(ex.getErrorCode(), ex.getMessage()));
+                .body(ErrorResponse.of(ex.getErrorCode(), ex.getMessage(), ex.getDetails()));
     }
 
     /**

@@ -1,7 +1,8 @@
 package com.chatapp.conversation.entity;
 
 import com.chatapp.conversation.enums.ConversationType;
-import com.chatapp.model.entity.User;
+import com.chatapp.user.entity.User;
+
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -29,8 +30,7 @@ import java.util.UUID;
 public class Conversation {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(name = "id", insertable = false, updatable = false)
+    @Column(name = "id", updatable = false, nullable = false)
     private UUID id;
 
     /**
@@ -84,6 +84,7 @@ public class Conversation {
 
     @PrePersist
     protected void onCreate() {
+        if (id == null) id = UUID.randomUUID();
         OffsetDateTime now = OffsetDateTime.now();
         if (createdAt == null) createdAt = now;
         if (updatedAt == null) updatedAt = now;

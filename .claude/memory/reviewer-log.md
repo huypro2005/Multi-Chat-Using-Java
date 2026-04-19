@@ -26,6 +26,188 @@
 
 ---
 
+## 2026-04-19 — W3D2 Re-check sau khi BE+FE fix 2 BLOCKING
+
+### Verdict
+✅ APPROVE
+
+Re-check 3 items sau fix round: (1) FE `api.ts:32` đã đổi sang `.error === 'CONV_ONE_ON_ONE_EXISTS'` + import `ApiErrorBody` từ `@/types/api` (file mới `types/api.ts` có interface đúng shape BE ErrorResponse). Cast 2 lần `as ApiErrorBody | undefined` hơi dài nhưng acceptable — không drift nữa. (2) FE `types/conversation.ts` `ConversationDto` giờ chỉ còn 8 field (id/type/name/avatarUrl/createdBy/members/createdAt/lastMessageAt) — 4 field Summary-only đã bỏ. Helper `getConversationDisplayName(conv, currentUserId)` derive đúng (GROUP→`conv.name` fallback 'Nhóm không tên'; ONE_ON_ONE→fullName/username của other member). (3) BE `ConversationService.createGroup` có đủ 3 validation: caller-in-memberIds check (line 134), dedupe via `.distinct()` (line 141), max 49 (line 151). 2 BLOCKING từ W3D2 đã RESOLVED. Các warning non-blocking khác (N+1, rate limit TODO, UserController cross-package) giữ nguyên trong WARNINGS.md.
+
+---
+
+## 2026-04-19 — W3D2 Review: BE 4 endpoints (createConversation, list, detail, users.search) + FE API scaffold
+
+### Verdict
+❌ REQUEST CHANGES
+
+Có 1 BLOCKING ở FE sẽ **phá hoàn toàn flow 409 idempotency** + 1 BLOCKING drift types giữa FE và BE response. BE về cơ bản đúng contract, chỉ có vài warning non-blocking. Sau khi FE fix 2 điểm này và chạy type-check thì có thể APPROVE.
+
+### Files reviewed
+- `backend/src/main/java/com/chatapp/conversation/service/ConversationService.java`: mới, 348 dòng. 4 method: createConversation (branch ONE_ON_ONE/GROUP), listConversations (offset pagination + 2-query pattern), getConversation (merge 404 anti-enumeration), searchUsers (min 2 chars, exclude self + non-active).
+- `backend/src/main/java/com/chatapp/conversation/controller/ConversationController.java`: mới, 3 endpoints POST/GET list/GET {id}. `@AuthenticationPrincipal User`. 201 cho POST.
+- `backend/src/main/java/com/chatapp/user/controller/UserController.java`: mới, 1 endpoint GET /api/users/search. Delegate vào ConversationService.searchUsers (gọi chéo package — xem warning).
+- `backend/src/main/java/com/chatapp/conversation/dto/*.java`: 7 DTOs (ConversationDto, ConversationSummaryDto, ConversationListResponse, CreateConversationRequest, CreatedByDto, MemberDto, UserSearchDto).
+- `backend/src/main/java/com/chatapp/conversation/repository/ConversationRepository.java`: thêm 3 native query (findExistingOneOnOne, findConversationsByUserPaginated, countConversationsByUser).
+- `backend/src/main/java/com/chatapp/user/repository/UserRepository.java`: thêm searchUsers @Query LIKE (prefix username + substring fullName).
+- `backend/src/main/java/com/chatapp/conversation/entity/Conversation.java` + `ConversationMember.java`: refactor UUID — **bỏ @GeneratedValue**, chuyển sang @PrePersist set `UUID.randomUUID()` (Option B từ warning W3-BE-1 đã RESOLVED).
+- `backend/src/test/java/com/chatapp/conversation/ConversationControllerTest.java`: mới, 15 test cases (1 W3-BE-1 unit + 14 integration), MockBean Redis + Firebase.
+- `frontend/src/types/conversation.ts`: mới, types cho ConversationDto/Summary/PageResponse/UserSearchDto. Dùng `const object + type` pattern thay vì enum.
+- `frontend/src/features/conversations/api.ts`: mới — createConversation với try/catch 409, listConversations, getConversation.
+- `frontend/src/features/conversations/hooks.ts`: mới — useConversations, useConversation, useCreateConversation.
+- `frontend/src/features/users/api.ts` + `hooks.ts`: mới — searchUsers + useUserSearch với debounce 300ms.
+- `frontend/src/hooks/useDebounce.ts`: mới, useDebounce generic 10 dòng.
+- `frontend/src/lib/queryClient.ts`: mới, QueryClient retry 1 + staleTime 30s.
+
+### Issues found
+
+#### BLOCKING
+
+1. **[FE][BLOCKING] `frontend/src/features/conversations/api.ts:31` — 409 handler đọc sai tên field, idempotency flow sẽ LUÔN throw thay vì return existingConversationId.**
+   - Code hiện: `(err.response.data as { code?: string }).code === 'CONV_ONE_ON_ONE_EXISTS'`.
+   - BE `ErrorResponse` (xem `backend/.../exception/ErrorResponse.java`) có shape `{ error, message, timestamp, details }` — field là **`error`** chứ không phải **`code`**. Đã chốt trong contract đầu file `API_CONTRACT.md` dòng 13-18.
+   - Hệ quả: khi user tạo dup ONE_ON_ONE, BE trả 409 đúng contract với `{error: "CONV_ONE_ON_ONE_EXISTS", details: {conversationId: "..."}}`, nhưng FE check `.code` luôn false → không catch, throw ra UI → mất toàn bộ UX "redirect sang conv cũ".
+   - **Fix**: đổi `.code` → `.error`. Ngoài ra nên dùng chung type cho error response (ví dụ `interface ApiErrorBody { error: string; message: string; details?: any }`) import từ 1 chỗ để không bao giờ drift lại.
+
+2. **[FE][BLOCKING] `frontend/src/types/conversation.ts:29-41` — `ConversationDto` định nghĩa có `displayName`, `displayAvatarUrl`, `unreadCount`, `mutedUntil` nhưng BE response KHÔNG trả các field đó trong full DTO.**
+   - BE `ConversationDto` (từ `POST /api/conversations` 201 và `GET /api/conversations/{id}` 200) chỉ có 8 field: `id, type, name, avatarUrl, createdBy, members, createdAt, lastMessageAt`. Xem `backend/.../dto/ConversationDto.java`.
+   - Các field `displayName/displayAvatarUrl/unreadCount/mutedUntil` **chỉ có trong `ConversationSummaryDto`** (GET list). Contract API_CONTRACT.md dòng 436-471 (POST 201 shape) và dòng 510-533 (GET list shape) đã phân biệt rõ 2 shape.
+   - Hệ quả: khi FE truy cập `conversation.displayName` (ở detail page) → `undefined` tại runtime, TypeScript không cảnh báo (vì types nói có). UI sẽ render rỗng.
+   - **Fix**: xóa 4 field đó khỏi `ConversationDto`. Tạo helper ở FE để **derive displayName từ members + currentUserId** (tìm other member cho ONE_ON_ONE, dùng `conversation.name` cho GROUP). Hoặc nếu muốn `displayName` xuất hiện ở cả 2 endpoint → cần request BE update DTO; nhưng theo contract đã chốt thì detail KHÔNG có, FE derive.
+
+#### Warnings (non-blocking)
+
+3. **[BE][WARNING] `ConversationService.java:216-220` — N+1 query khi list conversations.**
+   - Sau khi có `convIds` từ native query, loop từng `convId` và gọi `findByIdWithMembers(convId)` → mỗi conv 1 query riêng (LEFT JOIN FETCH members + users). Với size=20 → 21 query tổng (1 list + 20 detail-fetch).
+   - Contract đã documented V1 accept nhưng đây là pattern dễ scale-blow. Khuyến nghị:
+     - V1 (giữ như hiện tại): OK vì size ≤ 50 và dataset nhỏ. Comment đã ghi rõ `// acceptable for V1`.
+     - V2: thay bằng 1 query duy nhất `SELECT c, m, u FROM Conversation c LEFT JOIN FETCH c.members m LEFT JOIN FETCH m.user u WHERE c.id IN :ids` (1 query cho N conversations) — tránh Hibernate Pagination+JOIN FETCH pitfall bằng cách chia 2 bước: native query lấy IDs (đã làm), rồi batch JPA fetch.
+   - Không block V1.
+
+4. **[BE][WARNING] `ConversationService.java:134-146` — loop `userRepository.findById` cho mỗi memberId.**
+   - Với GROUP tối đa 49 memberIds → 49 query riêng lẻ cộng với query tạo 49 member. Nên batch: `userRepository.findAllById(memberIds)` → 1 query; so sánh kết quả với request để tìm `missingIds`.
+   - Non-blocking cho V1 (traffic thấp, group size trung bình 2-10), nhưng là easy win.
+
+5. **[BE][WARNING] `ConversationService.java` — KHÔNG validate `memberIds` cho duplicate và exclude caller.**
+   - Contract dòng 432: "không chứa UUID của caller (caller tự add qua OWNER role). Không được có phần tử trùng".
+   - Hiện `createGroup`:
+     - Nếu request `memberIds: [B, B, C]` → service fetch 3 lần (B, B, C) → targetUsers.size=3, tạo 3 ConversationMember, nhưng 1 trong đó đụng UNIQUE `(conversation_id, user_id)` → DataIntegrityViolationException → 500 INTERNAL_ERROR (không phải 400 VALIDATION_FAILED).
+     - Nếu request `memberIds: [callerId, B]` → caller sẽ bị add làm MEMBER + tiếp sau add OWNER → UNIQUE violate → 500.
+   - `createOneOnOne` có check self (line 61) nhưng không check duplicate cho array (dù chỉ 1 phần tử nên không hit trực tiếp).
+   - **Fix**: trước khi fetch, thêm:
+     ```java
+     Set<UUID> uniqueIds = new HashSet<>(req.memberIds());
+     if (uniqueIds.size() != req.memberIds().size()) throw VALIDATION_FAILED;
+     if (uniqueIds.contains(currentUser.getId())) throw VALIDATION_FAILED;
+     ```
+   - Non-blocking V1 vì FE tự guard, nhưng BE defense-in-depth cần có.
+
+6. **[BE][WARNING] `ConversationService.createGroup` — chưa enforce `memberIds.size() <= 49`.**
+   - Contract dòng 434: GROUP max 49 (cộng caller = 50). Service chỉ check min 2, không check max.
+   - Nếu FE (hoặc client lạ) gửi 200 memberIds → tạo group 201 thành viên vượt ARCHITECTURE limit.
+   - Fix: thêm `if (req.memberIds().size() > 49) throw VALIDATION_FAILED`.
+
+7. **[BE][WARNING] Rate limit toàn bộ 4 endpoints Conversations chưa implement.**
+   - Contract: POST 30/h/user, GET list 60/min/user, GET detail 120/min/user, search 30/min/user. Không thấy Redis INCR pattern nào trong service/controller.
+   - Intent có thể là "để sau" — nhưng chưa có comment/TODO ghi rõ. Đề xuất: thêm `// TODO(W3-D5): rate limit — xem ADR-005` hoặc log vào WARNINGS.md để không quên.
+
+8. **[BE][WARNING] `UserController.java:27` — gọi chéo package: user module depend conversation service.**
+   - `UserController` (package `com.chatapp.user.controller`) inject `ConversationService` (package `com.chatapp.conversation.service`). Ngược lại pattern — search users là **user domain**, không phải conversation domain.
+   - Khuyến nghị refactor: tách `UserSearchService` trong `com.chatapp.user.service` (gọi `userRepository.searchUsers`). `ConversationService.searchUsers` xóa đi. Đồng thời `UserSearchDto` di chuyển sang `com.chatapp.user.dto`.
+   - Non-blocking (code chạy đúng) nhưng sẽ khó maintain khi user module phát triển. Đề xuất làm clean-up ở Ngày 3-4.
+
+9. **[BE][WARNING] `ConversationService.java:104-105` — `entityManager.flush() + clear()` sau khi save group/ONE_ON_ONE members.**
+   - Rationale: flush để force commit members trước khi reload via `findByIdWithMembers`. Clear để đuổi stale entity khỏi cache. OK về mặt chức năng.
+   - Concern: `entityManager.clear()` detach MỌI entity trong persistence context của request hiện tại. Nếu sau này service chain thêm logic (ví dụ audit log, event emit) dùng entity `currentUser` cũ → NullPointerException hoặc LazyInitException. V1 hiện không có chain, OK.
+   - Alternative: thay `clear()` bằng `refresh()` trên conversation cụ thể. Hoặc cấu trúc lại để không cần clear (ví dụ DTO.from dùng eagerly loaded data trực tiếp). Non-blocking.
+
+10. **[BE][WARNING] `ConversationControllerTest.java:191` — `jsonPath("$.name").doesNotExist()` cho response ONE_ON_ONE có name=null.**
+    - `ConversationDto` dùng `@JsonInclude(JsonInclude.Include.ALWAYS)` → `null` vẫn serialize ra JSON. Jackson output: `"name": null`. MockMvc `jsonPath(...).doesNotExist()` expect path **không tồn tại trong JSON**, nhưng ở đây path tồn tại với value null.
+    - Nếu test thực sự PASS → có thể Spring parser của JsonPath coi null tương đương không tồn tại. Nhưng đây là hành vi phiên bản-specific, fragile. Đề xuất thay bằng `jsonPath("$.name").value(nullValue())` (import `org.hamcrest.Matchers.nullValue`) hoặc `jsonPath("$.name").isEmpty()`.
+    - Non-blocking nếu CI pass, nhưng stronger assertion clearer intent.
+
+11. **[BE][WARNING] `ConversationRepository.findExistingOneOnOne` native query với `CAST(:userId AS UUID)` và `c.type = 'ONE_ON_ONE'`.**
+    - Query CORRECT cho PG. Với H2 test profile phải có compatibility mode. Kiểm tra `application-test.yml` để xác nhận H2 mode=PostgreSQL. Không có trong diff → giả định đã setup W3D1. Non-blocking.
+    - Cast là cần vì tham số là `String` (xem comment dòng 26 lý do H2 vs PG UUID mapping). OK.
+    - KHÔNG false-positive: `c.type = 'ONE_ON_ONE'` filter group ra khỏi kết quả. Nếu có 2 user-A + user-B cùng nằm trong 1 GROUP → query vẫn trả 0 rows vì type ≠ ONE_ON_ONE. ✅ Verified.
+
+12. **[BE][WARNING] Race condition ONE_ON_ONE tạo duplicate.**
+    - Transaction isolation mặc định PostgreSQL = READ_COMMITTED. Hai request concurrent:
+      - T1: SELECT findExistingOneOnOne → empty.
+      - T2: SELECT findExistingOneOnOne → empty.
+      - T1: INSERT conversation + 2 members, commit.
+      - T2: INSERT conversation + 2 members, commit.
+      - Kết quả: 2 ONE_ON_ONE giữa cùng cặp user.
+    - Contract đã documented acceptable V1. Fix V2 cần partial UNIQUE index hoặc upsert pattern.
+    - **Cân nhắc nhanh**: có thể giảm risk ngay ở V1 bằng cách thêm `@Transactional(isolation = Isolation.SERIALIZABLE)` cho `createOneOnOne` — nhưng PG SERIALIZABLE retry overhead cao cho hot path. Hoặc dùng advisory lock `pg_advisory_xact_lock(hash(userA||userB))` — clean nhưng thêm complexity. **Reviewer đề xuất**: giữ nguyên V1 (documented), fix ở V2 cùng partial UNIQUE index. Không block W3D2.
+
+13. **[BE][WARNING] Search exclude blocked users — chưa wire, OK documented.**
+    - `UserRepository.searchUsers` chỉ exclude `id != currentUserId` + `status='active'`. Contract dòng 631 đã documented "V1 chấp nhận tạm chưa filter blocked — documented".
+
+14. **[FE][WARNING] `hooks.ts:33-44` — `useCreateConversation` onSuccess check `result.conversation` nhưng khi 409 trả về `{existingConversationId}` → không invalidate list.**
+    - Logic đúng (không invalidate khi 409 vì chưa có conv mới). Nhưng không notify caller một cách rõ ràng. Caller phải tự check `result.existingConversationId` sau khi mutation resolve.
+    - Gợi ý (non-blocking): tách thành 2 callback `onConversationCreated` và `onConversationExisted` trong API layer hoặc dùng discriminated union `{ status: 'created', conversation } | { status: 'existed', id }` để TypeScript ép caller handle cả 2 case.
+
+15. **[FE][WARNING] `api.ts:26` — `err.response?.status === 409` nhưng không check status code khác.**
+    - Nếu BE trả 409 với code khác (tương lai có `CONV_MEMBER_BLOCKED` cũng 409), code sẽ throw đúng (vì code không khớp). OK.
+    - Nhưng cast type `(err.response.data as { code?: string })` quá loose — không type-safe. Nên define `interface ApiErrorBody { error: string; message: string; details?: Record<string, unknown> }` shared.
+
+16. **[FE][WARNING] `api.ts:9` — import axios thuần để dùng `isAxiosError` rồi `err.response.data`.**
+    - OK. Axios 1.x `isAxiosError` là pattern chuẩn. Không dùng `instanceof AxiosError` (yếu hơn).
+
+17. **[FE][WARNING] `useUserSearch` default `limit = 20` nhưng contract default=10.**
+    - Contract dòng 603: `limit` default 10, max 20. FE gọi với limit=20 mặc định.
+    - Không vi phạm contract (20 trong range 1..20), nhưng FE dùng max luôn thay vì default → tăng payload không cần thiết cho mỗi search call. Non-blocking.
+    - Đề xuất: đổi default limit FE về 10 hoặc tăng contract default lên 20 nếu team muốn show nhiều hơn.
+
+18. **[FE][WARNING] `types/conversation.ts:7-18` — `const object + type` pattern thay vì enum.**
+    - Type-safety ở compile time: TypeScript suy ra `ConversationType` là union `'ONE_ON_ONE' | 'GROUP'` thông qua `(typeof ConversationType)[keyof typeof ConversationType]`. Không thể gán string tuỳ ý. ✅ Type-safe.
+    - Lý do tránh enum: project dùng `erasableSyntaxOnly` mode (comment line 6) — enum không phải pure erasable. Pattern này là industry standard trong TS-only codebase. APPROVED.
+
+### Answered checklist items
+
+1. **BE findOrCreate ONE_ON_ONE**:
+   - Native SQL `findExistingOneOnOne` có đúng? ✅ Đúng — JOIN double, filter `type='ONE_ON_ONE'`, không false-positive với GROUP.
+   - Race condition 2 req cùng lúc: ✅ Có thể xảy ra dup (READ_COMMITTED default). Documented acceptable V1 (xem W3-BE-Warning-12).
+
+2. **BE enumeration protection**:
+   - ✅ `GET /api/conversations/{id}` trả `CONV_NOT_FOUND` cho cả not-exist và not-member (xem `ConversationService.getConversation` line 309-315).
+   - Message "Conversation không tồn tại hoặc bạn không phải thành viên" — OK, không leak. Thậm chí có thể rút gọn thành "Conversation không tồn tại" để cực kỳ paranoid, nhưng hiện tại đủ an toàn vì cùng HTTP status + cùng error code.
+
+3. **BE N+1**:
+   - ⚠️ `GET /api/conversations` list dùng 2-query approach (IDs first native + batch load). ĐÚNG intent — NHƯNG batch load lại gọi `findByIdWithMembers` per convId → N+1. Xem W3-BE-Warning-3.
+   - ✅ `GET /api/conversations/{id}` dùng JOIN FETCH — 1 query.
+
+4. **W3-BE-1 verification**:
+   - ✅ `@PrePersist` UUID generation thay thế đúng `@GeneratedValue`. Cả Conversation và ConversationMember đã migrate sang pattern `if (id == null) id = UUID.randomUUID()`. `@Column(id, updatable=false, nullable=false)` không còn `insertable=false`.
+   - ✅ Test `savingConversation_shouldPersistWithNonNullId` tồn tại trong suite (line 121-127) và assert `id != null` sau save. W3-BE-1 **RESOLVED** — cập nhật knowledge.
+
+5. **FE 409 handling**:
+   - ❌ BLOCKING: đọc `.code` thay vì `.error`. Xem BLOCKING-1.
+
+6. **FE types match BE**:
+   - ✅ PageResponse format đã update cho Spring Page (`content/page/size/totalElements/totalPages`) — khớp BE.
+   - ❌ BLOCKING: `ConversationDto` FE có `displayName/displayAvatarUrl/unreadCount/mutedUntil` nhưng BE không trả. Xem BLOCKING-2.
+   - ✅ `ConversationSummaryDto` FE khớp BE (displayName là server-computed).
+   - ✅ `const object + type` pattern type-safe (W3-FE-Warning-18).
+
+7. **Contract drift**:
+   - ✅ `GET /api/conversations` response shape BE trả `{content, page, size, totalElements, totalPages}` — khớp contract dòng 510-533. **KHÔNG cần update contract** (contract viết đúng từ đầu, BE implement đúng).
+   - ✅ `GET /api/users/search` có `limit` param (default 10, max 20) — khớp contract dòng 603.
+   - ℹ️ Contract đúng, drift nằm ở FE types (xem BLOCKING-2) → không phải drift contract, là drift implementation FE.
+
+### Contract impact
+
+- **KHÔNG cập nhật `docs/API_CONTRACT.md`**. Contract v0.5.0-conversations đã viết đúng từ W3D1. BE implement khớp contract. FE lệch với contract (bug ở FE, không phải contract sai).
+- Giữ nguyên version `v0.5.0-conversations`. Khi FE fix 2 BLOCKING sẽ APPROVE mà không đụng contract.
+
+### Orchestrator decisions cần lưu ý
+- **Gọi frontend-dev fix 2 BLOCKING NGAY**: (1) `api.ts:31` đổi `.code` → `.error`; (2) `types/conversation.ts:29-41` xóa displayName/displayAvatarUrl/unreadCount/mutedUntil khỏi ConversationDto, derive ở FE runtime.
+- **Sau khi FE fix**, reviewer check lại → APPROVE. Không cần BE re-touch.
+- **BE warnings 3-9**: không fix trong W3D2. Tạo issue/WARNINGS.md entry cho 5-6-7 (dedupe memberIds, enforce max 49, rate limit TODO). Warning 8 (UserController cross-package) tạo ticket clean-up W3D3-D4. Các warning khác documented acceptable.
+- **W3-BE-1 RESOLVED**: cập nhật knowledge — không cần còn track.
+
+---
+
 ## 2026-04-19 — W3D1 Review: V3 schema + Conversation domain + FE layout skeleton; Draft Conversations contract
 
 ### Verdict

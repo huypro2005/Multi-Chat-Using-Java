@@ -183,15 +183,29 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 - Conversation entity: KHÔNG dùng `@Data`. Dùng `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`. `@PrePersist`/`@PreUpdate` cho timestamps.
 - ConversationMember: có `@Builder.Default private MemberRole role = MemberRole.MEMBER` để giữ default khi dùng builder.
 - `@OneToMany(mappedBy="conversation", fetch=LAZY)` với `@Builder.Default private List<ConversationMember> members = new ArrayList<>()` — cần Builder.Default để tránh null list khi dùng builder.
-- Repository: `findByIdWithMembers(UUID)` dùng `@Query("SELECT c FROM Conversation c LEFT JOIN FETCH c.members WHERE c.id = :id")` — tránh N+1 cho membership query.
+- Repository: `findByIdWithMembers(UUID)` dùng `@Query("SELECT c FROM Conversation c LEFT JOIN FETCH c.members m LEFT JOIN FETCH m.user WHERE c.id = :id")` — tránh N+1, cần LEFT JOIN FETCH cả `m.user`.
 - Spring Data method với nested FK: `findByUser_IdOrderByJoinedAtDesc` và `existsByConversation_IdAndUser_Id` — dấu `_` để phân biệt nested property (đã chốt pattern này từ tuần 1).
 - Migration V3: index đặt tên `idx_conversations_last_message`, `idx_conversations_created_by`, `idx_members_user`, `idx_members_conv`. Convention: `idx_{table}_{columns}`.
 - DROP/CREATE database cho data reset giữa các tuần: terminate sessions trước bằng `pg_terminate_backend`, sau đó DROP.
 
 ---
 
+### Conversation Service Pattern (W3-D2)
+
+- W3-BE-1 RESOLVED: `@GeneratedValue(strategy=UUID) + @Column(insertable=false)` conflict → `@PrePersist` set `if (id==null) id = UUID.randomUUID()`. Xóa `@GeneratedValue`, giữ `@Column(updatable=false)`. Database vẫn dùng `DEFAULT gen_random_uuid()` cho direct SQL insert.
+- Anti-enumeration pattern: `getConversation` trả 404 cho cả not-exist lẫn not-member (KHÔNG trả 403 — tránh leak conversation existence). Implement bằng check membership trước, sau đó load conversation.
+- findOrCreate 1-1 với native SQL double-join: query `findExistingOneOnOne` JOIN m1+m2 theo userId1 và userId2 — hiệu quả hơn JPQL subquery. Trả `Optional<String>` (không phải UUID) để tránh H2/PG JDBC driver mapping differences (H2 byte[] vs PG UUID).
+- N+1 avoidance cho list: dùng 2-query approach — native SQL lấy IDs paginated, sau đó batch load details qua `findByIdWithMembers`. Chấp nhận cho V1 (list nhỏ ≤ vài trăm).
+- Flush+clear EntityManager sau save trong @Transactional để force reload từ DB: `entityManager.flush(); entityManager.clear()` trước `findByIdWithMembers` — tránh stale 1st-level cache trả empty members list.
+- Native query UUID parameter: dùng `:userId` là `String` + `CAST(:userId AS UUID)` trong SQL để tránh H2 không nhận `UUID` type parameter trong native queries. `CAST(c.id AS VARCHAR)` trong SELECT để tránh H2 trả `byte[]` thay vì UUID string.
+- `ConversationListResponse` shape: `content/page/size/totalElements/totalPages` — tuân theo contract v0.5.0-conversations, KHÔNG dùng `items/total`.
+- `displayName`/`displayAvatarUrl`: server-computed — ONE_ON_ONE lấy từ other member's fullName/avatarUrl, GROUP lấy từ conversation.name/avatarUrl.
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W3D2: Thêm W3-BE-1 fix pattern, findOrCreate 1-1 SQL, anti-enumeration 404, flush+clear pattern, H2 UUID native query workaround.
 - 2026-04-19 W3D1: Thêm Conversation domain pattern, enum string mapping, JOIN FETCH repo pattern, index naming convention, DROP/recreate DB flow.
 - 2026-04-19 W2D4: Thêm Firebase OAuth pattern, Logout + blacklist, OAuthResponse shape, JwtAuthFilter blacklist check.
 - 2026-04-19 W2D3.5: Thêm Refresh Token Rotation Pattern, constant-time comparison, getClaimsAllowExpired pattern.

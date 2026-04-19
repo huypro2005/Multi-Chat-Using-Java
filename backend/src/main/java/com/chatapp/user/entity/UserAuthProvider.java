@@ -1,4 +1,4 @@
-package com.chatapp.model.entity;
+package com.chatapp.user.entity;
 
 import jakarta.persistence.*;
 import lombok.*;

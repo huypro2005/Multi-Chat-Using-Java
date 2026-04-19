@@ -244,8 +244,25 @@ Toast khác nhau: `'success'` khi API ok, `'info'` khi offline/catch.
 `tokenStorage.getRefreshToken()` — lấy refreshToken từ in-memory cache để gửi lên BE.
 W-C-3 logout **RESOLVED**.
 
+## React Query — Conversation layer (W3-D2)
+
+- `queryClient` singleton tại `src/lib/queryClient.ts`, import vào `main.tsx` (không define inline)
+- Query key factory pattern: `conversationKeys` object với `.all`, `.lists()`, `.list(page, size)`, `.detail(id)` — type-safe `as const`
+- `useConversations(page, size)` — list paginated; `useConversation(id)` — detail với `enabled: !!id`
+- `useCreateConversation()` — onSuccess: `invalidateQueries(lists())` + `setQueryData(detail(id), data)` để seed cache
+- 409 CONV_ONE_ON_ONE_EXISTS: return `{ existingConversationId }` thay vì throw — caller handle redirect
+- BE response Spring Page: `{ content, page, size, totalElements, totalPages }` — KHÔNG phải `{ items, total, pageSize }`
+- `useUserSearch(query, limit)` — debounce 300ms, `enabled` khi >= 2 chars (khớp contract)
+- `useDebounce<T>(value, delay)` hook tại `src/hooks/useDebounce.ts`
+- TypeScript `erasableSyntaxOnly`: KHÔNG dùng `enum` — thay bằng `const object + type` pattern:
+  ```ts
+  export const ConversationType = { ONE_ON_ONE: 'ONE_ON_ONE', GROUP: 'GROUP' } as const
+  export type ConversationType = (typeof ConversationType)[keyof typeof ConversationType]
+  ```
+
 ## Changelog file này
 
+- 2026-04-19 (W3D2): Conversation types, API functions, React Query hooks, queryKeys, useDebounce. enum → const object (erasableSyntaxOnly). build + lint: 0 error.
 - 2026-04-19 (W3D1): ProtectedRoute (Outlet pattern + isHydrated spinner + location.state.from). ConversationsLayout (2-col sidebar). Route nesting. W-C-4 RESOLVED. build + lint: 0 error.
 - 2026-04-19 (W2D4 Phase B): Firebase SDK + GoogleLoginButton + oauthApi + logoutApi. Wire Login/Register/HomePage. build + lint: 0 error.
 - 2026-04-19 (W2D3 Phase C): Wire Login + Register với API thật. handleAuthError utility. ProtectedRoute. W-FE-1 fix (username regex). build + lint: 0 error.

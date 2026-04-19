@@ -12,6 +12,14 @@
 
 ---
 
+## Resolved (đã fix)
+
+| ID | Vấn đề | Fix | Ngày |
+|----|--------|-----|------|
+| W3-BE-3 | Schema V2 không có `CREATE EXTENSION IF NOT EXISTS pgcrypto` — developer mới clone repo, fresh DB → `gen_random_uuid()` fail ở V2. | Thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu `V2__create_users_and_auth_providers.sql`. Thêm `repair-on-migrate: true` vào `application.yml` để developer có DB cũ tự động repair checksum khi start app. | 2026-04-19 |
+
+---
+
 ## Pre-production (BẮT BUỘC fix trước deploy)
 
 | ID | File:Line | Vấn đề | Solution | Effort |

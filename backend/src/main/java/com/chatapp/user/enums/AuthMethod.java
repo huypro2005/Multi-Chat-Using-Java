@@ -1,4 +1,4 @@
-package com.chatapp.model.enums;
+package com.chatapp.user.enums;
 
 /**
  * Phương thức xác thực của user — được ghi vào JWT claim "auth_method".

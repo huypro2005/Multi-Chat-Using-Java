@@ -1,9 +1,9 @@
-package com.chatapp.repository;
+package com.chatapp.user.repository;
 
 
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import com.chatapp.model.entity.UserAuthProvider;
+import com.chatapp.user.entity.UserAuthProvider;
 
 import java.util.List;
 import java.util.Optional;

@@ -1,8 +1,11 @@
 -- ============================================================
 -- V2: Users, Auth Providers, User Blocks
 -- Khớp với ARCHITECTURE.md mục 3.1
--- pgcrypto extension đã có sẵn (gen_random_uuid() hoạt động)
 -- ============================================================
+
+-- Extension pgcrypto: cần cho gen_random_uuid() trên tất cả bảng dùng UUID PK
+-- IF NOT EXISTS đảm bảo idempotent (an toàn khi extension đã có sẵn)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Bảng chính: thông tin user
 COMMENT ON SCHEMA public IS 'chat-app schema';
