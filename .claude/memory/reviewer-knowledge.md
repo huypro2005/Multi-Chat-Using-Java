@@ -73,6 +73,44 @@
 - **Trade-off**: Phải maintain list error codes. Documented trong API_CONTRACT.md.
 - **Ngày**: 2026-04-19 (Tuần 1)
 
+### ADR-008: JWT algorithm = HS256 + jjwt 0.12.x
+- **Quyết định**: JWT sign bằng HS256 (HMAC SHA-256) với secret key từ env `JWT_SECRET`. Library: `io.jsonwebtoken:jjwt-api:0.12.x` (+ `jjwt-impl` + `jjwt-jackson` runtime).
+- **Bối cảnh**: Cần symmetric sign vì BE là single-instance (1 server Singapore), không cần distribute public key. RS256 không cần thiết cho scale V1.
+- **Lý do**: HS256 nhanh hơn RS256 (~10x), secret chỉ cần bảo mật 1 chỗ. jjwt 0.12.x là API mới (parserBuilder + verifyWith) — cleaner hơn 0.11.x.
+- **Trade-off**: Nếu mở rộng sang multi-instance hoặc cần 3rd party verify token (OAuth2 resource server) → phải migrate RS256. Acceptable cho V1, documented migration path.
+- **Ngày**: 2026-04-19 (Tuần 1)
+
+### ADR-009: Redis key schema (namespacing cho rate limit / refresh token / JWT blacklist)
+- **Quyết định**: Dùng 3 prefix đã chốt — KHÔNG được đổi sau khi deploy production (sẽ mất state):
+  - `rate:{scope}:{id}` — counter rate limit. Ví dụ `rate:register:192.168.1.1`, `rate:login:192.168.1.1`, `rate:refresh:{userId}`. INCR + EX (set TTL lần đầu).
+  - `refresh:{userId}:{jti}` — hash SHA-256 của refresh token. EX 604800 (7d).
+  - `jwt:blacklist:{jti}` — empty value, TTL = remaining TTL của access token tại thời điểm logout.
+- **Bối cảnh**: Scale V1 nhỏ (1 Redis instance), cần prefix rõ ràng để debug (MONITOR, KEYS) và tránh conflict với future namespace (presence:, typing:, cache:user:).
+- **Lý do**:
+  - `rate:` tách scope (register/login/refresh) giúp tune TTL độc lập.
+  - `refresh:{userId}:{jti}` cho phép revokeAllUserSessions bằng `KEYS refresh:{userId}:*` — O(N) OK cho user <10 sessions.
+  - `jwt:blacklist:` prefix riêng (không phải `blacklist:`) để tương lai có thể có `ws:blacklist:`, `ip:blacklist:` mà không va nhau.
+- **Trade-off**: `KEYS` command blocking trong Redis. V1 acceptable (1 user hiếm >10 sessions). V2 migrate sang SET members (SADD `user_sessions:{userId}` jti) để dùng SREM thay KEYS.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 3.5 — formalized Tuần 2 audit cuối)
+
+### ADR-010: AuthMethod enum (PASSWORD | GOOGLE) trong JWT claim `auth_method`
+- **Quyết định**: Enum `com.chatapp.user.enums.AuthMethod` với 2 value `PASSWORD` ("password") và `GOOGLE` ("google"). `JwtTokenProvider.generateAccessToken(User, AuthMethod)` nhận enum, ghi `auth_method` claim là string lowercase. Reader side: `getAuthMethodFromToken()` parse với fallback về `PASSWORD` khi claim unknown (backward compat).
+- **Bối cảnh**: Trước khi refactor (pre-W2D1), `generateAccessToken` hardcode `"password"` trong claim → OAuth login cũng bị gắn `auth_method=password` → sai nghiệp vụ + mở đường cho bug khi phân nhánh flow theo auth method.
+- **Lý do**: Enum guarantee type-safety ở compile time. Callers không thể truyền string tự do. Fallback về PASSWORD đảm bảo token cũ (trước refactor) vẫn valid sau deploy.
+- **Trade-off**: Thêm 1 file enum + refactor 2-3 call sites. Acceptable cost cho đúng business semantics.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 1 — W-BE-3 resolved)
+
+### ADR-011: Blacklist check fail-open khi Redis down (trade-off intentional)
+- **Quyết định**: `JwtAuthFilter` check `redisTemplate.hasKey("jwt:blacklist:{jti}")` trước khi set SecurityContext. Nếu Redis throw `RedisConnectionFailureException` → LOG warning + SKIP check (fail-open) → token vẫn authenticate nếu JWT signature valid & chưa expire.
+- **Bối cảnh**: Redis có thể crash / maintenance / network blip → nếu fail-closed (reject mọi request khi Redis down) sẽ downtime toàn bộ app.
+- **Lý do**: Trade-off giữa availability và security. V1 scale <1000 users, Redis managed, downtime hiếm. Nếu fail-closed → Redis blip 30s = toàn bộ user bị logout = tệ hơn risk "logged-out token tiếp tục valid trong window đó".
+- **Trade-off**:
+  - **Risk**: Trong window Redis down, access token đã logout vẫn valid đến natural expiry (≤1h). Attacker có token bị revoke → vẫn truy cập được cho đến khi token expire.
+  - **Mitigation V1**: monitoring alert khi Redis down → ops rotate JWT_SECRET (nuclear option — invalidate toàn bộ session) nếu nghi ngờ có compromised token.
+  - **Mitigation V2**: Circuit breaker đếm Redis failure rate, switch sang fail-closed sau ngưỡng. Bỏ scope V1.
+- **BẮT BUỘC**: comment rõ intent `// fail-open intentional: xem ADR-011` trong code filter. Không comment = treat như bug.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 4 — formalized trong audit cuối Tuần 2)
+
 ---
 
 ## Contract version hiện tại
@@ -173,3 +211,4 @@
 - 2026-04-19 (W2D1): Mark W-BE-3 RESOLVED (AuthMethod enum). Mark W-FE-2 RESOLVED (tokenStorage pattern, globalThis removed). Thêm tokenStorage.ts vào approved FE patterns. Note warning post-rehydrate auth flow.
 - 2026-04-19 (W2D3.5): Review POST /api/auth/refresh. Thêm ADR-006 (Refresh Token Rotation + Reuse Detection). Thêm Security review standards (constant-time compare, DELETE-before-SAVE, revoke-all-on-reuse, log format, error-code leak). Contract v0.2.1-auth → v0.3.0-auth. Ghi nhận 2 contract sync items cần FE/BE align (reuse error code + rate limit value).
 - 2026-04-19 (W2D4): Review POST /api/auth/oauth + POST /api/auth/logout. Thêm ADR-007 (OAuth Auto-Link by Email). Thêm 4 security standards mới (Firebase SDK verify bắt buộc, email_verified check điều kiện, blacklist TTL = remaining token TTL, blacklist-check-trước-setSecurityContext, fail-open Redis trade-off documented). Contract v0.3.0-auth → v0.4.0-auth-complete. Auth foundation Tuần 2 COMPLETE: register/login/refresh/oauth/logout đều implement + review xong.
+- 2026-04-19 (W2 Final Audit): Audit cuối Tuần 2 trước tag `v0.2.0-w2`. Formalize 4 ADR còn implicit: ADR-008 (HS256 + jjwt 0.12.x), ADR-009 (Redis key schema), ADR-010 (AuthMethod enum), ADR-011 (Fail-open blacklist trade-off). Tạo `docs/WARNINGS.md` tổng hợp 5 pre-production items (W-BE-4 race existsBy→save, W-BE-5 null passwordHash guard, W-BE-6 X-Forwarded-For sanitize, W-BE-7 fail-open monitoring, W-BE-8 generateUniqueUsername race), 8 documented-acceptable, 6 cleanup-tuần-8, 7 tech-debt-nhỏ. Controller audit: 5 auth endpoints + 1 health, 0 drift so với contract v0.4.0-auth-complete. 1 orphan TODO: `useAuth.ts:29` "TODO Tuần 2 call logout API" — logout đã implement nơi khác (HomePage.tsx), TODO lỗi thời, map vào CL-1.
