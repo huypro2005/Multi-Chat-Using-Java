@@ -1,6 +1,7 @@
 package com.chatapp.auth.controller;
 
 import com.chatapp.auth.dto.request.LoginRequest;
+import com.chatapp.auth.dto.request.RefreshRequest;
 import com.chatapp.auth.dto.request.RegisterRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
 import com.chatapp.auth.service.AuthService;
@@ -52,6 +53,20 @@ public class AuthController {
     ) {
         String clientIp = extractClientIp(servletRequest);
         return authService.login(req, clientIp);
+    }
+
+    /**
+     * POST /api/auth/refresh
+     * Dùng refresh token để lấy access token mới + refresh token mới (rotation).
+     * Contract: trả AUTH_REFRESH_TOKEN_INVALID hoặc AUTH_REFRESH_TOKEN_EXPIRED khi token không hợp lệ.
+     */
+    @PostMapping("/refresh")
+    public AuthResponse refresh(
+            @Valid @RequestBody RefreshRequest req,
+            HttpServletRequest servletRequest
+    ) {
+        String clientIp = extractClientIp(servletRequest);
+        return authService.refresh(req.refreshToken(), clientIp);
     }
 
     /**

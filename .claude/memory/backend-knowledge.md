@@ -125,8 +125,36 @@
 
 ---
 
+---
+
+### Refresh Token Rotation Pattern (Tuần 2, W2D3.5)
+
+QUAN TRỌNG: DELETE old token TRƯỚC khi generate new, rồi SAVE new.
+Sequence: validateToken → checkRateLimit → hashCompare → deleteOld → generateNew → saveNew.
+
+Token Reuse Detection:
+- Token valid nhưng hash không khớp trong Redis → đã bị rotate trước đó → REFRESH_TOKEN_REUSED.
+- Khi detect: revokeAllUserSessions(userId) dùng redisTemplate.keys() + delete(Set).
+- Log WARN với userId (KHÔNG log raw token).
+
+Constant-time comparison: dùng `MessageDigest.isEqual(a.getBytes(), b.getBytes())` thay vì `String.equals()` để tránh timing attack khi compare token hash.
+
+Rate limit: per-userId (không per-IP), vì user có thể refresh từ nhiều device cùng IP.
+Redis key: `rate:refresh:{userId}` TTL 60s, max 10 calls/window.
+
+getClaimsAllowExpired(): cần thiết để extract userId/jti từ expired token trong flow refresh.
+Lấy từ `ExpiredJwtException.getClaims()` — jjwt vẫn parse claims kể cả khi expired.
+`getUserIdFromToken()` và `getJtiFromToken()` dùng method này để an toàn.
+
+Error codes theo contract: `AUTH_REFRESH_TOKEN_INVALID`, `AUTH_REFRESH_TOKEN_EXPIRED`, `AUTH_ACCOUNT_LOCKED`.
+Pitfall: DELETE → crash → SAVE không xảy ra → user mất session. Acceptable V1.
+Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W2D3.5: Thêm Refresh Token Rotation Pattern, constant-time comparison, getClaimsAllowExpired pattern.
 - 2026-04-19 W2D1: Thêm AuthMethod enum pattern (W-BE-3).
 - 2026-04-19 W1 Fix: Thêm JWT Token Validation Pattern (validateTokenDetailed, AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED).
 - 2026-04-19 Ngày 3: Thêm Security/JWT patterns, ErrorResponse shape, pitfall @SpringBootTest excludeAutoConfiguration, CORS gotcha, jjwt 0.12.x API notes.

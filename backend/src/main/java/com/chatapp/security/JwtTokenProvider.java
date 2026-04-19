@@ -145,6 +145,8 @@ public class JwtTokenProvider {
 
     /**
      * Extract tất cả claims từ token (đã validate trước khi gọi method này).
+     * KHÔNG dùng cho expired token — sẽ throw ExpiredJwtException.
+     * Dùng getClaimsAllowExpired() nếu cần đọc claims từ token đã hết hạn.
      */
     public Claims getClaims(String token) {
         return Jwts.parser()
@@ -154,12 +156,30 @@ public class JwtTokenProvider {
                 .getPayload();
     }
 
+    /**
+     * Extract claims từ token kể cả khi đã hết hạn.
+     * Dùng trong refresh flow: token đã validate (EXPIRED result) nhưng cần extract userId/jti.
+     * Vẫn verify signature — chỉ bỏ qua expiration check.
+     */
+    public Claims getClaimsAllowExpired(String token) {
+        try {
+            return Jwts.parser()
+                    .verifyWith(secretKey)
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload();
+        } catch (ExpiredJwtException e) {
+            // Lấy claims từ exception — jjwt vẫn parse được claims kể cả khi expired
+            return e.getClaims();
+        }
+    }
+
     public UUID getUserIdFromToken(String token) {
-        return UUID.fromString(getClaims(token).getSubject());
+        return UUID.fromString(getClaimsAllowExpired(token).getSubject());
     }
 
     public String getJtiFromToken(String token) {
-        return getClaims(token).getId();
+        return getClaimsAllowExpired(token).getId();
     }
 
     /**

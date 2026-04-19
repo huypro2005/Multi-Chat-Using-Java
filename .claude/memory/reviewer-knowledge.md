@@ -40,6 +40,19 @@
 - **Pattern login đặc biệt**: Tách `checkLoginRateLimit()` (chỉ GET + so sánh) khỏi `incrementLoginFailCounter()` (INCR + set TTL). Lý do: chỉ tăng counter khi fail, không tăng khi success. Thành công → `redisTemplate.delete(key)` reset counter.
 - **Ngày**: 2026-04-19 (Tuần 2, Ngày 2)
 
+### ADR-006: Refresh Token Rotation + Reuse Detection
+- **Quyết định**: Mỗi lần `/refresh` thành công → DELETE old redis key TRƯỚC khi buildAuthResponse sinh refresh token mới với jti mới. Hash mismatch (storedHash=null hoặc không match) → detect reuse → revokeAllUserSessions(userId) trước khi throw `AUTH_REFRESH_TOKEN_INVALID`.
+- **Bối cảnh**: Refresh token nếu dùng lại (replay) là dấu hiệu attacker đã có token → phải revoke all sessions của user đó, không chỉ token đó.
+- **Lý do**:
+  - DELETE trước SAVE đảm bảo không có cửa sổ attacker dùng đồng thời 2 token cũ + mới.
+  - Constant-time compare hash (MessageDigest.isEqual) tránh timing attack.
+  - revokeAllUserSessions dùng `redisTemplate.keys("refresh:{userId}:*")` — O(N) scan, OK cho V1 vì 1 user hiếm khi có >10 sessions.
+- **Trade-off**:
+  - Nếu crash giữa DELETE và SAVE → user mất session, phải login lại. Acceptable cho V1. V2 dùng Redis MULTI/EXEC.
+  - Rate limit counter KHÔNG reset sau refresh thành công — nếu user legit refresh 10 lần trong 60s (hiếm) sẽ bị throttle. Window ngắn (60s) nên tự hồi phục nhanh.
+- **Reuse case trả `AUTH_REFRESH_TOKEN_INVALID`**: contract ở dòng 337 nhắc tới `REFRESH_TOKEN_REUSED` nhưng error table chỉ có `AUTH_REFRESH_TOKEN_INVALID` và `AUTH_REFRESH_TOKEN_EXPIRED`. Thống nhất: dùng `AUTH_REFRESH_TOKEN_INVALID` cho cả malformed + reused + user-not-found (tránh tiết lộ "token từng tồn tại"). Sửa contract dòng 337 cho khớp.
+- **Ngày**: 2026-04-19 (Tuần 2, Ngày 3.5)
+
 ### ADR-004: API Error Format — { error, message, timestamp, details }
 - **Quyết định**: Mọi error response đều dùng shape: `{ "error": "ERROR_CODE", "message": "...", "timestamp": "ISO-8601", "details": {...} }`
 - **Bối cảnh**: Cần FE dùng `error` field (string) để phân nhánh logic, `message` để hiển thị user.
@@ -51,7 +64,7 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.2.1-auth (5 Auth endpoints + note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED — chốt 2026-04-19)
+- **API_CONTRACT.md**: v0.3.0-auth (POST /api/auth/refresh implemented W2D3.5, constant-time hash compare, reuse detection + revokeAllUserSessions)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
@@ -70,6 +83,13 @@
 ## Review standard đã áp dụng (bài học rút ra)
 
 *(Ghi khi phát hiện vấn đề nào đó XUẤT HIỆN NHIỀU LẦN trong review — cần nâng thành quy tắc.)*
+
+### Security review standards (bắt buộc áp dụng cho mọi endpoint auth-related)
+- **Hash/token comparison phải constant-time**: dùng `MessageDigest.isEqual(bytesA, bytesB)`, KHÔNG dùng `String.equals()` hay `Arrays.equals()` cho sensitive data. `String.equals()` short-circuit khi ký tự khác đầu tiên → leak độ dài prefix khớp qua timing. BLOCKING nếu vi phạm.
+- **Token rotation phải DELETE trước SAVE**: DELETE old token khỏi Redis TRƯỚC khi generate+SAVE token mới. Ngược lại → có cửa sổ 2 token cùng hợp lệ, attacker lợi dụng race.
+- **Reuse detection phải revoke ALL sessions của user đó**: phát hiện 1 token bị reuse = giả định toàn bộ sessions của user đó đã bị compromise. KHÔNG chỉ delete token hiện tại. Pattern: `redisTemplate.keys("refresh:{userId}:*")` → `redisTemplate.delete(keys)`.
+- **Log SECURITY events với context**: WARN level, có userId + jti + action, KHÔNG có raw token/password. Format: `"[SECURITY] Refresh token reuse/invalid detected for userId={}, jti={}. Revoking all sessions."`.
+- **Error code phân biệt phải rõ ràng và KHÔNG leak**: INVALID (malformed/sig-sai/reused/user-not-found) — tất cả dùng cùng 1 code để không tiết lộ "token tồn tại nhưng đã reused" vs "token không bao giờ tồn tại"; EXPIRED (valid sig + valid signature, chỉ exp quá hạn) — code riêng để FE biết đăng nhập lại thay vì retry.
 
 ### Vấn đề thường gặp ở BE
 - Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phải set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
@@ -124,6 +144,7 @@
 | 2026-04-19 | v0.2-auth | Khởi tạo contract 5 Auth endpoints: register, login, oauth, refresh, logout. Token shape chuẩn. Rate limits. |
 | 2026-04-19 | v0.2-auth | Thêm Refresh Queue Pattern note vào /refresh. Xác nhận isNewUser field trong /oauth. |
 | 2026-04-19 | v0.2.1-auth | Thêm AUTH_TOKEN_EXPIRED error code. Note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED. |
+| 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented (W2D3.5). Rotation + reuse detection + revokeAllUserSessions. Constant-time hash compare. Note: cần sync contract dòng 337 (dùng `AUTH_REFRESH_TOKEN_INVALID` thay cho `REFRESH_TOKEN_REUSED`) và rate limit mới 10 calls/60s per-userId (contract hiện là 30/15min/IP). |
 
 ---
 
@@ -131,3 +152,4 @@
 
 - 2026-04-19 (Ngày 4): Điền ADR-001 đến ADR-004. Thêm FE review standards từ Phase 3B review. Điền contract changelog. Thêm approved patterns BE + FE.
 - 2026-04-19 (W2D1): Mark W-BE-3 RESOLVED (AuthMethod enum). Mark W-FE-2 RESOLVED (tokenStorage pattern, globalThis removed). Thêm tokenStorage.ts vào approved FE patterns. Note warning post-rehydrate auth flow.
+- 2026-04-19 (W2D3.5): Review POST /api/auth/refresh. Thêm ADR-006 (Refresh Token Rotation + Reuse Detection). Thêm Security review standards (constant-time compare, DELETE-before-SAVE, revoke-all-on-reuse, log format, error-code leak). Contract v0.2.1-auth → v0.3.0-auth. Ghi nhận 2 contract sync items cần FE/BE align (reuse error code + rate limit value).

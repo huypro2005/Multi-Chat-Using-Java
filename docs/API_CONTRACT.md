@@ -276,7 +276,7 @@ Sau khi verify Firebase ID Token thành công, server có `{ email, googleUid, d
 
 **Auth required**: No (chỉ cần refresh token hợp lệ trong body)
 
-**Rate limit**: 30 requests/15 phút/IP
+**Rate limit**: 10 requests/60 giây/userId (per-user, không per-IP — tránh brute-force rotation attack trên một user cụ thể; FE refresh queue pattern đảm bảo không vượt)
 
 **Request body**:
 
@@ -319,11 +319,11 @@ Notes về `refreshToken` trong response:
 | 401 | `AUTH_REFRESH_TOKEN_INVALID` | Token không đúng định dạng, signature sai, hoặc đã bị blacklist/invalidate |
 | 401 | `AUTH_REFRESH_TOKEN_EXPIRED` | Token đúng định dạng nhưng đã hết TTL 7 ngày |
 | 403 | `AUTH_ACCOUNT_LOCKED` | Tài khoản bị khóa sau khi token được phát |
-| 429 | `RATE_LIMITED` | Vượt 30 requests/15 phút/IP; kèm `details.retryAfterSeconds` |
+| 429 | `RATE_LIMITED` | Vượt 10 requests/60 giây/userId; kèm `details.retryAfterSeconds` |
 | 500 | `INTERNAL_ERROR` | Lỗi server |
 
 **Notes**:
-- Nếu cùng refresh token được dùng 2 lần (replay attack), lần 2 trả về `AUTH_REFRESH_TOKEN_INVALID`. Server detect bằng cách: khi rotate, xóa token cũ khỏi Redis; nếu token không còn trong Redis → invalid.
+- Nếu cùng refresh token được dùng 2 lần (replay attack), lần 2 trả về `AUTH_REFRESH_TOKEN_INVALID` (cùng code với malformed để không leak "token từng tồn tại nhưng đã bị rotate" qua error differentiation). Server detect bằng cách: khi rotate, xóa token cũ khỏi Redis; nếu token không còn trong Redis → invalid. **Side effect**: khi detect reuse, server revoke TOÀN BỘ sessions của user đó (xóa tất cả `refresh:{userId}:*` keys) vì coi như user đã bị compromise.
 - Endpoint này không yêu cầu Authorization header (access token đã hết hạn nên không có để gửi).
 
 **Refresh Queue Pattern (bắt buộc cho FE):**
@@ -334,7 +334,7 @@ Thay vào đó FE phải:
 3. Sau khi nhận token mới, retry toàn bộ queue với accessToken mới
 4. Nếu /refresh thất bại → clear token, redirect về /login
 
-Lý do: mỗi refreshToken chỉ dùng được 1 lần (rotating). Nếu 2 request cùng gọi /refresh với cùng token, request thứ 2 sẽ nhận REFRESH_TOKEN_REUSED và bị từ chối.
+Lý do: mỗi refreshToken chỉ dùng được 1 lần (rotating). Nếu 2 request cùng gọi /refresh với cùng token, request thứ 2 sẽ nhận `AUTH_REFRESH_TOKEN_INVALID` (do token cũ đã bị xóa khỏi Redis sau request 1) — và server coi đây là reuse attack → revoke tất cả sessions của user → user buộc phải đăng nhập lại. FE phải tuyệt đối implement queue pattern để tránh kịch bản này.
 
 ---
 
@@ -417,6 +417,7 @@ Validation rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented + contract sync: rate limit đổi sang 10 req/60s/userId (khớp implementation); reuse case trả `AUTH_REFRESH_TOKEN_INVALID` (bỏ tên `REFRESH_TOKEN_REUSED` trong note vì error code thực tế là INVALID); bổ sung note revoke-all-sessions khi detect reuse. |
 | 2026-04-19 | v0.2.1-auth | Thêm note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED vào mục Error codes dùng chung. |
 | 2026-04-19 | v0.2-auth | Thêm 5 Auth endpoints: register, login, oauth, refresh, logout. Chốt contract cho BE/FE tuần 1. |
 | (khởi tạo) | v0.1 | Initial skeleton, chưa có endpoint. |

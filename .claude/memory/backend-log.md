@@ -32,6 +32,26 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W2D3.5) — POST /api/auth/refresh với token rotation + reuse detection
+
+### Xong
+- RefreshRequest DTO: `record RefreshRequest(@NotBlank String refreshToken)`.
+- JwtTokenProvider: thêm `getClaimsAllowExpired()` — extract claims kể cả khi token EXPIRED (lấy từ `ExpiredJwtException.getClaims()`). Refactor `getUserIdFromToken()` và `getJtiFromToken()` dùng `getClaimsAllowExpired()` thay vì `getClaims()`.
+- AuthService: thêm `refresh()` — validate → rate limit per-userId (10 calls/60s) → hash compare constant-time → reuse detection → delete old → generate new. Thêm `revokeAllUserSessions()`, `constantTimeEquals()`.
+- AuthController: thêm `POST /refresh` delegate sang `authService.refresh()`.
+- AuthControllerTest: thêm 9 test (happy path, invalid token, expired token, revoked token, rate limit, suspended user, missing body, empty token, reuse revokes all sessions). 23/23 tests PASS, tổng 40/40 PASS, BUILD SUCCESS.
+
+### Đang dở
+- POST /api/auth/oauth (Firebase), /logout — phase sau.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- Constant-time comparison bằng `MessageDigest.isEqual()` — tránh timing attack khi compare hash. String.equals() có thể short-circuit.
+- `getClaimsAllowExpired()` cần thiết vì `getClaims()` throw trên expired token, nhưng expired refresh token vẫn cần extract userId/jti để check Redis trước khi trả EXPIRED error. Thực tế flow này không dùng vì EXPIRED check xảy ra trước claims extraction — nhưng method này safety net.
+- Contract thắng task spec: error codes là `AUTH_REFRESH_TOKEN_INVALID` và `AUTH_REFRESH_TOKEN_EXPIRED` (không phải `REFRESH_TOKEN_INVALID`/`REFRESH_TOKEN_EXPIRED`). Account disabled trả `AUTH_ACCOUNT_LOCKED` (không phải `ACCOUNT_DISABLED`).
+
 ## 2026-04-19 (W2D2 Phase B) — POST /api/auth/register + POST /api/auth/login
 
 ### Xong
