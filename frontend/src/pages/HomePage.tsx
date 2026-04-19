@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import api from '@/lib/api'
+import { useAuthStore } from '@/stores/authStore'
 
 type HealthState =
   | { status: 'loading' }
@@ -8,6 +9,10 @@ type HealthState =
 
 export default function HomePage() {
   const [health, setHealth] = useState<HealthState>({ status: 'loading' })
+
+  const user = useAuthStore((s) => s.user)
+  const accessToken = useAuthStore((s) => s.accessToken)
+  const isAuthenticated = !!accessToken
 
   useEffect(() => {
     api.get<{ status: string; service: string }>('/api/health')
@@ -59,6 +64,21 @@ export default function HomePage() {
             <p className="text-xs text-gray-400 mt-2">
               Kiểm tra: BE chạy port 8080? CORS config đúng?
             </p>
+          </div>
+        )}
+
+        {/* Auth state display */}
+        {isAuthenticated && user && (
+          <div className="mt-4 pt-4 border-t border-gray-100 text-left">
+            <p className="text-gray-700">Xin chào, <strong>{user.fullName}</strong></p>
+            <p className="text-xs text-gray-400 mt-1">@{user.username}</p>
+            <button
+              type="button"
+              onClick={() => { /* stub — logout Ngày 5 */ }}
+              className="mt-3 text-sm text-red-500 hover:underline"
+            >
+              Đăng xuất
+            </button>
           </div>
         )}
 

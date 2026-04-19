@@ -1,9 +1,12 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Eye, EyeOff, MessageSquare } from 'lucide-react'
 import { registerSchema, type RegisterFormData } from '@/features/auth/schemas/registerSchema'
+import { registerApi } from '@/features/auth/api'
+import { handleAuthError } from '@/features/auth/utils/handleAuthError'
+import { useAuthStore } from '@/stores/authStore'
 import { ToastContainer } from '@/components/Toast'
 import { useToast } from '@/hooks/useToast'
 
@@ -32,9 +35,13 @@ export default function RegisterPage() {
   const [isLoading, setIsLoading] = useState(false)
   const { toasts, addToast, removeToast } = useToast()
 
+  const navigate = useNavigate()
+  const setAuth = useAuthStore((s) => s.setAuth)
+
   const {
     register,
     handleSubmit,
+    setError,
     formState: { errors },
   } = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
@@ -43,11 +50,27 @@ export default function RegisterPage() {
 
   const onSubmit = async (data: RegisterFormData) => {
     setIsLoading(true)
-    // Stub — chưa call API thật (sẽ implement Tuần 2)
-    await new Promise<void>((resolve) => setTimeout(resolve, 800))
-    console.log('Register data:', data)
-    setIsLoading(false)
-    addToast('Form OK (chưa call API)', 'success')
+    // Bỏ confirmPassword — BE không expect field này
+    const payload = {
+      email: data.email,
+      username: data.username,
+      password: data.password,
+      fullName: data.fullName,
+    }
+    try {
+      const response = await registerApi(payload)
+      setAuth(response)
+      addToast('Đăng ký thành công! Chào mừng bạn.', 'success')
+      navigate('/')
+    } catch (error) {
+      handleAuthError(error, {
+        setFormError: (field, msg) =>
+          setError(field as keyof RegisterFormData, { message: msg }),
+        showToast: (msg, type) => addToast(msg, type ?? 'error'),
+      })
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (

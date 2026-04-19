@@ -82,6 +82,9 @@
 - **globalThis workaround** (api.ts <-> authStore.ts): RESOLVED trong W-FE-2. Đã migrate sang tokenStorage.ts pattern. globalThis hoàn toàn bị loại bỏ. Không còn cần check pattern này.
 - **Zustand persist: không persist accessToken** — quy tắc bắt buộc. Nếu thấy accessToken trong `partialize`, đây là BLOCKING issue.
 - **Axios interceptor loop** — khi retry /refresh phải dùng `axios.post` thuần (không phải api instance) và set `_retry` flag. Nếu không có 2 điều này, infinite retry loop.
+- **Form payload strip sensitive/client-only fields** — RegisterPage.tsx pattern: tạo `payload` object explicit chỉ chứa field BE expect (email, username, password, fullName), KHÔNG spread `...data` vì sẽ leak `confirmPassword`. Nếu thấy `registerApi(data)` trực tiếp mà RegisterFormData có field extra (confirmPassword, acceptTerms...) → BLOCKING. Reviewer pattern: `const payload = { field1: data.field1, ... }; api(payload)`.
+- **Zod schema dùng regex gộp length + format**: UX trade-off. Nếu gộp `[a-zA-Z_][a-zA-Z0-9_]{2,49}` vào 1 regex thay vì tách `.min(3).max(50).regex(format)`, error message khi fail length sẽ hiển thị message format (không chính xác). Non-blocking nếu schema match contract BE, nhưng gợi ý tách ra cho UX tốt hơn.
+- **W-FE-1 RESOLVED (W2D3)**: Username regex `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` trong registerSchema.ts khớp exact với BE constraint. First char không cho phép digit, total 3-50 ký tự. Không còn lệch với BE.
 
 ### Contract lệch thường gặp
 - (chưa có)

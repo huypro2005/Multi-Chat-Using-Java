@@ -8,11 +8,9 @@ export const registerSchema = z
       .email('Email không đúng định dạng'),
     username: z
       .string()
-      .min(3, 'Username phải có ít nhất 3 ký tự')
-      .max(50, 'Username tối đa 50 ký tự')
       .regex(
-        /^[a-zA-Z0-9_]+$/,
-        'Username chỉ chứa chữ cái, số và dấu gạch dưới'
+        /^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/,
+        'Username phải bắt đầu bằng chữ cái hoặc dấu gạch dưới, 3-50 ký tự, chỉ chứa chữ, số và dấu gạch dưới'
       ),
     fullName: z
       .string()

@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-04-19 (W2D3 Phase C) — Wire Login + Register với API thật
+
+### Xong
+- `src/types/auth.ts`: Tạo mới — `RegisterRequest`, `LoginRequest`, `UserDto`, `AuthResponse`, `ApiError` từ contract.
+- `src/features/auth/api.ts`: Tạo mới — `loginApi()` và `registerApi()` gọi axios instance.
+- `src/features/auth/utils/handleAuthError.ts`: Tạo mới — switch/case theo error codes: INVALID_CREDENTIALS → inline field error; EMAIL_TAKEN / USERNAME_TAKEN → inline; RATE_LIMITED / ACCOUNT_LOCKED → toast; VALIDATION_FAILED → fields loop; default → toast generic.
+- `src/features/auth/schemas/registerSchema.ts`: Fix W-FE-1 — username regex từ `/^[a-zA-Z0-9_]+$/` → `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/`. Bỏ `.min(3).max(50)` riêng.
+- `src/pages/LoginPage.tsx`: Wire với `loginApi` + `setAuth` + `navigate('/')`. Bỏ setTimeout stub.
+- `src/pages/RegisterPage.tsx`: Wire với `registerApi` + `setAuth` + `navigate('/')`. Bỏ confirmPassword trước khi gọi API bằng explicit object build.
+- `src/pages/HomePage.tsx`: Thêm auth state display (fullName + username + logout stub).
+- `src/components/ProtectedRoute.tsx`: Tạo mới — đọc `accessToken`, redirect /login nếu unauthenticated.
+- `npm run build`: 0 error — PASS.
+- `npm run lint`: 0 error — PASS.
+
+### Dang do
+- Logout button (stub, chờ Ngày 5).
+- Google OAuth (chờ Ngày 4).
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `AuthResponse` trong `types/auth.ts` vs `authStore.ts` có shape giống nhau (structural typing) — TypeScript accept không cần cast.
+- Destructure `{ confirmPassword: _, ...rest }` bị ESLint lỗi no-unused-vars. Fix bằng explicit object build thay spread.
+
+---
+
 ## 2026-04-19 (W2D2 Phase A) — W2-NEW: authService.init() + AppLoadingScreen
 
 ### Xong
