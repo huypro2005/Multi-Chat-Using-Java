@@ -126,6 +126,38 @@
 - **Monitor signal**: nếu sau production thấy > 1 dup/ngày → escalate sang advisory lock hoặc partial UNIQUE index sớm.
 - **Ngày**: 2026-04-19 (Tuần 3, Ngày 2 — formalized khi review BE createConversation)
 
+### ADR-014: STOMP model W4 — REST-gửi + STOMP-broadcast (publish-only), không tempId inbound
+- **Quyết định**: Tuần 4 chọn mô hình **REST `POST /api/conversations/{id}/messages` để gửi + STOMP `/topic/conv.{id}` để broadcast MESSAGE_CREATED event cho các subscriber**. KHÔNG implement `/app/chat.send` với tempId ACK/ERROR flow như ARCHITECTURE.md mục 5 mô tả gốc.
+- **Bối cảnh**: ARCHITECTURE.md thiết kế gốc cho mọi text message đi qua STOMP với tempId lifecycle (SENDING → SENT qua ACK hoặc FAILED qua ERROR, timeout 10s). Yêu cầu này tăng complexity đáng kể vì: (1) cần dedup server-side bằng Redis SET `msg:dedup:{userId}:{tempId}`, (2) cần timeout logic client-side + retry, (3) cần route ACK/ERROR qua `/user/queue/acks` + `/user/queue/errors`, (4) state machine FE phức tạp.
+- **Lý do**:
+  - REST-gửi đã có 201 response confirm save (W4D1 đã implement POST /messages). Sender biết message thành công qua HTTP status → không cần ACK riêng.
+  - Broadcast qua STOMP chỉ để thông báo receiver realtime. Receiver không cần tempId (không phải họ gửi).
+  - Sender cũng nhận broadcast → cần dedupe bằng message id (đơn giản hơn tempId dedup vì id đã có sau REST response).
+  - Giảm surface area bug V1. Socket layer vẫn cần cho typing/presence/read receipts (Tuần 5) nhưng không phải cho send-message path.
+  - Latency trade-off: REST POST thêm ~30-50ms vs pure STOMP SEND, nhưng V1 traffic thấp (<1000 concurrent) → không perceptible.
+- **Trade-off**:
+  - Mất ưu thế "fire-and-forget" của STOMP cho sender. Nếu REST POST fail → FE phải retry HTTP, không có socket-level retry.
+  - Nếu sau này có offline queueing client-side (gửi khi offline, sync khi online) → STOMP model gốc phù hợp hơn. V1 không có offline mode → acceptable.
+  - Yêu cầu BE broadcast PHẢI ở `@TransactionalEventListener(AFTER_COMMIT)` — broadcast trước commit → rollback → FE thấy message "ma". BLOCKING check khi review.
+  - FE PHẢI dedupe theo message id khi sender tự nhận broadcast của chính mình (REST response đã set vào cache rồi).
+- **Re-evaluation trigger**: Nếu Tuần 5-6 đo được latency REST POST > 100ms p50 hoặc user complain "tin nhắn chậm" → đánh giá migrate sang `/app/chat.send` với tempId.
+- **Ngày**: 2026-04-19 (Tuần 4, Ngày 2 — formalized khi draft SOCKET_EVENTS.md v1.0-draft-w4)
+
+### ADR-015: SimpleBroker V1 → RabbitMQ V2 khi scale >1 BE instance hoặc cần persistent queue
+- **Quyết định**: Tuần 4-6 dùng Spring `SimpleBroker` (in-memory) với prefix `/topic`, `/queue`. KHÔNG setup RabbitMQ hoặc external broker. Migrate trigger: (1) scale horizontal BE (>1 instance) hoặc (2) cần persistent queue để offline user catch-up qua broker thay vì REST polling.
+- **Bối cảnh**: SimpleBroker tương thích với multi-user single-instance, giảm infra dependency (không cần RabbitMQ container). ARCHITECTURE.md scale target V1 = 1 server Singapore, <1000 concurrent — khớp khả năng SimpleBroker.
+- **Lý do**:
+  - Infra simplicity: 1 Spring Boot + PostgreSQL + Redis, không thêm RabbitMQ → deploy đơn giản, debug dễ.
+  - SimpleBroker pure in-memory → latency broadcast <1ms local, nhanh hơn external broker (~5-10ms RabbitMQ).
+  - Không cần durable queue V1 vì offline catch-up đã có qua REST `GET /messages?cursor=...`.
+- **Trade-off**:
+  - **Không scale horizontal**: nếu thêm BE instance, 2 client connect 2 instance khác nhau → không nhận được broadcast của nhau vì SimpleBroker không sync cross-instance. BLOCKING khi scale.
+  - **Mất message khi BE restart**: subscribe destinations bị flush, nhưng DB vẫn có message → FE catch-up OK.
+  - **Không destination ACL tốt**: SimpleBroker không có ACL built-in → PHẢI custom trong `ChannelInterceptor` SUBSCRIBE. Đã document trong SOCKET_EVENTS.md mục 7.
+- **Migration path V2**: `config.enableStompBrokerRelay("/topic", "/queue").setRelayHost("rabbitmq")...` + RabbitMQ deployment. Destinations không đổi → FE không cần thay.
+- **Monitor signal**: nếu active WS sessions > 500 sustained → alert, chuẩn bị RabbitMQ migration.
+- **Ngày**: 2026-04-19 (Tuần 4, Ngày 2 — formalized khi draft SOCKET_EVENTS.md v1.0-draft-w4)
+
 ### ADR-011: Blacklist check fail-open khi Redis down (trade-off intentional)
 - **Quyết định**: `JwtAuthFilter` check `redisTemplate.hasKey("jwt:blacklist:{jti}")` trước khi set SecurityContext. Nếu Redis throw `RedisConnectionFailureException` → LOG warning + SKIP check (fail-open) → token vẫn authenticate nếu JWT signature valid & chưa expire.
 - **Bối cảnh**: Redis có thể crash / maintenance / network blip → nếu fail-closed (reject mọi request khi Redis down) sẽ downtime toàn bộ app.
@@ -142,7 +174,7 @@
 ## Contract version hiện tại
 
 - **API_CONTRACT.md**: v0.6.0-messages-rest (thêm Messages API W4D1 — POST + GET cursor-based, MessageDto/SenderDto/ReplyPreviewDto shape, rate limit 30/min, anti-enum 404 cho non-member. Conversations + Auth previous versions giữ nguyên.)
-- **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
+- **SOCKET_EVENTS.md**: v1.0-draft-w4 (W4D2 — model REST-gửi + STOMP-broadcast; `/topic/conv.{id}` + `MESSAGE_CREATED` event shape IDENTICAL với POST /messages REST response; BE dùng `@TransactionalEventListener(AFTER_COMMIT)`; FE dedupe bằng message id; placeholder MESSAGE_UPDATED/DELETED W6, TYPING/PRESENCE W5. Pending implement W4D3 BE + W4D4 FE.)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
 
@@ -234,6 +266,7 @@
 | 2026-04-19 | v0.5.1-conversations | POST /api/conversations rate limit đổi "30/giờ" → "10/phút/user" (W3D3 implement) để khớp code. Rate limit error kèm `details.retryAfterSeconds` lấy từ Redis TTL thực. |
 | 2026-04-19 | v0.5.2-conversations | Thêm `GET /api/users/{id}` (W3D4). Dùng lại `UserSearchDto` shape (id, username, fullName, avatarUrl — không expose email/status/lastSeenAt). 404 `USER_NOT_FOUND` merge cả not-exist và status!='active' để chống enumeration (pattern giống CONV_NOT_FOUND). Documented V4 migration thêm `last_seen_at` column nhưng KHÔNG expose V1 (AD-9). |
 | 2026-04-19 | v0.6.0-messages-rest | Thêm Messages API (W4D1): POST `/api/conversations/{convId}/messages` (gửi tin nhắn, validation 1-5000 chars, reply phải thuộc đúng conv) + GET cursor-based pagination (items ASC, nextCursor = createdAt cũ nhất, hasMore detect bằng limit+1 query). Rate limit 30/min/user (Redis INCR fail-open). Anti-enumeration 404 CONV_NOT_FOUND cho non-member. ReplyPreviewDto shallow 1-level (không recursive). Soft-delete via `deleted_at`. Reply tới soft-deleted message KHÔNG bị block V1 (AD-12, defer Tuần 6). |
+| 2026-04-19 | SOCKET v1.0-draft-w4 | Draft SOCKET_EVENTS.md W4 (W4D2): chọn model REST-gửi + STOMP-broadcast (ADR-014), không dùng tempId inbound. Destination `/topic/conv.{convId}` broadcast MESSAGE_CREATED với payload = MessageDto shape IDENTICAL REST response (BẮT BUỘC reuse cùng MessageMapper). Auth JWT ở CONNECT frame, member check ở SUBSCRIBE. BE implement bằng `@TransactionalEventListener(AFTER_COMMIT)` (không broadcast trước commit). FE dedupe bằng message id. Security: size limit 64KB, origin từ config không "*", heartbeat 10s. Placeholder events W5/W6 (TYPING, PRESENCE, MESSAGE_UPDATED/DELETED). Limitations V1: SimpleBroker in-memory (ADR-015), offline catch-up qua REST cursor, at-most-once delivery. Pending BE implement W4D3, FE implement W4D4. |
 
 ---
 
@@ -247,3 +280,4 @@
 - 2026-04-19 (W3D2): Review BE 4 endpoints Conversations (POST, GET list, GET detail, GET users/search) + FE API scaffold. REQUEST CHANGES — 2 BLOCKING ở FE: (1) `api.ts` đọc `.code` thay vì `.error` field của ErrorResponse → 409 CONV_ONE_ON_ONE_EXISTS handler sẽ luôn throw; (2) `types/conversation.ts` define `ConversationDto` có 4 field displayName/displayAvatarUrl/unreadCount/mutedUntil không có trong BE response (chỉ có ở SummaryDto) — runtime access sẽ undefined. Thêm ADR-013 (race ONE_ON_ONE acceptable V1, no lock). Mark W3-BE-1 RESOLVED (UUID @PrePersist Option B trong Conversation + ConversationMember; test assertion confirm). Thêm 2 contract-drift-patterns mới vào knowledge (error field name; Summary vs Detail shape). 5 BE warning non-blocking log vào WARNINGS.md nếu chưa có (dedupe memberIds, enforce max 49, rate limit TODO, N+1 batch load, UserController cross-package).
 - 2026-04-19 (W2 Final Audit): Audit cuối Tuần 2 trước tag `v0.2.0-w2`. Formalize 4 ADR còn implicit: ADR-008 (HS256 + jjwt 0.12.x), ADR-009 (Redis key schema), ADR-010 (AuthMethod enum), ADR-011 (Fail-open blacklist trade-off). Tạo `docs/WARNINGS.md` tổng hợp 5 pre-production items (W-BE-4 race existsBy→save, W-BE-5 null passwordHash guard, W-BE-6 X-Forwarded-For sanitize, W-BE-7 fail-open monitoring, W-BE-8 generateUniqueUsername race), 8 documented-acceptable, 6 cleanup-tuần-8, 7 tech-debt-nhỏ. Controller audit: 5 auth endpoints + 1 health, 0 drift so với contract v0.4.0-auth-complete. 1 orphan TODO: `useAuth.ts:29` "TODO Tuần 2 call logout API" — logout đã implement nơi khác (HomePage.tsx), TODO lỗi thời, map vào CL-1.
 - 2026-04-19 (W3D4): Review ConversationDetailPage + BE `GET /api/users/{id}` + migration V4 add `last_seen_at` + JwtAuthFilter update last_seen debounce 30s. APPROVE WITH COMMENTS (0 blocking). Contract v0.5.1 → v0.5.2-conversations (thêm GET /api/users/{id}). 5 entries vào WARNINGS.md: AD-9 (last_seen_at column có nhưng không expose V1 — privacy), AD-10 (JwtAuthFilter save full entity → lost-update window), TD-8 (MethodArgumentTypeMismatchException chưa map 400), TD-9 (error state không có retry button, V1 acceptable — React Query tự retry 3 lần), TD-10 (unused currentUser param). Không ADR mới. FE checklist pass hết: useConversation(id) với `enabled: !!id`, React Query key đổi khi id URL đổi → auto refetch; MessageInput `disabled` prop + `onSend?` optional ready cho W4; skeleton không flicker; 404 vs generic error tách rõ.
+- 2026-04-19 (W4D2): Overwrite `docs/SOCKET_EVENTS.md` skeleton → v1.0-draft-w4. Chốt model REST-gửi + STOMP-broadcast cho Tuần 4 (không dùng tempId inbound — ADR-014, khác ARCHITECTURE.md mục 5 gốc). Chốt SimpleBroker V1 → RabbitMQ V2 migration trigger (ADR-015). Destination `/topic/conv.{convId}` + `MESSAGE_CREATED` event envelope `{type, payload}`. Payload IDENTICAL MessageDto REST response (bắt buộc reuse MessageMapper). BE implementation guide: `WebSocketConfig` (SockJS + SimpleBroker + allowedOrigins từ config), `AuthChannelInterceptor` (JWT ở CONNECT, member check ở SUBSCRIBE), `MessageBroadcaster` dùng `@TransactionalEventListener(AFTER_COMMIT)` (BLOCKING: không broadcast trước commit). FE implementation guide: `stompClient.ts` singleton, `useConvSubscription(convId)` hook với dedupe bắt buộc bằng message id + cleanup unsubscribe. Security: size limit 64KB, origin config-driven, heartbeat 10s. Known limitations V1: in-memory SimpleBroker, offline miss broadcast (catch-up qua REST cursor), at-most-once delivery, member check chỉ khi SUBSCRIBE. Placeholder W5 (TYPING, PRESENCE, READ_RECEIPT) + W6 (MESSAGE_UPDATED/DELETED). Checklist W4-D3 (BE) + W4-D4 (FE) đã liệt kê trong contract mục 10. Không có code thay đổi.

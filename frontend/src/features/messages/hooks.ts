@@ -2,6 +2,7 @@ import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-q
 import { messageKeys } from '../conversations/queryKeys'
 import { getMessages, sendMessage } from './api'
 import type { MessageDto, MessageListResponse, SendMessageRequest } from '@/types/message'
+import { useAuthStore } from '@/stores/authStore'
 
 // ---------------------------------------------------------------------------
 // useMessages — cursor-based infinite query (oldest first, scroll-up to load more)
@@ -23,6 +24,7 @@ export function useMessages(convId: string) {
 // ---------------------------------------------------------------------------
 export function useSendMessage(convId: string) {
   const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
 
   return useMutation({
     mutationFn: (data: SendMessageRequest) => sendMessage(convId, data),
@@ -39,7 +41,12 @@ export function useSendMessage(convId: string) {
       const optimisticMsg: MessageDto = {
         id: tempId,
         conversationId: convId,
-        sender: { id: '', username: '', fullName: 'Bạn', avatarUrl: null },
+        sender: {
+          id: user?.id ?? '',
+          username: user?.username ?? '',
+          fullName: user?.fullName ?? 'Bạn',
+          avatarUrl: user?.avatarUrl ?? null,
+        },
         type: variables.type ?? 'TEXT',
         content: variables.content,
         replyToMessage: null,

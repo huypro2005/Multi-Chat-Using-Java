@@ -4,7 +4,7 @@ import { MessageCircle } from 'lucide-react'
 import { useConversation } from '@/features/conversations/hooks'
 import ConversationHeader from '@/features/conversations/components/ConversationHeader'
 import { ConversationInfoPanel } from '@/features/conversations/components/ConversationInfoPanel'
-import { MessagesAreaPlaceholder } from '@/features/messages/components/MessagesAreaPlaceholder'
+import { MessagesList } from '@/features/messages/components/MessagesList'
 import { MessageInput } from '@/features/messages/components/MessageInput'
 
 // ---------------------------------------------------------------------------
@@ -75,8 +75,8 @@ export default function ConversationDetailPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Messages column */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <MessagesAreaPlaceholder />
-          <MessageInput disabled={true} />
+          <MessagesList conversationId={id!} />
+          <MessageInput conversationId={id!} />
         </div>
 
         {/* Info panel — slide-in từ phải */}

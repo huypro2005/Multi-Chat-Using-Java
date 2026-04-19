@@ -252,8 +252,44 @@ Best-effort logout API, luôn `clearAuth()` + `navigate('/login')` trong `finall
 
 ---
 
+## MessagesList scroll pattern
+
+- `bottomRef` + `isAtBottom` state: scroll to bottom chỉ khi user đang ở cuối (threshold 80px).
+- `isAtBottom` track qua `onScroll` → `scrollHeight - scrollTop - clientHeight < 80`.
+- useEffect deps: `[messages.length, isAtBottom]` — trigger khi count thay đổi.
+- Không dùng eslint-disable khi rule không thực sự cần disable (lint sẽ warn "unused directive").
+
+## IntersectionObserver infinite scroll
+
+- `topSentinelRef` ở đầu list, observe khi `hasNextPage && !isFetchingNextPage`.
+- Preserve scroll position sau fetch: lưu `prevScrollHeight` trước `fetchNextPage()`, cộng delta vào `scrollTop` trong `.then()`.
+- Dùng `void fetchNextPage().then(...)` để tránh lint floating-promise.
+
+## MessageItem grouping
+
+- `shouldShowAvatar(messages, index)`: hiện avatar khi index=0, hoặc sender khác, hoặc gap > 60_000ms.
+- isOwn bubble: `bg-indigo-600 text-white rounded-2xl rounded-br-sm`, justify-end.
+- Other bubble: `bg-white border border-gray-200 rounded-2xl rounded-bl-sm`, justify-start.
+- Timestamp hover: `opacity-0 group-hover:opacity-100 transition-opacity` (parent cần `group` class).
+- Status icon: `id.startsWith('temp-')` → spinner; else → ✓.
+- `React.memo` bắt buộc cho MessageItem (list 100+ items).
+
+## Optimistic sender — lấy từ authStore
+
+`useAuthStore((s) => s.user)` trong `useSendMessage` hook → dùng `user?.id/username/fullName/avatarUrl` thay vì hardcode `'Bạn'`.
+
+## MessageInput (W4-D2)
+
+- Props: `conversationId: string`, `disabled?: boolean` (default false).
+- `useSendMessage(conversationId)` nội bộ — không cần `onSend` prop từ parent.
+- Auto-resize: `el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 5*24) + 'px'`.
+- Character counter > 4500 (yellow), > 5000 (red). Block send khi over limit.
+
+---
+
 ## Changelog file này
 
+- 2026-04-20 (W4-D2): MessageItem (memo, grouping, status icon, hover timestamp), MessagesList (infinite scroll, auto-scroll, skeleton/error/empty states), MessageInput (enabled, Enter send, auto-resize, char counter), wire ConversationDetailPage. Optimistic sender từ authStore.
 - 2026-04-19 (W4-D1): CONSOLIDATE (xóa outdated notes, gộp pattern). Thêm: message types, useInfiniteQuery pattern, optimistic update useSendMessage, messageKeys factory.
 - 2026-04-19 (W3D4): ConversationDetailPage 3-section, MessageInput disabled pattern, features/messages/ folder.
 - 2026-04-19 (W3D3): ConversationListItem, dialog/memo/409 patterns.

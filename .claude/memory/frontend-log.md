@@ -5,6 +5,14 @@
 
 ---
 
+[FE][W4-D2][2026-04-20] feat: MessagesList (infinite scroll, auto-scroll), MessageItem (grouping, status), MessageInput (enabled, Enter send, auto-resize), wire ConversationDetailPage
+- Tạo: src/features/messages/components/MessageItem.tsx — React.memo, isOwn/other bubble, hover timestamp, status icon (spinner/✓), reply preview, shouldShowAvatar grouping
+- Tạo: src/features/messages/components/MessagesList.tsx — useInfiniteQuery flatten, bottomRef auto-scroll, IntersectionObserver infinite scroll + preserve scrollTop, MessagesSkeleton/Error/Empty states
+- Sửa: src/features/messages/components/MessageInput.tsx — conversationId prop, useSendMessage nội bộ, auto-resize textarea, char counter 4500/5000, Enter send, remove disabled=true
+- Sửa: src/features/messages/hooks.ts — optimistic sender lấy từ useAuthStore thay vì hardcode 'Bạn'
+- Sửa: src/pages/ConversationDetailPage.tsx — replace MessagesAreaPlaceholder → MessagesList, update MessageInput props
+- build: 0 TS error | lint: 0 ESLint error/warning
+
 [FE][W4-D1][2026-04-19] feat: message types, API functions, useMessages (infinite query), useSendMessage (optimistic), frontend-knowledge.md consolidated
 - Tạo: src/types/message.ts — MessageType (const obj), MessageSenderDto, ReplyPreviewDto, MessageDto, MessageListResponse, SendMessageRequest, OptimisticMessage
 - Tạo: src/features/messages/api.ts — sendMessage(), getMessages() (cursor-based)

@@ -26,6 +26,118 @@
 
 ---
 
+## 2026-04-19 — W4D2 Review: Messages UI Phase A (MessagesList + MessageItem + MessageInput wire)
+
+### Verdict
+APPROVE (0 BLOCKING, 6 WARNING non-blocking)
+
+### Files reviewed
+- `frontend/src/features/messages/components/MessageItem.tsx` (NEW): memo component, bubble own/other, reply preview shallow, hover timestamp, temp spinner icon.
+- `frontend/src/features/messages/components/MessagesList.tsx` (NEW): infinite-query render, IntersectionObserver top sentinel, isAtBottom threshold 80px, preserve scroll on older-page load, shouldShowAvatar grouping function.
+- `frontend/src/features/messages/components/MessageInput.tsx` (modified): tách thành textarea auto-resize (cap 5*24px), Enter/Shift+Enter handling, MAX_CHARS=5000 guard, counter khi >4500, accessibility labels.
+- `frontend/src/features/messages/hooks.ts` (modified): `useSendMessage` optimistic update với tempId prefix `temp-${Date.now()}-${random}`, onMutate/onError/onSuccess/onSettled flow, sender snapshot từ authStore (không hardcode).
+- `frontend/src/pages/ConversationDetailPage.tsx` (modified): replace `MessagesAreaPlaceholder` bằng `MessagesList` + `MessageInput`, truyền `conversationId={id!}`.
+
+### Checklist pass
+
+**1. Optimistic correctness**: tempId prefix `temp-` không conflict UUID; onSuccess replace theo tempId (map items, không append dup); sender lấy từ authStore snapshot; onError rollback về snapshot cache. PASS.
+
+**2. Auto-scroll**: threshold 80px; effect deps `[messages.length, isAtBottom]`; KHÔNG scroll khi user scroll lên (isAtBottom=false). Khi load older pages, messages.length tăng nhưng user đang ở top → isAtBottom=false → không bị ép scroll xuống bottom. PASS.
+
+**3. Infinite scroll**: `observer.disconnect()` cleanup có; guard `!isFetchingNextPage`; preserve scroll position bằng `prevScrollHeight` delta sau `fetchNextPage().then(...)`. PASS.
+
+**4. MessageItem memo**: `memo(function MessageItem)`; props primitives (boolean); shouldShowAvatar tính ngoài render của item (trong parent). PASS.
+
+**5. MessageInput Enter/Shift+Enter**: `e.key==='Enter' && !e.shiftKey` → preventDefault + send; Shift+Enter không preventDefault → xuống dòng; empty/whitespace trim kiểm tra; >5000 chars block không gửi + charError UI. PASS.
+
+**6. Auto-resize textarea**: `height='auto'` rồi `min(scrollHeight, 5*24px)`; reset về auto sau send. PASS (nit line-height assumption).
+
+**7. Grouping**: `shouldShowAvatar`: index===0 → true; sender khác prev → true; gap >60_000ms → true. PASS.
+
+**8. Route wire**: `id!` acceptable vì route `/conversations/:id` đảm bảo id có giá trị khi page render; `useConversation(id ?? '')` + early return skeleton/error trước khi render MessagesList. `MessagesAreaPlaceholder` import đã bị xóa khỏi page. PASS.
+
+### Issues found (non-blocking)
+
+1. **[WARNING] UX: khi user gửi tin nhắn, nếu họ đang ở giữa list (isAtBottom=false) → KHÔNG scroll xuống → user không thấy tin của mình.** Sender-triggered scroll nên force bất kể isAtBottom. Gợi ý: trong `useSendMessage.onMutate` hoặc post-send, dispatch scroll-to-bottom (cần thêm ref hoặc state). Defer cho Phase B/W5.
+
+2. **[WARNING] `messageKeys` đặt trong `features/conversations/queryKeys.ts`** — tổ chức lệ thuộc cross-feature. Nên refactor sang `features/messages/queryKeys.ts` để consistency. Non-blocking V1 (không ảnh hưởng runtime).
+
+3. **[WARNING] Không có error toast khi sendMessage fail** — optimistic rollback làm message biến mất, user không biết lý do. Gợi ý add toast "Gửi thất bại, thử lại" trong `onError`. Defer W5.
+
+4. **[WARNING] Infinite query không set `maxPages`** — load nhiều older pages sẽ phình cache. V1 scale <1000 msgs/conv acceptable. Future: `maxPages: 10` + re-fetch khi user scroll xuống.
+
+5. **[WARNING] `isOverLimit` counter vs `trimmed.length` check inconsistent** — counter dùng `content.length` (có whitespace), validation dùng `trimmed.length`. User có thể thấy "5001/5000" (đỏ) nhưng vẫn gửi được (nếu trim xuống 4999). Edge case khi content toàn whitespace ở cuối. Non-blocking.
+
+6. **[WARNING] `fetchNextPage()` Promise không catch** — nếu fail, `.then(...)` callback vẫn tính scroll delta sai. Thêm `.catch(() => {})` hoặc dùng await inside try/catch. Non-blocking V1.
+
+### Contract impact
+KHÔNG thay đổi contract. Implementation khớp MessageDto/MessageListResponse/SendMessageRequest shape v0.6.0-messages-rest. Optimistic tempId convention là FE concern, không lên contract (ADR-014: REST-gửi model, không cần tempId inbound qua STOMP).
+
+### Điểm đáng chú ý cho Phase B (WebSocket wire W4D3+)
+
+1. **Dedup bằng message id khi broadcast đến** — optimistic `onSuccess` đã replace tempId→realMsg; khi STOMP broadcast MESSAGE_CREATED trở lại (sender tự nhận), sẽ có `id` khớp message trong cache → skip. Code Phase B nên:
+   ```
+   if (currentItems.some(m => m.id === broadcastMsg.id)) return; // skip dup
+   ```
+2. **Scroll-on-receive-from-others**: broadcast event cho msg từ người khác, nếu isAtBottom=true → scroll xuống. Áp dụng cùng mechanism hiện có.
+3. **Reconnect catch-up**: khi WS reconnect, gọi `refetch` hoặc `invalidateQueries` cho messageKeys.all(convId) để REST cursor-based fetch lại trang đầu tiên.
+
+### Follow-ups cho orchestrator
+1. APPROVE merge Phase A — có thể commit branch.
+2. Gọi **backend-dev** W4-D3 (BE WebSocket config + broadcaster) theo SOCKET_EVENTS.md mục 4 + checklist mục 10.
+3. Sau W4-D3 xong, gọi **frontend-dev** W4-D4 (FE subscription hook) theo mục 5 + checklist mục 10. Focus dedup + cleanup unsubscribe — đã liệt kê điểm dễ sai ở log W4D2 contract entry.
+4. Phase B review same-day sau W4-D4.
+
+---
+
+## 2026-04-19 — W4D2 Contract Draft: SOCKET_EVENTS.md v1.0-draft-w4
+
+### Verdict
+N/A (contract-write, không phải review code)
+
+### Files edited
+- `docs/SOCKET_EVENTS.md`: overwrite skeleton v0.1 → **v1.0-draft-w4** (347 lines). Chốt model REST-gửi + STOMP-broadcast cho W4, không dùng `tempId` inbound. Destination `/topic/conv.{convId}` + `MESSAGE_CREATED` event shape IDENTICAL MessageDto REST response. BE/FE implementation guide + checklist W4-D3/D4.
+- `.claude/memory/reviewer-knowledge.md`: thêm ADR-014 (STOMP model W4 chọn REST-gửi + broadcast, không tempId), ADR-015 (SimpleBroker V1 → RabbitMQ V2 migration trigger). Update contract version current state. Thêm changelog SOCKET v1.0-draft-w4.
+
+### Key architectural decisions
+1. **Chọn REST-gửi + STOMP-broadcast thay vì STOMP bidirectional** (khác ARCHITECTURE.md mục 5):
+   - Lý do: REST POST đã confirm save qua 201 → không cần ACK riêng. Giảm complexity dedup server-side + timeout FE state machine.
+   - Trade-off: mất fire-and-forget STOMP latency advantage (~30-50ms REST overhead). V1 traffic thấp → acceptable.
+   - Re-evaluate nếu Tuần 5-6 đo p50 latency REST POST > 100ms.
+2. **MessageDto shape IDENTICAL REST và broadcast**: BE BẮT BUỘC reuse cùng `MessageMapper` cho cả REST response và `SimpMessagingTemplate.convertAndSend` payload. Nếu lệch → FE runtime mismatch.
+3. **Broadcast PHẢI ở `@TransactionalEventListener(AFTER_COMMIT)`**: tránh race broadcast-trước-rollback → FE thấy message ma.
+4. **Member authorization ở SUBSCRIBE interceptor**: SimpleBroker V1 không có destination-level ACL built-in. Check trong `ChannelInterceptor.preSend` khi `StompCommand.SUBSCRIBE` với dest match `/topic/conv.*`.
+5. **FE dedupe bắt buộc bằng message id**: sender tự nhận broadcast của mình sau REST POST → phải skip.
+
+### BE/FE implementation focus khi W4-D3/D4
+- **BE W4-D3 điểm dễ sai nhất**:
+  1. Broadcast TRƯỚC commit (không dùng `@TransactionalEventListener` → race rollback).
+  2. `setAllowedOriginPatterns("*")` hardcode trong code (phải đọc config, lock down production).
+  3. Quên `setMessageSizeLimit(64KB)` → DoS qua payload lớn.
+  4. Member check chỉ ở controller REST, KHÔNG ở SUBSCRIBE interceptor → non-member subscribe được `/topic/conv.{id}` lạ và nhận broadcast.
+  5. Dùng `String.equals("password")` hardcode trong interceptor thay vì dùng `JwtTokenProvider.validateTokenDetailed` → drift khỏi REST validation logic.
+- **FE W4-D4 điểm dễ sai nhất**:
+  1. Quên dedupe bằng message id → sender thấy message duplicate (1 lần từ optimistic REST response, 1 lần từ broadcast).
+  2. Không unsubscribe trong cleanup `useEffect` → leak + duplicate handlers khi navigate conversations.
+  3. Dependency array thiếu `client.connected` → subscribe khi chưa connect, silently fail.
+  4. Nhầm `AUTH_TOKEN_EXPIRED` với `AUTH_REQUIRED` → user bị đá ra login thay vì refresh token.
+  5. Không gọi REST catch-up sau reconnect → mất message trong khoảng offline.
+
+### Issues found
+N/A (chưa có code để review. Các BLOCKING check đã documented inline trong contract mục 4.1, 4.3, 5.2, 5.3 + mục 10 checklist.)
+
+### Contract impact
+- SOCKET_EVENTS.md: v0.1 skeleton → v1.0-draft-w4 (major — first real content).
+- API_CONTRACT.md: KHÔNG thay đổi (MessageDto shape đã chốt ở v0.6.0-messages-rest W4D1, broadcast reuse).
+- ADR: thêm ADR-014, ADR-015.
+
+### Follow-ups cho orchestrator
+1. Gọi **backend-dev** W4-D3: implement theo mục 4 SOCKET_EVENTS.md + checklist mục 10 (BE). Nhắc đọc `.claude/memory/backend-knowledge.md` trước khi start.
+2. Gọi **frontend-dev** W4-D4: implement theo mục 5 SOCKET_EVENTS.md + checklist mục 10 (FE). Có thể song song W4-D3 vì không đè file.
+3. Sau W4-D3/D4 gọi **code-reviewer** review same-day — focus vào 5 điểm dễ sai BE + 5 điểm dễ sai FE đã liệt kê trên.
+
+---
+
 ## 2026-04-19 — W4D1 Review: Messages REST endpoints + FE hooks scaffold
 
 ### Verdict
