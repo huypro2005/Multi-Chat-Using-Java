@@ -8,6 +8,7 @@ import RegisterPage from '@/pages/RegisterPage'
 import HomePage from '@/pages/HomePage'
 import ConversationsLayout from '@/pages/ConversationsLayout'
 import ConversationsIndexPage from '@/pages/ConversationsIndexPage'
+import ConversationDetailPage from '@/pages/ConversationDetailPage'
 
 export default function App() {
   // Gate: không render routes cho đến khi authService.init() hoàn tất.
@@ -37,15 +38,8 @@ export default function App() {
           <Route path="/conversations" element={<ConversationsLayout />}>
             {/* index: /conversations (chưa chọn conversation) */}
             <Route index element={<ConversationsIndexPage />} />
-            {/* detail: /conversations/:id — placeholder, Ngày 4 implement */}
-            <Route
-              path=":id"
-              element={
-                <div className="flex-1 flex items-center justify-center p-8 text-gray-400 bg-gray-50">
-                  <p className="text-sm">Detail tuần 4</p>
-                </div>
-              }
-            />
+            {/* detail: /conversations/:id */}
+            <Route path=":id" element={<ConversationDetailPage />} />
           </Route>
         </Route>
 

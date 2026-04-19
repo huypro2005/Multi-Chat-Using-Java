@@ -32,6 +32,29 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (Tuần 3, Ngày 4) — GET /api/users/{id}, V4 last_seen_at migration
+
+### Xong
+- [BE][W3-D4][2026-04-19] feat: GET /api/users/{id}, V4 last_seen_at migration
+  - `V4__add_last_seen.sql`: ALTER TABLE users ADD COLUMN last_seen_at TIMESTAMPTZ NULL + index idx_users_last_seen.
+  - `User` entity: thêm field `OffsetDateTime lastSeenAt` (`@Column(name="last_seen_at")`).
+  - `ConversationService.getUserById(UUID)`: load user, filter active, trả `UserSearchDto.from(user)` — throw 404 USER_NOT_FOUND nếu không tồn tại hoặc không active.
+  - `UserController`: thêm `GET /{id}` endpoint, delegate `conversationService.getUserById(id)`.
+  - `JwtAuthFilter`: sau khi set authentication thành công, update `lastSeenAt = now()` nếu `lastSeenAt == null || duration > 30s`. Fail-open (non-critical, catch + log.warn).
+  - `mvn test`: 68 tests pass, BUILD SUCCESS (exit code 0).
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- Task 2 (last_seen_at) đã làm đầy đủ — không cần skip. Logic update sync trong JwtAuthFilter với throttle 30s là đủ cho V1 (scale nhỏ <1000 users). Nếu cần async sau này: @Async + Spring TaskExecutor.
+- `OffsetDateTime` (không phải `Instant`) cho TIMESTAMPTZ — consistent với User entity pattern đã chốt.
+
+---
+
 ## 2026-04-19 (Tuần 3, Ngày 3 — fix) — fix: rate limit fail-open Redis, retryAfterSeconds, sync contract
 
 ### Xong

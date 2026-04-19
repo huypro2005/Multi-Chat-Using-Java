@@ -19,6 +19,8 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.UUID;
@@ -110,6 +112,19 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                     );
             authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
             SecurityContextHolder.getContext().setAuthentication(authentication);
+
+            // Update last_seen_at nếu chưa set hoặc đã > 30 giây — tránh ghi mỗi request
+            try {
+                OffsetDateTime now = OffsetDateTime.now();
+                OffsetDateTime lastSeen = user.getLastSeenAt();
+                if (lastSeen == null || Duration.between(lastSeen, now).getSeconds() > 30) {
+                    user.setLastSeenAt(now);
+                    userRepository.save(user);
+                }
+            } catch (Exception e) {
+                // Non-critical — không fail request nếu update last_seen_at lỗi
+                log.warn("Không thể update last_seen_at cho userId={}: {}", user.getId(), e.getMessage());
+            }
 
         } catch (Exception e) {
             log.warn("Không thể set authentication từ JWT: {}", e.getMessage());

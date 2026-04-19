@@ -26,6 +26,56 @@
 
 ---
 
+## 2026-04-19 — W3D4 Review: ConversationDetailPage + GET /api/users/{id} + last_seen_at
+
+### Verdict
+APPROVE WITH COMMENTS
+
+Không có BLOCKING. FE skeleton/error states clean, routing hook đúng pattern (`enabled: !!id`, refetch theo `id` thay đổi qua React Query key), MessageInput future-proof cho W4 (`onSend?` optional, `disabled` prop). BE `getUserById` correct shape (UserSearchDto — no email, no status, no lastSeenAt), status filter dùng `"active".equals()` khớp entity lowercase. Migration V4 OK (IF NOT EXISTS, index DESC NULLS LAST). 4 warning documented vào WARNINGS.md (AD-9, AD-10, TD-8, TD-9, TD-10). Ship được W3D4; fix V2 cho `last_seen_at` write pattern.
+
+### Files reviewed
+- `frontend/src/pages/ConversationDetailPage.tsx` (mới, 92 dòng): skeleton + error state (404 vs generic) + main layout (Header + MessagesAreaPlaceholder + MessageInput + InfoPanel).
+- `frontend/src/features/conversations/components/ConversationHeader.tsx` (mới, 92 dòng): avatar + name + sub-text, back button mobile, toggle info, semantic structure.
+- `frontend/src/features/conversations/components/ConversationInfoPanel.tsx` (mới, 67 dòng): slide-in panel, members list, OWNER/ADMIN badge.
+- `frontend/src/features/messages/components/MessageInput.tsx` (mới, 68 dòng): textarea + Send button, `disabled` prop + optional `onSend` cho W4.
+- `frontend/src/features/messages/components/MessagesAreaPlaceholder.tsx` (mới, 15 dòng): placeholder sẽ replace bởi MessagesList ở W4.
+- `frontend/src/App.tsx` (sửa): thay placeholder div bằng `<ConversationDetailPage />`.
+- `backend/src/main/resources/db/migration/V4__add_last_seen.sql` (mới): ALTER TABLE ADD COLUMN last_seen_at TIMESTAMPTZ NULL + index.
+- `backend/src/main/java/com/chatapp/user/entity/User.java` (sửa): thêm field `lastSeenAt` + mapping.
+- `backend/src/main/java/com/chatapp/user/controller/UserController.java` (sửa): thêm `GET /{id}`.
+- `backend/src/main/java/com/chatapp/conversation/service/ConversationService.java` (sửa): thêm `getUserById(UUID)`.
+- `backend/src/main/java/com/chatapp/security/JwtAuthFilter.java` (sửa): update `last_seen_at` debounce 30s, try/catch fail-open.
+
+### Checklist BLOCKING pass
+1. **Error handling** PASS — 404 detect qua `(error as any)?.response?.status === 404` → hiển thị "Không tìm thấy cuộc trò chuyện"; generic error → "Không thể tải cuộc trò chuyện". Loading skeleton đặt đúng trước data render, không race với error state. *Note: error state không có "Thử lại" button, chỉ "Quay lại" — log TD-9 vì V1 acceptable (React Query đã tự retry 3 lần).*
+2. **Deep link / routing** PASS — `useConversation(id ?? '')` kết hợp `enabled: !!id` (hooks.ts:23) → không gọi API với id rỗng; queryKey `conversationKeys.detail(id)` → khi `id` URL đổi React Query refetch tự động (key thay đổi = query mới). Navigate từ conv A → B → C hoạt động đúng.
+3. **Future-proof W4** PASS — `MessageInput` có `disabled` prop (default true) + `onSend?` optional. Placeholder đã đặt đúng vị trí giữa Header và MessageInput, W4 chỉ cần replace `<MessagesAreaPlaceholder />` bằng `<MessagesList conversationId={id} />`. Interface đã declare `onSend` dù chưa wire.
+4. **Accessibility** PASS (với 1 gợi ý) — Back button có `aria-label="Quay lại"`, close info có `aria-label="Đóng"`, toggle info có `aria-label="Thông tin cuộc trò chuyện"`. Send button có `aria-label="Gửi tin nhắn"`. Name dùng `<p>` thay vì `<h1>` — không blocking vì đây là detail sub-page trong route có layout chính (PageTitle ở route root), nhưng gợi ý nâng lên `<h2>` cho semantic hierarchy. Info panel không có focus trap khi mở (non-blocking V1).
+5. **BE GET /api/users/{id}** PASS — Response `UserSearchDto` chỉ có `id, username, fullName, avatarUrl`. KHÔNG có `email`, KHÔNG có `status`, KHÔNG có `lastSeenAt`. 404 cho cả not-exist + inactive (`.filter(u -> "active".equals(u.getStatus()))` trước `.orElseThrow`) → anti-enumeration.
+6. **BE last_seen update** — xem warning 1 bên dưới (AD-10 documented V1 acceptable).
+7. **Contract** RESOLVED — thêm section `GET /api/users/{id}` vào `docs/API_CONTRACT.md` (v0.5.2-conversations). Ghi AD-9 vào WARNINGS.md cho `last_seen_at` non-exposed.
+
+### Warnings (non-blocking, đã log WARNINGS.md)
+
+1. **[BE][AD-10] `JwtAuthFilter` update last_seen qua `userRepository.save(user)` full entity**: filter load User ở attempt set SecurityContext (snapshot đầu request), sau set context thì `user.setLastSeenAt(now); userRepository.save(user)` ghi lại TOÀN BỘ entity. Vấn đề: (a) lost-update window nếu request song song đổi field khác (avatar, status) ở thread kia — save của filter dùng snapshot cũ sẽ overwrite; (b) thiếu `@Transactional` → auto-commit 1 tx/save; (c) dirty-checking không hỗ trợ vì User không trong persistence context của filter. V1 traffic thấp, chấp nhận. V2: partial UPDATE bằng `@Modifying @Query` hoặc Redis presence pattern.
+
+2. **[BE][AD-9] `last_seen_at` column có nhưng không expose V1**: migration V4 thêm column + entity field + update logic trong filter, nhưng KHÔNG expose qua bất kỳ DTO nào (`UserSearchDto` không include). Đúng thiết kế: V1 không có policy privacy cho presence. Column đã có sẵn để V2 không tốn migration (chỉ wire thêm ở DTO khi chốt policy).
+
+3. **[BE][TD-8] `MethodArgumentTypeMismatchException` không map → 500 thay vì 400**: áp dụng cho mọi endpoint `@PathVariable UUID id` (bao gồm `GET /api/conversations/{id}`, `GET /api/users/{id}`). FE test thủ công gõ URL sai format sẽ thấy INTERNAL_ERROR. Contract dòng 623 cho phép 400 VALIDATION_FAILED nhưng handler chưa wire. V1 acceptable vì FE dùng Link/navigate, không gõ URL.
+
+4. **[FE][TD-9] Error state generic không có "Thử lại" button**: chỉ có "Quay lại" navigate về list. V1 acceptable — React Query mặc định retry 3 lần với exponential backoff trước khi báo isError; nếu vẫn fail thì thường network/server down, retry thủ công cũng ít khi pass. Nếu muốn tốt hơn thì thêm `onClick={() => refetch()}`.
+
+5. **[FE][TD-10] `UserController.getUserById` có param `currentUser` không dùng**: compiler warning "unused parameter". Giữ vì có thể cần cho filter block list (V2) — khuyến nghị suppress warning hoặc có comment `// currentUser reserved for future block-list filter (V2)`.
+
+6. **[FE][gợi ý non-blocking] Semantic heading**: `ConversationHeader` hiển thị tên conversation trong `<p>` thay vì `<h1>`/`<h2>`. Cho screen reader nên dùng `<h2>` (route chính đã có page title). Không log WARNINGS vì thuần UI accessibility.
+
+### Contract impact
+- **Có**: `docs/API_CONTRACT.md` mục Users thêm `GET /api/users/{id}` section (v0.5.1 → v0.5.2-conversations). Dùng lại `UserSearchDto` shape, 404 merge not-exist + inactive, document `lastSeenAt` non-exposed V1.
+- **WARNINGS.md**: thêm AD-9, AD-10, TD-8, TD-9, TD-10 (5 entries).
+- **Knowledge**: không thêm ADR mới (không phải quyết định kiến trúc lớn mới — chỉ là application của ADR-011 pattern "fail-open non-critical side effect" + pattern anti-enumeration đã có).
+
+---
+
 ## 2026-04-19 — W3D3 Review: conversation list UI + create dialog + BE rate limit
 
 ### Verdict

@@ -634,6 +634,48 @@ Field notes:
 
 ---
 
+### GET /api/users/{id}
+
+**Description**: Lấy thông tin public của 1 user theo UUID. Dùng ở ConversationDetailPage (khi cần lookup thêm thông tin member peer) hoặc cho future "user profile modal".
+
+**Auth required**: Yes
+
+**Rate limit**: không áp riêng — chung với global per-user request budget (V1 chưa enforce).
+
+**Path params**:
+
+| Param | Kiểu | Mô tả |
+|-------|------|------|
+| `id` | UUID | ID của user cần xem. |
+
+**Response 200**:
+
+```json
+{
+  "id": "7c1a7c16-4c72-4a2a-a8f6-def444555666",
+  "username": "bob",
+  "fullName": "Bob Tran",
+  "avatarUrl": null
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. *(V1 có thể bubble 500 nếu GlobalExceptionHandler chưa map `MethodArgumentTypeMismatchException`; documented warning.)* |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `USER_NOT_FOUND` | User không tồn tại **HOẶC** `status != 'active'` (suspended, deleted). Merge để không leak existence. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Notes**:
+- Response shape **dùng lại `UserSearchDto`** — cùng 4 field (id, username, fullName, avatarUrl). KHÔNG expose `email` (PII), KHÔNG expose `status` (internal), KHÔNG expose `lastSeenAt` (V1 privacy — xem WARNINGS.md mục "last_seen_at chưa expose").
+- Merge `USER_NOT_FOUND` cho cả case không tồn tại + inactive để tránh enumeration (giống pattern `CONV_NOT_FOUND` ở GET detail).
+- Endpoint hiện **không filter** user đã block caller / bị caller block — V1 chấp nhận (tương tự `/api/users/search`), wire khi `user_blocks` table ra đời.
+- Không expose quan hệ conversation giữa caller và target — FE tự tính từ `/api/conversations` list nếu cần.
+
+---
+
 ---
 
 ## Messages (REST parts)
@@ -655,6 +697,7 @@ Field notes:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.5.2-conversations | Thêm `GET /api/users/{id}` vào mục Users (W3D4). Response dùng lại `UserSearchDto` shape (không expose email/status/lastSeenAt). Merge 404 `USER_NOT_FOUND` cho cả not-exist + inactive để chống enumeration. Documented `last_seen_at` column đã add ở V4 migration nhưng KHÔNG expose ở V1 (xem WARNINGS.md). |
 | 2026-04-19 | v0.5.1-conversations | POST /api/conversations: đổi rate limit từ "30/giờ" → "10/phút" để khớp implementation; rate limit block giờ trả `details.retryAfterSeconds` với TTL thực từ Redis. |
 | 2026-04-19 | v0.5.0-conversations | Thêm 4 endpoints Conversations phase: POST /api/conversations, GET /api/conversations, GET /api/conversations/{id}, GET /api/users/search. Chốt UPPERCASE ONE_ON_ONE/GROUP (ADR-012). Chốt pattern auth-merge-with-404 cho GET detail (không leak existence). Idempotency ONE_ON_ONE trả 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId. Noted race dup và soft-leave/soft-hide out-of-scope V1. |
 | 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented + contract sync: rate limit đổi sang 10 req/60s/userId (khớp implementation); reuse case trả `AUTH_REFRESH_TOKEN_INVALID` (bỏ tên `REFRESH_TOKEN_REUSED` trong note vì error code thực tế là INVALID); bổ sung note revoke-all-sessions khi detect reuse. |

@@ -269,8 +269,18 @@ W-C-3 logout **RESOLVED**.
 - `React.memo` cho list items (`ConversationListItem`) để tránh re-render không cần thiết
 - **Pitfall `react-hooks/set-state-in-effect`**: KHÔNG dùng `useEffect` để reset state khi prop thay đổi. Thay vào đó reset trong event handler (`handleClose`) — ESLint rule này rất strict trong project
 
+## ConversationDetailPage pattern (W3-D4)
+
+- **3-section vertical layout**: `flex flex-col h-full` → header (`flex-shrink-0`) + body (`flex flex-1 overflow-hidden`) + input (`flex-shrink-0` inside body column)
+- `disabled` prop pattern cho MessageInput: `disabled=true` tuần 3 (placeholder), `disabled=false` tuần 4 khi wire STOMP. `onSend` prop undefined tuần 3.
+- MessagesAreaPlaceholder sẽ được thay bằng MessagesList tuần 4 — component riêng, không inline.
+- Error 404 detection: `(error as { response?: { status?: number } })?.response?.status === 404`
+- ConversationInfoPanel: dùng conditional `md:hidden` + `translate-x-full` cho mobile slide-in behavior.
+- Feature folder `src/features/messages/components/` cho tất cả message-level components (MessagesAreaPlaceholder, MessageInput, và sắp tới MessageBubble, MessagesList).
+
 ## Changelog file này
 
+- 2026-04-19 (W3D4): ConversationDetailPage (3-section vertical), ConversationHeader, MessagesAreaPlaceholder, MessageInput (disabled pattern), ConversationInfoPanel. features/messages/ folder created. build + lint: 0 error.
 - 2026-04-19 (W3D3): ConversationListItem, Sidebar, CreateDialog, UserAvatar, utils. Dialog/memo/409 patterns. build + lint: 0 error.
 - 2026-04-19 (W3D2): Conversation types, API functions, React Query hooks, queryKeys, useDebounce. enum → const object (erasableSyntaxOnly). build + lint: 0 error.
 - 2026-04-19 (W3D1): ProtectedRoute (Outlet pattern + isHydrated spinner + location.state.from). ConversationsLayout (2-col sidebar). Route nesting. W-C-4 RESOLVED. build + lint: 0 error.

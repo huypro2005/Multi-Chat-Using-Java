@@ -5,10 +5,9 @@ import com.chatapp.conversation.service.ConversationService;
 import com.chatapp.user.entity.User;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
 
 import java.util.List;
 
@@ -25,6 +24,19 @@ import java.util.List;
 public class UserController {
 
     private final ConversationService conversationService;
+
+    /**
+     * GET /api/users/{id}
+     * Lấy thông tin public của user theo ID.
+     * Trả 404 nếu user không tồn tại hoặc không active.
+     */
+    @GetMapping("/{id}")
+    public UserSearchDto getUserById(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal User currentUser
+    ) {
+        return conversationService.getUserById(id);
+    }
 
     /**
      * GET /api/users/search?q={query}&limit={limit}

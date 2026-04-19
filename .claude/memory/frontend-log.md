@@ -5,6 +5,15 @@
 
 ---
 
+[FE][W3-D4][2026-04-19] feat: ConversationDetailPage, ConversationHeader, MessagesAreaPlaceholder, MessageInput (disabled), ConversationInfoPanel
+- Tạo: src/features/conversations/components/ConversationHeader.tsx — Back(mobile), Avatar, DisplayName, sub-text (@username | N thành viên), Info + More buttons
+- Tạo: src/features/messages/components/MessagesAreaPlaceholder.tsx — placeholder cho tuần 4 MessagesList
+- Tạo: src/features/messages/components/MessageInput.tsx — disabled=true tuần 3, onSend prop undefined, Paperclip + Send icons
+- Tạo: src/features/conversations/components/ConversationInfoPanel.tsx — slide-in từ phải, member list với role badges
+- Tạo: src/pages/ConversationDetailPage.tsx — 3-section vertical (header + messages + input), loading skeleton, 404 error state, info panel toggle
+- Sửa: src/App.tsx — thay placeholder div bằng ConversationDetailPage tại route :id
+- build: 0 TS error | lint: 0 ESLint error
+
 [FE][W3-D3-fix][2026-04-19] fix: 429 RATE_LIMITED error state in CreateConversationDialog
 - Sửa: src/features/conversations/components/CreateConversationDialog.tsx — thêm `error` state, try/catch trong handleSelectUser, reset error trong handleClose
 - 429 RATE_LIMITED → inline error "Bạn đang tạo quá nhiều cuộc trò chuyện. Vui lòng thử lại sau."

@@ -60,6 +60,10 @@ public class User {
     @Column(name = "username_changed_at")
     private OffsetDateTime usernameChangedAt;
 
+    /** Lần cuối user active (gửi request có JWT hợp lệ). NULL = chưa có data. */
+    @Column(name = "last_seen_at")
+    private OffsetDateTime lastSeenAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 

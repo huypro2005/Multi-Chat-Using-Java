@@ -35,7 +35,6 @@ public class ConversationService {
     private final EntityManager entityManager;
     private final StringRedisTemplate redisTemplate;
 
-    private static final int CONVERSATION_CREATE_MAX_PER_MIN = 10;
 
     // =========================================================================
     // createConversation
@@ -370,6 +369,18 @@ public class ConversationService {
     }
 
     // =========================================================================
+    // getUserById
+    // =========================================================================
+
+    @Transactional(readOnly = true)
+    public UserSearchDto getUserById(UUID id) {
+        User user = userRepository.findById(id)
+                .filter(u -> "active".equals(u.getStatus()))
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND", "User not found"));
+        return UserSearchDto.from(user);
+    }
+
+    // =========================================================================
     // searchUsers
     // =========================================================================
 
@@ -397,4 +408,6 @@ public class ConversationService {
                 .map(UserSearchDto::from)
                 .toList();
     }
+
+    
 }
