@@ -1,7 +1,8 @@
-package com.chatapp.user.repository;
+package com.chatapp.repository;
 
-import com.chatapp.user.entity.UserBlock;
 import org.springframework.data.jpa.repository.JpaRepository;
+
+import com.chatapp.model.entity.UserBlock;
 
 import java.util.List;
 import java.util.UUID;

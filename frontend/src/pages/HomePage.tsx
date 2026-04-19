@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import api from '@/lib/api'
 import { useAuthStore } from '@/stores/authStore'
 import { logoutApi } from '@/features/auth/api'
@@ -106,11 +106,17 @@ export default function HomePage() {
           </div>
         )}
 
-        <div className="mt-8 flex gap-3 justify-center">
-          <a href="/login" className="text-sm text-indigo-600 hover:underline">Đăng nhập</a>
-          <span className="text-gray-300">·</span>
-          <a href="/register" className="text-sm text-indigo-600 hover:underline">Đăng ký</a>
-        </div>
+        {!isAuthenticated && (
+          <div className="mt-8 flex gap-3 justify-center">
+            <Link to="/login" className="text-sm text-indigo-600 hover:underline">
+              Đăng nhập
+            </Link>
+            <span className="text-gray-300">·</span>
+            <Link to="/register" className="text-sm text-indigo-600 hover:underline">
+              Đăng ký
+            </Link>
+          </div>
+        )}
       </div>
 
       <ToastContainer toasts={toasts} onRemove={removeToast} />

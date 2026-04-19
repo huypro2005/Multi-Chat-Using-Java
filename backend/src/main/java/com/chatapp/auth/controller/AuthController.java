@@ -8,8 +8,9 @@ import com.chatapp.auth.dto.request.RegisterRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
 import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.service.AuthService;
+import com.chatapp.model.entity.User;
 import com.chatapp.security.JwtTokenProvider;
-import com.chatapp.user.entity.User;
+
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;

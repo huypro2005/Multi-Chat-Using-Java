@@ -1,6 +1,6 @@
 package com.chatapp.auth.dto.response;
 
-import com.chatapp.user.entity.User;
+import com.chatapp.model.entity.User;
 
 /**
  * DTO đại diện user info trong auth response.

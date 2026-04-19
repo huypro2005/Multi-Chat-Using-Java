@@ -1,7 +1,8 @@
 package com.chatapp.security;
 
-import com.chatapp.user.entity.User;
-import com.chatapp.user.enums.AuthMethod;
+import com.chatapp.model.entity.User;
+import com.chatapp.model.enums.AuthMethod;
+
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;

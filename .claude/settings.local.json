@@ -8,7 +8,27 @@
       "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/java/com/chatapp/controller\")",
       "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/java/com/chatapp/config\")",
       "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/main/resources/db/migration\")",
-      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/test/java/com/chatapp\")"
+      "Bash(mkdir -p \"D:\\\\CodeMonHoc\\\\SE330\\\\chat-app/backend/src/test/java/com/chatapp\")",
+      "Bash(mkdir -p \"D:/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/user/entity\")",
+      "Bash(mkdir -p \"D:/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/user/repository\")",
+      "Bash(mkdir -p \"D:/CodeMonHoc/SE330/chat-app/frontend/src/features/auth/schemas\")",
+      "Bash(mkdir -p \"D:/CodeMonHoc/SE330/chat-app/frontend/src/features/auth/components\")",
+      "Bash(JAVA_HOME=\"/c/Program Files/Eclipse Adoptium/jdk-21.0.10.7-hotspot\" mvn compile *)",
+      "Read(//c/Program Files/Eclipse Adoptium//**)",
+      "Read(//c/Program Files/Java//**)",
+      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn compile *)",
+      "Bash(/c/Program Files/PostgreSQL/18/bin/psql *)",
+      "Bash(export PGPASSWORD=postgres)",
+      "Bash(\"/c/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -d chatapp -c \"\\\\dt\")",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(export PGPASSWORD=123456)",
+      "Bash(\"/c/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -d chatapp -c \"\\\\d users\" -c \"\\\\d user_auth_providers\" -c \"\\\\d user_blocks\")",
+      "Bash(\"/c/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -d chatapp -c \"SELECT version, description, script, success FROM flyway_schema_history ORDER BY installed_rank;\")",
+      "Bash(mkdir -p /d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/security)",
+      "Bash(mkdir -p /d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/exception)",
+      "Bash(git tag *)",
+      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn test -Dtest=AuthControllerTest -q)",
+      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-21.0.10\" mvn test -Dtest=AuthControllerTest)"
     ]
   }
 }

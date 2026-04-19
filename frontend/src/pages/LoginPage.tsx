@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Eye, EyeOff, MessageSquare } from 'lucide-react'
@@ -7,6 +7,7 @@ import { loginSchema, type LoginFormData } from '@/features/auth/schemas/loginSc
 import { loginApi } from '@/features/auth/api'
 import { handleAuthError } from '@/features/auth/utils/handleAuthError'
 import { useAuthStore } from '@/stores/authStore'
+import { useAuth } from '@/hooks/useAuth'
 import { ToastContainer } from '@/components/Toast'
 import { useToast } from '@/hooks/useToast'
 import GoogleLoginButton from '@/features/auth/components/GoogleLoginButton'
@@ -18,6 +19,7 @@ export default function LoginPage() {
 
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
+  const { isAuthenticated } = useAuth()
 
   const {
     register,
@@ -45,6 +47,11 @@ export default function LoginPage() {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // App đã chạy authService.init() (refresh) trước khi mount routes — nếu còn session thì về trang chủ
+  if (isAuthenticated) {
+    return <Navigate to="/" replace />
   }
 
   return (

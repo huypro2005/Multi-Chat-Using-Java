@@ -1,8 +1,9 @@
 package com.chatapp.security;
 
+import com.chatapp.model.entity.User;
+import com.chatapp.repository.UserRepository;
 import com.chatapp.security.JwtTokenProvider.TokenValidationResult;
-import com.chatapp.user.entity.User;
-import com.chatapp.user.repository.UserRepository;
+
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
