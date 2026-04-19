@@ -27,6 +27,22 @@
 
 ## Entries
 
+## 2026-04-19 (Tuần 1, Ngày 5) — HomePage health check UI
+
+### Xong
+- `src/pages/HomePage.tsx`: thêm backend health check với 3 state (loading/ok/error). Dùng discriminated union `HealthState` cho type safety. Gọi `api.get('/api/health')` qua Vite proxy `/api` → `localhost:8080`. Hiển thị spinner khi loading, service/status text khi ok, error message + hướng dẫn debug khi fail.
+- `npm run build`: 0 TypeScript error — PASS
+
+### Đang dở
+- Login/Register chưa call API thật (Tuần 2)
+
+### Blocker
+- Không có
+
+### Ghi chú kỹ thuật
+- `baseURL` trong `api.ts` = `''` (empty string) khi không set `VITE_API_BASE_URL`. Path gọi phải là `/api/health` (đầy đủ prefix) để Vite proxy nhận và forward sang `localhost:8080`.
+- Nếu `baseURL` là `/api` thì path chỉ cần `/health` — nhưng hiện tại không phải trường hợp này.
+
 ## 2026-04-19 (Tuần 1, Ngày 3) — Register page, Axios client, Zustand auth store
 
 ### Xong
