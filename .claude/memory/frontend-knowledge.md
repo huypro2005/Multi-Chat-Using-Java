@@ -37,18 +37,50 @@
 
 ---
 
+## Design tokens (chốt toàn project)
+
+- **Primary color**: `indigo-600` (hover: `indigo-700`, disabled: `indigo-400`)
+- **Input border**: `border-gray-300`, focus: `ring-2 ring-indigo-500 border-transparent`, error: `border-red-500`
+- **Border radius**: `rounded-lg` cho inputs/buttons, `rounded-xl` cho card/modal
+- **Button padding**: `py-2.5 px-4 font-medium text-sm`
+- **Card**: `bg-white rounded-xl shadow-sm border border-gray-200 p-8`
+- **Page background**: `bg-gray-50`
+- **Error text**: `text-red-500 text-sm`
+
+---
+
 ## Pattern đã dùng trong codebase
 
 ### Component organization
-- Feature-first: mọi thứ liên quan feature chat đi trong `src/features/chat/`
+- Feature-first: mọi thứ liên quan auth đi trong `src/features/auth/`
+  - `src/features/auth/schemas/` — Zod schemas
+  - `src/features/auth/components/` — feature-specific components
 - Shared UI trong `src/components/`
 - Pages (route-level) trong `src/pages/`
 
-### Custom hooks
-- (chưa có — sẽ thêm khi implement auth/socket)
+### Form handling — RHF + Zod pattern
+```tsx
+const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
+  resolver: zodResolver(schema),
+  mode: 'onTouched',  // validate khi blur, không phải mỗi keystroke
+})
+```
+- Error hiển thị inline dưới field: `{errors.field && <p className="text-red-500 text-sm">{errors.field.message}</p>}`
+- Input có error state: thêm `border-red-500` vào className khi `errors.field` truthy
+- Dùng `role="alert"` trên error `<p>` để accessible
 
-### Form handling
-- **React Hook Form + Zod** — chưa implement, sẽ dùng ở Ngày 2+
+### Validation schema — Login vs Register khác nhau
+- **Login schema**: chỉ validate không để trống (contract note: server KHÔNG validate format để tránh lộ thông tin)
+- **Register schema**: validate đầy đủ format (alphanumeric, chữ hoa, số, v.v.) theo contract `/api/auth/register`
+
+### Toast — Custom component (không dùng thư viện ngoài)
+- Vì không có sonner/react-hot-toast trong dependencies
+- Tạo `src/components/Toast.tsx` + `src/hooks/useToast.ts`
+- Pattern: `const { toasts, addToast, removeToast } = useToast()` rồi render `<ToastContainer>` ở cuối component
+- Fixed bottom-right, auto-dismiss 3s, slide animation
+
+### Custom hooks đã có
+- `useToast` — manage toast queue (add/remove), dùng `useState` + `useCallback`
 
 ---
 
@@ -111,4 +143,5 @@ src/
 
 ## Changelog file này
 
-- 2026-04-19: Khởi tạo project Tuần 1 Ngày 1. Ghi pitfall TypeScript deprecation và Tailwind v4 setup.
+- 2026-04-19 (Ngày 2): Chốt design tokens (indigo-600, rounded-lg, v.v.). Ghi pattern form RHF+Zod, toast custom, feature structure auth. Thêm useToast hook.
+- 2026-04-19 (Ngày 1): Khởi tạo project Tuần 1. Ghi pitfall TypeScript deprecation và Tailwind v4 setup.

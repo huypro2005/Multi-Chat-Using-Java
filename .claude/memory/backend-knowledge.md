@@ -17,7 +17,11 @@
 
 ### Database
 - ddl-auto: validate — Hibernate KHÔNG tự alter schema. Mọi thay đổi qua Flyway migration. Tuần 1.
-- JAVA_HOME phải trỏ đúng vào jdk-21.0.10 mới chạy được mvn.
+- JAVA_HOME phải trỏ đúng vào jdk-21.0.10 mới chạy được mvn: `export JAVA_HOME="/c/Program Files/Java/jdk-21.0.10"`.
+- UUID primary key pattern: `@GeneratedValue(strategy = GenerationType.UUID)` + `@Column(insertable=false, updatable=false)`. Database generate bằng `gen_random_uuid()` (pgcrypto). Tuần 1.
+- Timestamp: dùng `OffsetDateTime` (java.time) cho cột TIMESTAMPTZ. Không dùng Date/Calendar. Tuần 1.
+- Soft delete users: dùng cột `status VARCHAR(20)` ('active'/'suspended'/'deleted') thay cho `deleted_at`. Lưu `deleted_name` khi xóa. Tuần 1.
+- Repository method naming với ManyToOne: dùng `findByUser_Id(UUID)` không phải `findByUserId(UUID)` — Spring Data cần dấu `_` để phân biệt nested property. Tuần 1.
 
 ### WebSocket / STOMP
 - (chưa chốt)
@@ -31,8 +35,22 @@
 ### Controller → Service → Repository
 - (chưa có)
 
+### Entity pattern
+- KHÔNG dùng `@Data` cho entity — gây vấn đề equals/hashCode với JPA lazy-loading.
+- Dùng `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`.
+- Entity có thể có domain method (vd `user.markAsDeleted()`) — không phải POJO chay.
+- `@PrePersist` / `@PreUpdate` để tự set createdAt/updatedAt thay vì Spring Auditing (giữ đơn giản).
+- `@ManyToOne(fetch = FetchType.LAZY)` — luôn LAZY, không bao giờ EAGER.
+
+### Package structure (đã dùng)
+- `com.chatapp.user.entity` — User, UserAuthProvider, UserBlock
+- `com.chatapp.user.repository` — UserRepository, UserAuthProviderRepository, UserBlockRepository
+- `com.chatapp.config` — SecurityConfig
+- `com.chatapp.controller` — HealthController
+- Pattern: `com.chatapp.<domain>.entity`, `com.chatapp.<domain>.repository`, `com.chatapp.<domain>.service`, `com.chatapp.<domain>.controller`
+
 ### DTO vs Entity
-- (chưa có)
+- (chưa có — sẽ có từ Ngày 3 khi implement auth)
 
 ### Error handling
 - (chưa có)
@@ -43,7 +61,7 @@
 
 *(Format: triệu chứng → giải pháp → gặp lần đầu ở đâu. Quan trọng: chỉ thêm bug đã tốn >1h debug, không thêm bug vặt.)*
 
-- (chưa có)
+- Spring Data Redis WARN log khi có JPA + Redis cùng project: "Could not safely identify store assignment for JPA repositories" — đây là INFO log bình thường, Spring Data đang xác nhận repository nào thuộc module nào. Không phải lỗi, không cần sửa. Gặp lần đầu Ngày 2.
 
 ---
 
@@ -73,4 +91,4 @@
 
 ## Changelog file này
 
-- (chưa có entry)
+- 2026-04-19: Thêm UUID/timestamp pattern, entity pattern, package structure, pitfall Spring Data Redis WARN.

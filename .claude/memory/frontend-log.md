@@ -27,6 +27,28 @@
 
 ## Entries
 
+## 2026-04-19 (Tuần 1, Ngày 2) — Login page UI tĩnh
+
+### Xong
+- `src/features/auth/schemas/loginSchema.ts`: Zod schema cho login (validate không để trống — theo contract login không validate format)
+- `src/features/auth/components/`: thư mục rỗng tạo sẵn cho Ngày 3+
+- `src/components/Toast.tsx`: custom Toast + ToastContainer component (fixed bottom-right, auto-dismiss 3s, slide animation)
+- `src/hooks/useToast.ts`: hook manage toast queue
+- `src/pages/LoginPage.tsx`: form đầy đủ với RHF + zodResolver, toggle show/hide password, loading spinner, design tokens indigo-600, error inline, link tới /register
+- `npm run build`: 0 TypeScript error, 0 lint warning — PASS
+
+### Đang dở
+- Chưa call API thật (sẽ làm Ngày 3+)
+- Chưa tạo RegisterPage UI
+
+### Blocker
+- Không có
+
+### Ghi chú kỹ thuật
+- Không có sonner/react-hot-toast trong package.json → tạo Toast custom component
+- Login schema KHÔNG validate format (regex) để đồng nhất với contract: server không validate format login để tránh user enumeration
+- `mode: 'onTouched'` cho RHF — validate sau khi blur, UX tốt hơn onChange
+
 ## 2026-04-19 (Tuần 1, Ngày 1) — Khởi tạo Vite + React + TypeScript project
 
 ### Xong
