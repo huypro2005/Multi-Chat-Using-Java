@@ -32,6 +32,45 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (Tuần 3, Ngày 3 — fix) — fix: rate limit fail-open Redis, retryAfterSeconds, sync contract
+
+### Xong
+- [BE][W3-D3-fix][2026-04-19] fix: rate limit fail-open Redis, retryAfterSeconds in details, sync contract 10/min
+  - `ConversationService.createConversation`: wrap Redis INCR + expire trong `try/catch DataAccessException` — fail-open nếu Redis down (ADR-011 consistent).
+  - Khi vượt limit: query TTL thực từ Redis, throw `AppException(429, "RATE_LIMITED", ..., Map.of("retryAfterSeconds", ttl))`.
+  - `docs/API_CONTRACT.md`: sửa `POST /api/conversations` rate limit từ "30/giờ" → "10/phút" (2 chỗ: mục Rate limit + bảng Error responses). Thêm v0.5.1-conversations vào changelog.
+  - `mvn test`: 68 tests pass (0 failures).
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `DataAccessException` (spring-dao) bao phủ mọi Redis/JPA exception khi client gặp lỗi network — dùng consistent với pattern blacklist fail-open của JwtAuthFilter.
+- TTL fallback = 60 (seconds) khi Redis down để FE có giá trị hợp lý để hiển thị retry countdown.
+
+---
+
+## 2026-04-19 (Tuần 3, Ngày 3) — W3-BE-6 rate limit POST /api/conversations
+
+### Xong
+- [BE][W3-D3][2026-04-19] fix(W3-BE-6): rate limit POST /api/conversations 10/min/user via Redis
+  - `ConversationService`: inject `StringRedisTemplate`, thêm INCR check đầu `createConversation()`.
+  - Key `rate:conv_create:{userId}`, TTL 60s, limit 10/window. Vượt → `AppException` 429 `RATE_LIMITED`.
+  - `GlobalExceptionHandler` đã handle `AppException` generic — không cần sửa.
+  - `docs/WARNINGS.md`: W3-BE-6 thêm vào bảng Resolved.
+  - `mvn test`: 68 tests pass (0 failures).
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+---
+
 ## 2026-04-19 (Tuần 3, Ngày 2 — fix) — GROUP conversation validation hardening
 
 ### Xong

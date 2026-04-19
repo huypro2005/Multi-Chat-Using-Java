@@ -5,6 +5,23 @@
 
 ---
 
+[FE][W3-D3-fix][2026-04-19] fix: 429 RATE_LIMITED error state in CreateConversationDialog
+- Sửa: src/features/conversations/components/CreateConversationDialog.tsx — thêm `error` state, try/catch trong handleSelectUser, reset error trong handleClose
+- 429 RATE_LIMITED → inline error "Bạn đang tạo quá nhiều cuộc trò chuyện. Vui lòng thử lại sau."
+- Các lỗi khác → "Không thể tạo cuộc trò chuyện. Vui lòng thử lại."
+- Error hiển thị với role="alert" (accessible), text-red-600, reset khi dialog đóng
+- build: 0 error | lint: 0 error
+
+[FE][W3-D3][2026-04-19] feat: ConversationListItem, ConversationListSidebar, CreateConversationDialog, UserAvatar, utils helpers, wire into ConversationsLayout
+- Tạo: src/features/conversations/utils.ts (getOtherMember, formatLastMessageTime)
+- Tạo: src/components/UserAvatar.tsx — shared avatar component (img nếu có URL, else initial letter div)
+- Tạo: src/features/conversations/components/ConversationListItem.tsx — React.memo, dùng ConversationSummaryDto
+- Tạo: src/features/conversations/components/ConversationListSidebar.tsx — loading/empty/error/list states
+- Tạo: src/features/conversations/components/CreateConversationDialog.tsx — modal, Esc handler, autoFocus, useUserSearch, useCreateConversation, 409 redirect UX
+- Sửa: src/pages/ConversationsLayout.tsx — wire ConversationListSidebar + CreateConversationDialog, useState createDialogOpen
+- Pitfall: react-hooks/set-state-in-effect — không dùng useEffect để reset query; reset trong handleClose() thay vào đó
+- build: 0 TypeScript error | lint: 0 ESLint error
+
 [FE][W3-D2-fix][2026-04-19] fix: 409 error field name (code→error), ConversationDto remove server-only fields, add getConversationDisplayName helper
 - Sửa: src/features/conversations/api.ts — 409 catch dùng `err.response.data.error` (KHÔNG phải `.code`) khớp BE ErrorResponse record
 - Sửa: src/types/conversation.ts — ConversationDto xóa 4 fields không có trong BE (displayName, displayAvatarUrl, unreadCount, mutedUntil); thêm createdBy: CreatedByDto | null; thêm CreatedByDto interface

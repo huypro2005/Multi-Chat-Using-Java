@@ -26,6 +26,101 @@
 
 ---
 
+## 2026-04-19 — W3D3 Review: conversation list UI + create dialog + BE rate limit
+
+### Verdict
+⚠️ APPROVE WITH COMMENTS
+
+Không có BLOCKING. UI foundation clean; Esc cleanup đúng; 409 UX đúng pattern đã chốt; rate limit INCR đúng ADR-005. Có 3 warning non-blocking (fail-closed khi Redis down, contract drift giá trị rate limit 10/min vs 30/giờ, FE chưa handle 429 toast) + vài gợi ý micro. Ship được.
+
+### Files reviewed
+- `frontend/src/features/conversations/components/ConversationListItem.tsx` (mới, 86 dòng): row item, `React.memo`, dùng `ConversationSummaryDto`.
+- `frontend/src/features/conversations/components/ConversationListSidebar.tsx` (mới, 116 dòng): 4 states loading/error/empty/list không overlap, Plus button có `aria-label`.
+- `frontend/src/features/conversations/components/CreateConversationDialog.tsx` (mới, 177 dòng): Esc handler có cleanup, backdrop click close, autoFocus input, 409 redirect UX đúng.
+- `frontend/src/components/UserAvatar.tsx` (mới, 37 dòng): shared avatar, fallback initial letter.
+- `frontend/src/features/conversations/utils.ts` (mới, 26 dòng): `getOtherMember` + `formatLastMessageTime`.
+- `frontend/src/pages/ConversationsLayout.tsx` (sửa): wire sidebar + dialog; thay placeholder.
+- `backend/src/main/java/com/chatapp/conversation/service/ConversationService.java` (sửa, +14 dòng): inject `StringRedisTemplate`; rate limit INCR/TTL đầu `createConversation()`.
+- `docs/WARNINGS.md` (sửa): thêm W3-BE-6 vào bảng Resolved.
+
+### Checklist BLOCKING pass
+1. **UX 409 handling** PASS — `CreateConversationDialog.handleSelectUser` (L43–56): await `createConversation` → nếu `result.existingConversationId` → `navigate(existingConversationId)`, KHÔNG show toast error. `handleClose()` sau cả 2 nhánh (success + idempotent) → dialog đóng sau navigate.
+2. **Active state logic** PASS — `ConversationListSidebar` L105 dùng strict `===` so sánh `conv.id === activeId`. `activeId` có thể `undefined` khi ở `/conversations` (không có `:id`) — `conv.id === undefined` luôn `false` → không highlight bừa. OK.
+3. **Loading/Empty/Error không race** PASS — pattern đúng: `isLoading` (L53) isolate skeleton; `isError && !isLoading` (L71); `!isLoading && !isError && length===0` (L85). Không có trạng thái nào overlap — empty không hiện khi đang loading, error không hiện khi đang loading.
+4. **Dialog accessibility** PASS — Esc handler `addEventListener` + `removeEventListener` trong cleanup (L33–34). Backdrop click → `handleClose()` (L65). `autoFocus` ở input (L116). Plus button có `aria-label="Tạo cuộc trò chuyện mới"` (L31). Dialog có `role="dialog"` + `aria-modal="true"` + `aria-label`. X button có `aria-label="Đóng dialog"`.
+5. **React.memo** PASS — `ConversationListItem` wrap `memo(function ...)`. Props: `conversation` (stable reference từ list), `isActive` boolean, `onClick` (inline trong Sidebar, xem warning 4), `currentUserId` string. Pass serialize check.
+6. **BE rate limit** — xem warning 1 bên dưới.
+7. **FE handle 429** — xem warning 3 bên dưới.
+
+### Warnings (non-blocking, V1 acceptable)
+
+1. **[BE] Fail-CLOSED khi Redis down** — `ConversationService.java:45` `redisTemplate.opsForValue().increment(rateKey)` không wrap try/catch. Nếu Redis down → `RedisConnectionFailureException` / `RedisSystemException` bubble ra `GlobalExceptionHandler` catch-all → 500 INTERNAL_ERROR → user không tạo được conversation. Đây là **fail-CLOSED khác với pattern ADR-011 (fail-OPEN cho JWT blacklist)**. Lý do trái pattern: rate limit mất Redis = toàn bộ user không tạo được conv, trong khi JWT blacklist fail-open = logged-out token vẫn work đến natural expiry — trade-off khác nhau. Rate limit nên cũng fail-open (log warn, skip counter) để availability tốt hơn, vì rủi ro abuse 10 conv/min < rủi ro downtime feature chính. Gợi ý fix V1 ngắn:
+
+   ```java
+   Long count;
+   try {
+       count = redisTemplate.opsForValue().increment(rateKey);
+       if (count != null && count == 1) redisTemplate.expire(rateKey, 60, TimeUnit.SECONDS);
+   } catch (DataAccessException e) {
+       log.warn("[RATE_LIMIT] Redis unavailable for key={}, fail-open", rateKey, e);
+       count = null;
+   }
+   if (count != null && count > 10) throw ...
+   ```
+
+   Có thể defer V2 nếu monitoring Redis availability. Ghi nhận trong WARNINGS.md.
+
+2. **[Contract drift] Giá trị rate limit lệch contract** — `API_CONTRACT.md:482` ghi "Vượt 30 conversations/giờ/user"; code implement "10/phút/user". Semantic khác nhau (30/giờ = ~0.5/phút trung bình nhưng cho phép burst cao hơn 10/phút nếu trung bình). Contract nên được sync để match implementation (hoặc ngược lại). Đề xuất **sync contract = code** (10/phút đơn giản hơn 30/giờ với window cố định, phù hợp với ADR-005). Reviewer sẽ update contract dòng 482 + Rate limit header ở đầu endpoint POST /api/conversations trong commit docs tiếp theo.
+
+3. **[FE] 429 không có toast user-facing** — `api.ts` interceptor chỉ catch 401. Khi BE trả 429 RATE_LIMITED, axios error bubble thẳng lên `useCreateConversation.mutateAsync` → `handleSelectUser` **await throw** → promise reject → **không có UI feedback**. Người dùng sẽ thấy dialog đóng (vì `handleClose()` sau try, nhưng ở đây không try/catch nên handleClose ở L55 **không chạy khi throw**) — thực tế dialog giữ nguyên, không có message. UX kém.
+
+   Fix V1 ngắn: thêm try/catch trong `handleSelectUser`:
+   ```ts
+   try {
+     const result = await createConversation({ ... })
+     if (result.conversation) navigate(...)
+     else if (result.existingConversationId) navigate(...)
+     handleClose()
+   } catch (err) {
+     if (axios.isAxiosError(err) && err.response?.status === 429) {
+       toast.error('Bạn tạo quá nhanh, thử lại sau 1 phút')
+     } else {
+       toast.error('Không tạo được cuộc trò chuyện, thử lại sau')
+     }
+   }
+   ```
+
+   Nếu project chưa wire toast library, ít nhất thêm local error state hiển thị trong dialog. Non-blocking cho V1 happy path nhưng **bắt buộc fix trước demo**.
+
+4. **[FE] Inline arrow trong ConversationListSidebar L106 phá benefit React.memo** — `onClick={() => navigate(...)}` tạo function mới mỗi render → prop `onClick` thay đổi → `React.memo` shallow-compare fail → re-render hết list items mỗi khi sidebar re-render. Memo không giúp gì ở flow hiện tại. Non-blocking cho V1 (list ≤50 items). Fix khi scale: `useCallback((id) => navigate(...), [navigate])` + chuyển sang pattern `onSelect(id)` để child gọi `onClick={() => onSelect(conversation.id)}` (vẫn inline nhưng parent stable).
+
+5. **[FE] `formatLastMessageTime` dùng `new Date().getTime()` mỗi render** — không sai, nhưng khi list 50 items mount thì 50 lần tính `diffMins`. Stale time (phút) không update theo realtime. V1 OK, ngày 4+ nếu cần "x phút trước" live-update cần `useInterval` re-render component parent.
+
+6. **[FE] `unreadCount > 0` render badge nhưng server trả 0 V1** — L74 code check `> 0` trước khi render badge. BE V1 luôn 0 → badge không bao giờ hiện. Đúng ý đồ "chuẩn bị sẵn cho tuần 4+". OK.
+
+7. **[BE] Rate limit key `rate:conv_create:{userId}` chưa có trong ADR-009 schema** — ADR-009 list 3 prefix (`rate:`, `refresh:`, `jwt:blacklist:`) và đề cập scope `register/login/refresh` nhưng không explicit `conv_create`. Nên update ADR-009 thêm `rate:conv_create:{userId}` vào danh sách scope đã dùng để tránh developer mới đặt trùng key sau này. Non-blocking — key an toàn (prefix `rate:` đã reserved).
+
+### Contract check
+- `API_CONTRACT.md` POST /api/conversations: error `RATE_LIMITED` (429) đã có trong contract. Code throw đúng code `"RATE_LIMITED"` khớp.
+- **Lệch giá trị**: contract "30/giờ/user" vs code "10/phút/user" — sync cần thiết (xem warning 2).
+- Contract nói error có `details.retryAfterSeconds` — code hiện KHÔNG set details. AppException constructor dùng 3-arg `(HttpStatus, code, message)` không có details Map. `GlobalExceptionHandler` response sẽ thiếu `details.retryAfterSeconds` → FE không có info để hiển thị "thử lại sau X giây". Gợi ý fix: sau `getExpire(rateKey, TimeUnit.SECONDS)` → throw với `details = Map.of("retryAfterSeconds", ttl)`. Non-blocking cho V1 (FE chưa dùng field này), nhưng contract nói có → hoặc sửa code hoặc sửa contract (khuyến nghị sửa code).
+
+### Suggestions (hoàn toàn tuỳ chọn)
+- `ConversationListItem` line "Bắt đầu trò chuyện" hardcode VN — OK cho V1, nhưng nếu sau muốn hiện snippet last message, cần thêm field `lastMessagePreview` vào `ConversationSummaryDto` (contract update).
+- `CreateConversationDialog` backdrop và dialog có **2 layer z-50 riêng biệt** (L64 + L74). `pointer-events-none` trên dialog + `pointer-events-auto` trên inner box — pattern hợp lệ nhưng dễ confuse khi thêm focus trap sau này. Có thể gộp thành 1 wrapper z-50 với `stopPropagation` đơn giản hơn. Non-blocking.
+- `UserAvatar` type `user: { fullName?: string; username?: string; avatarUrl?: string | null }` là structural subtyping — accept bất kỳ object nào có shape này. OK reusable, nhưng có thể tighten nếu cần: `Pick<UserSearchDto, 'fullName' | 'username' | 'avatarUrl'>` để tránh lạm dụng.
+
+### Action items cần follow-up
+- Update contract `API_CONTRACT.md:482` sync giá trị "10 conversations/phút/user" (hoặc ngược lại, tuỳ BE quyết).
+- Update ADR-009 thêm `rate:conv_create:{userId}` vào schema list.
+- Khi thêm toast library → fix 429 UX trong `handleSelectUser`.
+- Cân nhắc wrap Redis call fail-open (warning 1).
+
+### Contract impact
+- Draft update v0.5.1-conversations: sync rate limit value. Reviewer sẽ viết commit contract riêng sau khi BE xác nhận giá trị cuối (10/min hay giữ 30/giờ).
+
+---
+
 ## 2026-04-19 — W3D2 Re-check sau khi BE+FE fix 2 BLOCKING
 
 ### Verdict

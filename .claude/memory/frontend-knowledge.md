@@ -260,8 +260,18 @@ W-C-3 logout **RESOLVED**.
   export type ConversationType = (typeof ConversationType)[keyof typeof ConversationType]
   ```
 
+## Conversation UI patterns (W3-D3)
+
+- `ConversationListItem` dùng `ConversationSummaryDto` (list API), KHÔNG phải `ConversationDto` (detail)
+- `displayName` / `displayAvatarUrl` server-computed trong `ConversationSummaryDto` — không cần client compute
+- **409 UX pattern**: khi `CONV_ONE_ON_ONE_EXISTS` → navigate sang `existingConversationId`, không show error toast — UX mượt
+- **Dialog pattern**: controlled `open` prop, Esc handler qua `useEffect` (chỉ add/remove listener), `autoFocus` input, `handleClose()` function gộp reset state + gọi `onClose()`
+- `React.memo` cho list items (`ConversationListItem`) để tránh re-render không cần thiết
+- **Pitfall `react-hooks/set-state-in-effect`**: KHÔNG dùng `useEffect` để reset state khi prop thay đổi. Thay vào đó reset trong event handler (`handleClose`) — ESLint rule này rất strict trong project
+
 ## Changelog file này
 
+- 2026-04-19 (W3D3): ConversationListItem, Sidebar, CreateDialog, UserAvatar, utils. Dialog/memo/409 patterns. build + lint: 0 error.
 - 2026-04-19 (W3D2): Conversation types, API functions, React Query hooks, queryKeys, useDebounce. enum → const object (erasableSyntaxOnly). build + lint: 0 error.
 - 2026-04-19 (W3D1): ProtectedRoute (Outlet pattern + isHydrated spinner + location.state.from). ConversationsLayout (2-col sidebar). Route nesting. W-C-4 RESOLVED. build + lint: 0 error.
 - 2026-04-19 (W2D4 Phase B): Firebase SDK + GoogleLoginButton + oauthApi + logoutApi. Wire Login/Register/HomePage. build + lint: 0 error.

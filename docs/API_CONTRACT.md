@@ -412,7 +412,7 @@ Validation rules:
 
 **Auth required**: Yes
 
-**Rate limit**: 30 conversations/giờ/user (chống spam tạo nhóm).
+**Rate limit**: 10 requests/phút/user (chống spam tạo nhóm).
 
 **Request body**:
 
@@ -479,7 +479,7 @@ Validation rules:
 | 404 | `CONV_MEMBER_NOT_FOUND` | Một hoặc nhiều `memberIds` không trỏ tới user tồn tại; kèm `details.missingIds: [uuid, ...]`. |
 | 409 | `CONV_ONE_ON_ONE_EXISTS` | Đã tồn tại `ONE_ON_ONE` giữa caller và user kia; kèm `details.conversationId` để FE redirect luôn. |
 | 409 | `CONV_MEMBER_BLOCKED` | Caller đã block / bị block bởi 1 trong các `memberIds`; kèm `details.blockedIds: [uuid, ...]`. (V1 nếu `user_blocks` chưa wire, error này không fire — documented để FE sẵn sàng khi bật.) |
-| 429 | `RATE_LIMITED` | Vượt 30 conversations/giờ/user; kèm `details.retryAfterSeconds`. |
+| 429 | `RATE_LIMITED` | Vượt 10 requests/phút/user; kèm `details.retryAfterSeconds`. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
 **Notes**:
@@ -655,6 +655,7 @@ Field notes:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.5.1-conversations | POST /api/conversations: đổi rate limit từ "30/giờ" → "10/phút" để khớp implementation; rate limit block giờ trả `details.retryAfterSeconds` với TTL thực từ Redis. |
 | 2026-04-19 | v0.5.0-conversations | Thêm 4 endpoints Conversations phase: POST /api/conversations, GET /api/conversations, GET /api/conversations/{id}, GET /api/users/search. Chốt UPPERCASE ONE_ON_ONE/GROUP (ADR-012). Chốt pattern auth-merge-with-404 cho GET detail (không leak existence). Idempotency ONE_ON_ONE trả 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId. Noted race dup và soft-leave/soft-hide out-of-scope V1. |
 | 2026-04-19 | v0.3.0-auth | POST /api/auth/refresh implemented + contract sync: rate limit đổi sang 10 req/60s/userId (khớp implementation); reuse case trả `AUTH_REFRESH_TOKEN_INVALID` (bỏ tên `REFRESH_TOKEN_REUSED` trong note vì error code thực tế là INVALID); bổ sung note revoke-all-sessions khi detect reuse. |
 | 2026-04-19 | v0.2.1-auth | Thêm note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED vào mục Error codes dùng chung. |

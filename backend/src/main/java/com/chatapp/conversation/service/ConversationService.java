@@ -13,12 +13,15 @@ import com.chatapp.user.repository.UserRepository;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -30,6 +33,9 @@ public class ConversationService {
     private final ConversationMemberRepository memberRepository;
     private final UserRepository userRepository;
     private final EntityManager entityManager;
+    private final StringRedisTemplate redisTemplate;
+
+    private static final int CONVERSATION_CREATE_MAX_PER_MIN = 10;
 
     // =========================================================================
     // createConversation
@@ -37,6 +43,28 @@ public class ConversationService {
 
     @Transactional
     public ConversationDto createConversation(UUID currentUserId, CreateConversationRequest req) {
+        // Rate limit: 10 creates/min per user (W3-BE-6) — fail-open nếu Redis down (ADR-011)
+        String rateKey = "rate:conv_create:" + currentUserId;
+        Long count = null;
+        try {
+            count = redisTemplate.opsForValue().increment(rateKey);
+            if (count != null && count == 1) {
+                redisTemplate.expire(rateKey, 60, TimeUnit.SECONDS);
+            }
+        } catch (DataAccessException e) {
+            log.warn("Redis unavailable for rate limit check, proceeding without limit: {}", e.getMessage());
+        }
+        if (count != null && count > 10) {
+            long ttl = 60; // default fallback
+            try {
+                Long redisTtl = redisTemplate.getExpire(rateKey, TimeUnit.SECONDS);
+                if (redisTtl != null && redisTtl > 0) ttl = redisTtl;
+            } catch (DataAccessException ignored) {}
+            throw new AppException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED",
+                    "Too many conversations created. Please wait.",
+                    Map.of("retryAfterSeconds", ttl));
+        }
+
         User currentUser = userRepository.findById(currentUserId)
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND", "Người dùng không tồn tại"));
 

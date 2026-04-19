@@ -17,6 +17,7 @@
 | ID | Vấn đề | Fix | Ngày |
 |----|--------|-----|------|
 | W3-BE-3 | Schema V2 không có `CREATE EXTENSION IF NOT EXISTS pgcrypto` — developer mới clone repo, fresh DB → `gen_random_uuid()` fail ở V2. | Thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu `V2__create_users_and_auth_providers.sql`. Thêm `repair-on-migrate: true` vào `application.yml` để developer có DB cũ tự động repair checksum khi start app. | 2026-04-19 |
+| W3-BE-6 | `POST /api/conversations` không có rate limit — user có thể tạo hàng trăm conversation / giây. | Thêm Redis INCR rate limit vào đầu `ConversationService.createConversation()`: key `rate:conv_create:{userId}`, TTL 60s, max 10 creates/min/user. Vượt ngưỡng → `AppException` 429 `RATE_LIMITED`. | 2026-04-19 |
 
 ---
 
