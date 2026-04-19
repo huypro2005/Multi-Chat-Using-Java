@@ -26,6 +26,89 @@
 
 ---
 
+## 2026-04-19 — W4D3 Review: WebSocket foundation (BE + FE)
+
+### Verdict
+APPROVE (0 BLOCKING, 4 WARNING non-blocking)
+
+### Files reviewed
+BE (new):
+- `backend/src/main/java/com/chatapp/config/WebSocketConfig.java` — SockJS endpoint `/ws`, SimpleBroker `/topic` `/queue`, setAllowedOriginPatterns config-driven, setMessageSizeLimit 64KB, ContextRefreshedEvent wire StompErrorHandler (tránh circular dep).
+- `backend/src/main/java/com/chatapp/config/AuthChannelInterceptor.java` — CONNECT verify JWT (reuse validateTokenDetailed), SUBSCRIBE check member cho `/topic/conv.{uuid}`. UUID parse fail → FORBIDDEN.
+- `backend/src/main/java/com/chatapp/config/StompErrorHandler.java` — extends StompSubProtocolErrorHandler, unwrap cause chain lấy message → set vào header `message` của ERROR frame.
+- `backend/src/main/java/com/chatapp/config/StompPrincipal.java` — record implementation Principal, lưu userId stringify.
+- `backend/src/test/java/com/chatapp/websocket/WebSocketIntegrationTest.java` — 6 tests (valid/invalid/expired JWT CONNECT, no header, member/non-member SUBSCRIBE). Raw WS + parse frame để đọc ERROR header `message`.
+
+BE (modified):
+- `backend/src/main/java/com/chatapp/config/SecurityConfig.java` — thêm `/ws/**` vào permitAll (auth chuyển sang STOMP layer).
+- `backend/src/main/resources/application.yml` — thêm `app.websocket.allowed-origins` với default localhost:3000+5173.
+- `backend/src/test/resources/application-test.yml` — mirror config.
+
+FE (new):
+- `frontend/src/lib/stompClient.ts` — module-level singleton, manual reconnect (reconnectDelay:0), MAX_RECONNECT=10, exponential backoff 1s→30s, AUTH_TOKEN_EXPIRED → dynamic import authService.refresh() → reconnect, AUTH_REQUIRED → logout, debug log DEV-only.
+- `frontend/src/components/ConnectionStatus.tsx` — debug badge, subscribe onConnectionStateChange, ẩn khi CONNECTED ở production.
+
+FE (modified):
+- `frontend/src/App.tsx` — STOMP lifecycle useEffect với prevAuthRef pattern: connect khi login, disconnect khi logout. `<ConnectionStatus />` mount ở root.
+- `frontend/src/services/authService.ts` — thêm `authService.refresh()` method cho STOMP client dùng lại.
+
+### Issues found
+
+**BE checklist — tất cả PASS**:
+- JWT auth CONNECT: lấy từ `Authorization` header native (không query string), reuse `JwtTokenProvider.validateTokenDetailed`, EXPIRED → `AUTH_TOKEN_EXPIRED`, INVALID/missing → `AUTH_REQUIRED`. Token empty sau trim cũng trả `AUTH_REQUIRED`.
+- SUBSCRIBE authorization: `/topic/conv.{uuid}` → `conversationMemberRepository.existsByConversation_IdAndUser_Id(convId, userId)`; UUID parse fail → `FORBIDDEN` (không crash); destination null early return OK.
+- CORS/Security: `setAllowedOriginPatterns` với array từ `@Value("${app.websocket.allowed-origins}")`. `/ws/**` permitAll ở SecurityConfig vì auth ở STOMP layer — đúng. `parseOriginPatterns` fail-safe trả empty array khi raw null/blank (handshake fail rõ ràng).
+- ERROR frame: `StompErrorHandler` extends `StompSubProtocolErrorHandler`, set `accessor.setMessage(errorCode)` + body chỉ chứa error code string — KHÔNG leak stack trace.
+- Tests: 6 tests đúng scope. T06 dùng raw WebSocket handler để bắt được ERROR frame body/header (documented lý do vì `DefaultStompSession` ẩn header `message`). `@MockBean StringRedisTemplate` inject để context start không cần Redis thật.
+
+**FE checklist — tất cả PASS**:
+- Singleton: `_client` module-level `let`, `_state` + `_reconnectAttempts` + `_stateListeners` đều module-scope. Không re-create khi component re-render (component chỉ import function).
+- Token refresh: `AUTH_TOKEN_EXPIRED` → `_handleTokenExpired()` gọi `authService.refresh()` → `connectStomp()` với `_reconnectAttempts=0` reset. Refresh fail → `window.location.href='/login'` (không retry refresh → không loop). Dynamic import `await import('@/services/authService')` đúng pattern tránh circular dep với tokenStorage.
+- Reconnect: `MAX_RECONNECT=10` enforced trong `_scheduleReconnect`. `disconnectStomp` set `_reconnectAttempts=MAX_RECONNECT` để chặn auto-reconnect, và `onConnect` reset về 0 cho lần connect kế tiếp.
+- Lifecycle: `isAuthenticated = useAuthStore((s) => !!s.accessToken)` + `prevAuthRef` pattern — connect khi transition false→true, disconnect khi true→false. Token sẵn sàng TRƯỚC khi connect.
+- Debug log: `debug: import.meta.env.DEV ? ... : () => {}`. `console.error/info/warn` giữ cho errors (đúng — production vẫn cần visibility cho connection issues).
+
+### Contract check vs `docs/SOCKET_EVENTS.md`
+- `/ws` endpoint + SockJS: **match** section 1 (endpoint `/ws`, SockJS fallback, raw WS cũng support).
+- Heartbeat 10000/10000: **match** FE `heartbeatIncoming/Outgoing`. BE chưa setHeartbeatValue trên broker — xem WARNING dưới.
+- ERROR codes `AUTH_REQUIRED`, `AUTH_TOKEN_EXPIRED`, `FORBIDDEN`: **match** section 6 error table.
+- Message size 64KB: **match** section 7.
+- Allowed origins config-driven (không `"*"`): **match** section 7.
+
+### Warnings (non-blocking)
+
+1. **[BE] `WebSocketConfig.java:87` — Broker heartbeat chưa setHeartbeatValue(10000,10000)**: SOCKET_EVENTS.md mục 4.1 gợi ý `.setHeartbeatValue(new long[]{10000, 10000}).setTaskScheduler(...)` trên SimpleBroker. Hiện tại chỉ có `enableSimpleBroker("/topic","/queue")` — SimpleBroker sẽ dùng default (no heartbeat broker→client). FE set `heartbeatIncoming=10000` nghĩa là FE expect broker gửi heartbeat mỗi 10s; nếu broker không gửi → FE timeout detection có thể bị lệch (phụ thuộc implementation `@stomp/stompjs`). Thực tế `@stomp/stompjs` negotiate heartbeat qua CONNECTED frame → nếu server trả `heart-beat:0,0` thì client tự biết không có heartbeat và sẽ không timeout vì thiếu heartbeat → acceptable V1. Nhưng "zombie connection" detection (section 7) sẽ không enforce 20s rule. Gợi ý thêm `.setHeartbeatValue(new long[]{10000,10000}).setTaskScheduler(taskScheduler())` + bean `ThreadPoolTaskScheduler`. Pre-production, không block W4-D4.
+
+2. **[BE] `WebSocketConfig.java:94-105` — Register `/ws` endpoint 2 lần** (một với SockJS, một không): Comment nói "Native WebSocket endpoint ... SockJS fallback cho browser cũ ... separate path". Nhưng cả hai đều dùng path `/ws` giống nhau — không phải separate path. Spring sẽ có 2 handler mapping cùng path. Thực tế: `.withSockJS()` tạo sub-paths `/ws/info`, `/ws/{server}/{session}/websocket`, còn native endpoint chỉ handle exact `/ws`. Hoạt động OK vì không collision, nhưng comment misleading. Gợi ý dùng 1 endpoint `/ws` với `.withSockJS()` — SockJS client tự fallback sang raw WS nếu supported, tiết kiệm 1 registration. Non-blocking vì tests pass.
+
+3. **[FE] `stompClient.ts:151-162` — `onWebSocketClose` logic potential double-schedule**: Khi `onStompError` fire với error code không phải AUTH_* (vd `FORBIDDEN` hoặc `SERVER_ERROR`), code set `_setState('ERROR')` + gọi `_scheduleReconnect()`. Sau đó WebSocket tự close → `onWebSocketClose` fire → check `_state !== 'DISCONNECTED'` → nhưng state là 'ERROR' nên check pass → `_setState('DISCONNECTED')` + `_scheduleReconnect()` lần 2 → `_reconnectAttempts++` tăng 2 lần cho 1 sự cố. Không fatal (MAX=10 vẫn đủ) nhưng có thể đổi check thành `_state !== 'DISCONNECTED' && _state !== 'ERROR'` hoặc guard bằng flag `_scheduleInFlight`. Non-blocking — effect là reconnect attempts increment nhanh hơn expected trong một số edge cases.
+
+4. **[FE] `stompClient.ts:175-197` — `connectStomp` race khi deactivate cũ**: `await _client.deactivate()` trong `connectStomp` có thể trigger `onDisconnect` → `_setState('DISCONNECTED')` → trong lúc đó nếu có listener fire `_scheduleReconnect` (hiện tại không có; `onWebSocketClose` có thể chạy nhưng guard `_state !== 'DISCONNECTED'` sẽ bypass). Đồng thời function caller đã set `_setState('CONNECTING')` trước `deactivate`, nên `onDisconnect` overwrite state về DISCONNECTED → state mismatch tạm thời. Sau đó `_client = _createClient()` + `.activate()` → `onConnect` set CONNECTED. Flow vẫn converge đúng, nhưng listeners `onConnectionStateChange` có thể thấy flicker CONNECTING → DISCONNECTED → CONNECTED. ConnectionStatus component sẽ nhấp nháy 1 lần. Non-blocking UX-wise; nếu muốn clean, di chuyển `_setState('CONNECTING')` xuống sau `deactivate` hoặc filter state transitions.
+
+### Notes về design decisions quan sát
+
+- **Raw WS test pattern cho T06 SUBSCRIBE**: Documented lý do trong comment (DefaultStompSession không expose header `message`). Pattern này cũng đã dùng trong `connectAndExpectError` helper cho T02-T04. Test maintainability OK — helper `extractStompHeader` reusable. Nếu sau này test nhiều events hơn, có thể extract thành `StompTestClient` utility.
+- **ContextRefreshedEvent wire StompErrorHandler**: Đây là solution đúng cho circular dep problem trong Spring 6 + Spring Messaging. `@PostConstruct` không work vì bean `subProtocolWebSocketHandler` chưa ready. Documented trong javadoc. Đáng ghi vào knowledge.
+- **`_handleTokenExpired` redirects qua `window.location.href` thay vì `navigate()`**: Đúng — stompClient nằm ngoài React tree nên không có access đến router context. Documented trong comment.
+
+### Contract impact
+- Không cần cập nhật `docs/SOCKET_EVENTS.md`. Implementation khớp `v1.0-draft-w4`.
+- Suggest next version bump khi `MessageBroadcaster` + `MESSAGE_CREATED` broadcast implement (W4 BE phần còn lại).
+
+### Recommendations cho W4-D4 (FE subscription)
+- `useConvSubscription(convId)` hook phải check `client.connected` trong dependency array (SOCKET_EVENTS.md mục 5.2) — reviewer sẽ verify.
+- Dedupe bắt buộc bằng `messages.some(m => m.id === payload.id)` khi receive broadcast — vì sender cũng nhận broadcast của chính mình.
+- Cleanup `sub.unsubscribe()` trong useEffect return. Leak detection test nên có.
+
+### Knowledge updates candidate (không update lần này, log lại để batch)
+- Pattern "ContextRefreshedEvent để avoid circular dep khi customize bean deep-nested" — candidate cho approved patterns BE.
+- Pattern "Module-level singleton TypeScript cho STOMP client với manual reconnect" — candidate cho approved patterns FE.
+- STOMP test pattern raw WebSocket để bắt ERROR frame header — candidate cho testing standards.
+
+Sẽ update knowledge cuối Tuần 4 sau khi W4-D4 review xong.
+
+---
+
 ## 2026-04-19 — W4D2 Review: Messages UI Phase A (MessagesList + MessageItem + MessageInput wire)
 
 ### Verdict

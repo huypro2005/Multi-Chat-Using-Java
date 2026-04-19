@@ -32,6 +32,35 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-20 (Tuần 4, Ngày 3) — WebSocket + STOMP auth layer
+
+### Xong
+- [BE][W4-D3][2026-04-20] feat: WebSocketConfig + AuthChannelInterceptor + STOMP auth + 6 integration tests
+  - `WebSocketConfig.java`: `@EnableWebSocketMessageBroker`, SimpleBroker `/topic` + `/queue`, AppDest `/app`, UserDest `/user`. Endpoint `/ws` có CẢ native WS + SockJS fallback. `setAllowedOriginPatterns` từ `app.websocket.allowed-origins`. Transport: `setMessageSizeLimit(64KB) / setSendTimeLimit(10s) / setSendBufferSizeLimit(512KB)`.
+  - `StompPrincipal.java`: record implements Principal, name=userId UUID string.
+  - `AuthChannelInterceptor.java`: CONNECT verify JWT qua `validateTokenDetailed` → throw `MessageDeliveryException("AUTH_REQUIRED"/"AUTH_TOKEN_EXPIRED")`. SUBSCRIBE parse `/topic/conv.{uuid}` → `existsByConversation_IdAndUser_Id` → throw "FORBIDDEN" nếu không phải member.
+  - `StompErrorHandler.java`: custom `StompSubProtocolErrorHandler` extract errorCode từ exception chain, set header `message` + body = errorCode. Register qua `@EventListener(ContextRefreshedEvent.class)` unwrap `WebSocketHandlerDecorator` đến `SubProtocolWebSocketHandler`, loop `getProtocolHandlers()` → `StompSubProtocolHandler.setErrorHandler()`.
+  - `SecurityConfig.java`: thêm `/ws/**` vào permitAll (auth qua STOMP CONNECT, không qua HTTP filter).
+  - `application.yml` + `application-test.yml`: thêm `app.websocket.allowed-origins` config.
+  - `WebSocketIntegrationTest.java`: 6 tests dùng raw WebSocket (`StandardWebSocketClient` + `AbstractWebSocketHandler`), parse STOMP frame trực tiếp. T01 connect valid JWT, T02 invalid JWT → AUTH_REQUIRED, T03 expired JWT → AUTH_TOKEN_EXPIRED, T04 no auth header → AUTH_REQUIRED, T05 member subscribe OK, T06 non-member subscribe → FORBIDDEN.
+  - `mvn test`: 89 tests total (83 cũ + 6 mới), 0 failures.
+
+### Đang dở
+- Broadcast sau `POST /messages` (`@TransactionalEventListener(AFTER_COMMIT)` + `SimpMessagingTemplate.convertAndSend`) — phase W4-D4.
+- `/app/*` handlers + typing indicator — phase Tuần 5.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- PITFALL lớn #1: `WebSocketStompClient`/`DefaultStompSession` KHÔNG expose header "message" từ ERROR frame qua callback API khi CONNECT bị reject. Thay vào đó fire `handleTransportError(ConnectionLostException("Connection closed"))`. Test PHẢI dùng raw `StandardWebSocketClient` + `AbstractWebSocketHandler.handleTextMessage` để đọc ERROR frame nguyên bản và extract header.
+- PITFALL #2: Custom `StompSubProtocolErrorHandler` phải set qua `StompSubProtocolHandler.setErrorHandler()`. `SubProtocolWebSocketHandler` KHÔNG expose setErrorHandler. Không thể autowire trực tiếp vì circular dependency với `DelegatingWebSocketMessageBrokerConfiguration`. Workaround: `@EventListener(ContextRefreshedEvent)` + `applicationContext.getBean("subProtocolWebSocketHandler", WebSocketHandler.class)` + unwrap `WebSocketHandlerDecorator`.
+- PITFALL #3: Mặc định Spring STOMP trả ERROR frame RỖNG (Connection closed) khi ChannelInterceptor throw exception — error code bị mất. Phải có custom error handler để ERROR frame mang header `message` = code.
+- PITFALL #4: `/ws/**` phải nằm trong SecurityConfig permitAll — nếu không, SockJS info GET request bị Spring Security chặn 401 trước cả khi reach STOMP layer. Auth cho WS thực tế xảy ra ở STOMP CONNECT frame qua `AuthChannelInterceptor`.
+- Đăng ký CẢ 2 endpoint cùng path `/ws` (native + SockJS) — Spring ghép đúng handler theo request headers. FE dùng SockJS fallback cho browser cũ, test dùng raw WS cho control tốt hơn.
+
+---
+
 ## 2026-04-19 (Tuần 4, Ngày 1) — Messages schema + 2 REST endpoints
 
 ### Xong

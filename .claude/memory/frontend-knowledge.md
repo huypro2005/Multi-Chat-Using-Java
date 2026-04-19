@@ -27,7 +27,17 @@
 - API functions trong features gọi `api.post/get('/api/...')` — prefix `/api` được ghi trong path, KHÔNG trong baseURL
 
 ### WebSocket client
-- **@stomp/stompjs + sockjs-client** (chưa implement, sẽ làm Tuần 4+)
+- **@stomp/stompjs + sockjs-client** — STOMP singleton tại `src/lib/stompClient.ts`
+- SockJS URL = HTTP (`http://`), KHÔNG ws:// — SockJS tự upgrade.
+- `reconnectDelay: 0` — tắt built-in reconnect, tự manage exponential backoff.
+- Backoff: 1s → 2s → 4s → 8s → 16s → 30s (cap), MAX_RECONNECT = 10.
+- Auth flow: token từ `tokenStorage.getAccessToken()` → `connectHeaders: { Authorization: Bearer }`.
+- `AUTH_TOKEN_EXPIRED` STOMP error → `authService.refresh()` → reconnect (không logout).
+- `AUTH_REQUIRED` STOMP error → `window.location.href = '/login'` (logout).
+- Wire lifecycle trong App.tsx: `useEffect` watch `!!authStore.accessToken` → connect khi login, disconnect khi logout.
+- `webSocketFactory` phải là factory fn (không phải instance) — Client gọi lại mỗi reconnect.
+- Dynamic import `authService` trong `stompClient.ts` để tránh circular dep (App.tsx import cả 2 static, Vite warning cosmetic — runtime OK).
+- Debug log: `import.meta.env.DEV` only.
 
 ### Styling
 - **TailwindCSS v4** via `@tailwindcss/vite` plugin (KHÔNG dùng PostCSS config)
@@ -289,6 +299,7 @@ Best-effort logout API, luôn `clearAuth()` + `navigate('/login')` trong `finall
 
 ## Changelog file này
 
+- 2026-04-20 (W4-D3): STOMP client singleton, connect/disconnect lifecycle, ConnectionStatus debug UI. authService.refresh() added.
 - 2026-04-20 (W4-D2): MessageItem (memo, grouping, status icon, hover timestamp), MessagesList (infinite scroll, auto-scroll, skeleton/error/empty states), MessageInput (enabled, Enter send, auto-resize, char counter), wire ConversationDetailPage. Optimistic sender từ authStore.
 - 2026-04-19 (W4-D1): CONSOLIDATE (xóa outdated notes, gộp pattern). Thêm: message types, useInfiniteQuery pattern, optimistic update useSendMessage, messageKeys factory.
 - 2026-04-19 (W3D4): ConversationDetailPage 3-section, MessageInput disabled pattern, features/messages/ folder.

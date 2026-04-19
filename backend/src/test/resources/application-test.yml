@@ -29,6 +29,8 @@ app:
     refresh-expiration-ms: 604800000
   cors:
     allowed-origins: http://localhost:3000,http://localhost:5173
+  websocket:
+    allowed-origins: http://localhost:3000,http://localhost:5173
 
 logging:
   level:

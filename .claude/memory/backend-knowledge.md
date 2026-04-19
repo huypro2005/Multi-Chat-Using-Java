@@ -29,7 +29,16 @@
 - Repository method naming với ManyToOne: dùng `findByUser_Id(UUID)` không phải `findByUserId(UUID)` — Spring Data cần dấu `_` để phân biệt nested property. Tuần 1.
 
 ### WebSocket / STOMP
-- (chưa chốt)
+- `WebSocketConfig` enableSimpleBroker("/topic","/queue") + AppDestPrefix("/app") + UserDestPrefix("/user"). `/ws` endpoint có CẢ 2 registration: native WebSocket (raw `ws://`) + SockJS fallback — FE dùng SockJS prod, test dùng raw WS để đọc ERROR frame nguyên bản. W4-D3.
+- `setAllowedOriginPatterns` (KHÔNG `setAllowedOrigins`) — cần pattern matching + credentials. Đọc từ `app.websocket.allowed-origins` (comma-separated), KHÔNG hardcode "*". W4-D3.
+- `configureWebSocketTransport`: `setMessageSizeLimit(64*1024)` + `setSendTimeLimit(10_000)` + `setSendBufferSizeLimit(512*1024)` — chặn DoS/zombie connection. W4-D3.
+- `AuthChannelInterceptor implements ChannelInterceptor`: preSend switch theo StompCommand — CONNECT verify JWT qua `JwtTokenProvider.validateTokenDetailed()` + `accessor.setUser(new StompPrincipal(userId))`; SUBSCRIBE check destination bắt đầu `/topic/conv.` → parse UUID → `conversationMemberRepository.existsByConversation_IdAndUser_Id`. Throw `MessageDeliveryException(errorCode)` khi reject. W4-D3.
+- `StompPrincipal` record implements `java.security.Principal`, name=userId UUID string. Spring resolve principal cho `/user/*` destinations. W4-D3.
+- `MessageDeliveryException` → ERROR frame: MẶC ĐỊNH Spring KHÔNG expose exception message vào header. Phải custom `StompSubProtocolErrorHandler.handleClientMessageProcessingError()` → `accessor.setMessage(errorCode)` + body = errorCode bytes. Unwrap exception cause chain lấy message gốc. W4-D3.
+- Register custom error handler: SubProtocolWebSocketHandler KHÔNG phải bean autowire được trực tiếp (circular với DelegatingWebSocketMessageBrokerConfiguration). Dùng `@EventListener(ContextRefreshedEvent.class)` lookup bean `"subProtocolWebSocketHandler"` (type public là `WebSocketHandler`), unwrap `WebSocketHandlerDecorator.getDelegate()` đến `SubProtocolWebSocketHandler`, loop `getProtocolHandlers()` tìm `StompSubProtocolHandler` → `setErrorHandler()`. W4-D3.
+- `SecurityConfig` permitAll `/ws/**` — auth qua STOMP CONNECT frame, không qua HTTP filter (SockJS info endpoint cần public). W4-D3.
+- Test WS với raw WebSocket (`StandardWebSocketClient` + `AbstractWebSocketHandler`): gửi CONNECT frame bằng TextMessage `"CONNECT\naccept-version:1.2\nhost:localhost\nheart-beat:10000,10000\nAuthorization:Bearer <token>\n\n\u0000"`, đọc ERROR frame → extract header `message` hoặc body. Lý do: `WebSocketStompClient`/`DefaultStompSession` wrap CONNECT rejection thành `ConnectionLostException("Connection closed")` qua `handleTransportError` — không expose header nguyên bản. W4-D3.
+- SockJS note cho test: SockJS fallback cho `handleTransportError` CloseStatus 1002 → test pass qua raw WS là cách duy nhất verify header error code.
 
 ### JWT Token Validation Pattern (W1 Fix)
 - Dùng `validateTokenDetailed()` trả enum `TokenValidationResult` (VALID/EXPIRED/INVALID) thay vì boolean `validateToken()`.
@@ -220,6 +229,7 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ## Changelog file này
 
+- 2026-04-19 W4D3: Thêm WebSocket/STOMP config pattern (AuthChannelInterceptor, StompErrorHandler, SubProtocolWebSocketHandler lookup qua ContextRefreshedEvent), raw WebSocket test pattern cho CONNECT/SUBSCRIBE error verification.
 - 2026-04-19 W4D1: Thêm Messages domain pattern, cursor pagination logic, H2 TIMESTAMPTZ pitfall cho test.
 - 2026-04-19 W3D2: Thêm W3-BE-1 fix pattern, findOrCreate 1-1 SQL, anti-enumeration 404, flush+clear pattern, H2 UUID native query workaround.
 - 2026-04-19 W3D1: Thêm Conversation domain pattern, enum string mapping, JOIN FETCH repo pattern, index naming convention, DROP/recreate DB flow.

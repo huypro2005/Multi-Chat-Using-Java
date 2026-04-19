@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Paperclip, Send } from 'lucide-react'
 import { useSendMessage } from '../hooks'
 
@@ -24,6 +24,7 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
   const [content, setContent] = useState('')
   const [charError, setCharError] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const shouldRefocusAfterSendRef = useRef(false)
 
   const { mutate: sendMessage, isPending } = useSendMessage(conversationId)
 
@@ -50,6 +51,7 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
       return
     }
     sendMessage({ content: trimmed })
+    shouldRefocusAfterSendRef.current = true
     setContent('')
     setCharError(false)
     // Reset textarea height
@@ -57,6 +59,13 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
       textareaRef.current.style.height = 'auto'
     }
   }, [content, disabled, isPending, sendMessage])
+
+  useEffect(() => {
+    if (!isPending && !disabled && shouldRefocusAfterSendRef.current) {
+      textareaRef.current?.focus()
+      shouldRefocusAfterSendRef.current = false
+    }
+  }, [disabled, isPending])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !disabled) {

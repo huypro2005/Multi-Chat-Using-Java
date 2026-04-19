@@ -58,7 +58,10 @@ public class SecurityConfig {
                             "/api/auth/oauth",
                             "/api/auth/refresh",
                             "/api/health",
-                            "/actuator/health"
+                            "/actuator/health",
+                            // WebSocket/SockJS handshake + info — auth xảy ra ở STOMP CONNECT frame
+                            // qua AuthChannelInterceptor, không qua HTTP filter chain.
+                            "/ws/**"
                     ).permitAll()
                     // /api/auth/logout KHÔNG trong whitelist — yêu cầu JWT hợp lệ
                     .anyRequest().authenticated()

@@ -5,6 +5,14 @@
 
 ---
 
+[FE][W4-D3][2026-04-20] feat: STOMP client singleton, connect/disconnect lifecycle, ConnectionStatus debug UI
+- Tạo: src/lib/stompClient.ts — Client singleton, ConnectionState type, connectStomp/disconnectStomp/getStompClient, onConnectionStateChange listener set, exponential backoff MAX_RECONNECT=10, AUTH_TOKEN_EXPIRED→refresh, AUTH_REQUIRED→logout
+- Sửa: src/services/authService.ts — thêm refresh() method (dùng bởi stompClient khi token expired)
+- Sửa: src/App.tsx — wire STOMP lifecycle qua useEffect watch isAuthenticated (accessToken presence), import ConnectionStatus
+- Tạo: src/components/ConnectionStatus.tsx — fixed bottom-right indicator, ẩn CONNECTED ở prod, luôn hiện ở DEV
+- Tạo: frontend/.env — VITE_WS_URL=http://localhost:8080/ws
+- build: 0 TS error | lint: 0 ESLint error
+
 [FE][W4-D2][2026-04-20] feat: MessagesList (infinite scroll, auto-scroll), MessageItem (grouping, status), MessageInput (enabled, Enter send, auto-resize), wire ConversationDetailPage
 - Tạo: src/features/messages/components/MessageItem.tsx — React.memo, isOwn/other bubble, hover timestamp, status icon (spinner/✓), reply preview, shouldShowAvatar grouping
 - Tạo: src/features/messages/components/MessagesList.tsx — useInfiniteQuery flatten, bottomRef auto-scroll, IntersectionObserver infinite scroll + preserve scrollTop, MessagesSkeleton/Error/Empty states

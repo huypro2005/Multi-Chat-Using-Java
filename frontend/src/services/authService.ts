@@ -58,4 +58,21 @@ export const authService = {
       return { isAuthenticated: false }
     }
   },
+
+  /**
+   * Refresh access token — dùng bởi STOMP client khi nhận AUTH_TOKEN_EXPIRED.
+   * Throws nếu refresh fail (caller tự handle logout).
+   */
+  async refresh(): Promise<void> {
+    const refreshToken = tokenStorage.getRefreshToken()
+    if (!refreshToken) {
+      throw new Error('No refresh token')
+    }
+
+    const { data } = await rawAxios.post<AuthResponse>('/api/auth/refresh', {
+      refreshToken,
+    })
+
+    useAuthStore.getState().setAuth(data)
+  },
 }

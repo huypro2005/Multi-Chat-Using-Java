@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { authService } from '@/services/authService'
+import { useAuthStore } from '@/stores/authStore'
+import { connectStomp, disconnectStomp } from '@/lib/stompClient'
 import AppLoadingScreen from '@/components/AppLoadingScreen'
 import ProtectedRoute from '@/components/ProtectedRoute'
+import ConnectionStatus from '@/components/ConnectionStatus'
 import LoginPage from '@/pages/LoginPage'
 import RegisterPage from '@/pages/RegisterPage'
 import HomePage from '@/pages/HomePage'
@@ -16,10 +19,28 @@ export default function App() {
   // refreshToken → request đầu tiên gặp 401 → interceptor redirect /login sai.
   const [isInitialized, setIsInitialized] = useState(false)
 
+  // Đọc isAuthenticated từ authStore để drive STOMP lifecycle
+  const isAuthenticated = useAuthStore((s) => !!s.accessToken)
+  const prevAuthRef = useRef(isAuthenticated)
+
   useEffect(() => {
     // init() luôn resolve (không throw) — finally đảm bảo gate luôn mở
     void authService.init().finally(() => setIsInitialized(true))
   }, [])
+
+  // STOMP lifecycle: connect khi login, disconnect khi logout
+  useEffect(() => {
+    const wasAuthenticated = prevAuthRef.current
+    prevAuthRef.current = isAuthenticated
+
+    if (isAuthenticated && !wasAuthenticated) {
+      // Vừa login (hoặc app init với session còn valid)
+      void connectStomp()
+    } else if (!isAuthenticated && wasAuthenticated) {
+      // Vừa logout
+      disconnectStomp()
+    }
+  }, [isAuthenticated])
 
   if (!isInitialized) {
     return <AppLoadingScreen />
@@ -46,6 +67,9 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+
+      {/* Debug indicator — chỉ visible ở DEV hoặc khi có lỗi/disconnect */}
+      <ConnectionStatus />
     </BrowserRouter>
   )
 }
