@@ -64,10 +64,11 @@
 *(Ghi khi phát hiện vấn đề nào đó XUẤT HIỆN NHIỀU LẦN trong review — cần nâng thành quy tắc.)*
 
 ### Vấn đề thường gặp ở BE
-- Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phai set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
+- Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phải set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
+- **W-BE-3 RESOLVED**: AuthMethod enum tại com.chatapp.user.enums. generateAccessToken(User, AuthMethod) — không còn hardcode "password". getAuthMethodFromToken() có fallback về PASSWORD khi claim unknown.
 
 ### Vấn đề thường gặp ở FE
-- **globalThis workaround** (api.ts <-> authStore.ts): pattern dùng `globalThis.__authStoreGetState` để phá circular dep. Acceptable trong V1 nhưng phải migrate sang `tokenStorage.ts` pattern trước khi store implement action gọi api (Tuần 2). Kiểm tra trong mỗi review: có circular import nào nguy hiểm không?
+- **globalThis workaround** (api.ts <-> authStore.ts): RESOLVED trong W-FE-2. Đã migrate sang tokenStorage.ts pattern. globalThis hoàn toàn bị loại bỏ. Không còn cần check pattern này.
 - **Zustand persist: không persist accessToken** — quy tắc bắt buộc. Nếu thấy accessToken trong `partialize`, đây là BLOCKING issue.
 - **Axios interceptor loop** — khi retry /refresh phải dùng `axios.post` thuần (không phải api instance) và set `_retry` flag. Nếu không có 2 điều này, infinite retry loop.
 
@@ -85,6 +86,7 @@
 ### FE patterns
 - RHF + zodResolver + mode:'onTouched' — validate khi blur, không mỗi keystroke. Ít re-render.
 - isRefreshing flag + failedQueue[] — refresh queue pattern cho axios. Chỉ 1 request gọi /refresh, số còn lại queue.
+- **tokenStorage.ts pattern** (W-FE-2 RESOLVED): module in-memory trung gian không import api.ts, phá circular dep api.ts <-> authStore.ts. authStore.setAuth() và clearAuth() sync 2 chiều với tokenStorage trong cùng action (sync trước set() Zustand để không có async gap). onRehydrateStorage chỉ restore refreshToken vào tokenStorage (accessToken không persist theo ADR-003).
 
 ---
 
@@ -111,3 +113,4 @@
 ## Changelog file này
 
 - 2026-04-19 (Ngày 4): Điền ADR-001 đến ADR-004. Thêm FE review standards từ Phase 3B review. Điền contract changelog. Thêm approved patterns BE + FE.
+- 2026-04-19 (W2D1): Mark W-BE-3 RESOLVED (AuthMethod enum). Mark W-FE-2 RESOLVED (tokenStorage pattern, globalThis removed). Thêm tokenStorage.ts vào approved FE patterns. Note warning post-rehydrate auth flow.

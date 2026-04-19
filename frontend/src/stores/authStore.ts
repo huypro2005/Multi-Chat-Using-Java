@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import { tokenStorage } from '@/lib/tokenStorage'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,19 +46,26 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       isHydrated: false,
 
-      setAuth: (authResponse: AuthResponse) =>
+      setAuth: (authResponse: AuthResponse) => {
+        // Sync tokenStorage TRƯỚC khi set store để axios interceptor
+        // luôn đọc được token mới ngay lập tức (không có async gap)
+        tokenStorage.setTokens(authResponse.accessToken, authResponse.refreshToken)
         set({
           accessToken: authResponse.accessToken,
           refreshToken: authResponse.refreshToken,
           user: authResponse.user,
-        }),
+        })
+      },
 
-      clearAuth: () =>
+      clearAuth: () => {
+        // Sync tokenStorage cùng lúc để interceptor không dùng token cũ
+        tokenStorage.clear()
         set({
           accessToken: null,
           refreshToken: null,
           user: null,
-        }),
+        })
+      },
 
       updateUser: (userData: Partial<User>) =>
         set((state) => ({
@@ -76,19 +84,16 @@ export const useAuthStore = create<AuthState>()(
         user: state.user,
       }),
       onRehydrateStorage: () => (state) => {
+        // Khi hydrate xong, sync refreshToken vào tokenStorage
+        // để interceptor có thể dùng ngay nếu cần refresh sớm
+        if (state?.refreshToken) {
+          tokenStorage.setRefreshToken(state.refreshToken)
+        }
         state?.setHydrated()
       },
     }
   )
 )
-
-// ---------------------------------------------------------------------------
-// Wire vào globalThis để api.ts có thể đọc store mà không bị circular dep
-// ---------------------------------------------------------------------------
-// Đặt ngay khi module load. api.ts đọc qua __authStoreGetState thay vì
-// import trực tiếp, phá vỡ vòng circular: api → authStore → api.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-;(globalThis as any).__authStoreGetState = useAuthStore.getState.bind(useAuthStore)
 
 // Computed helper (dùng bên ngoài React component)
 export function getIsAuthenticated(): boolean {

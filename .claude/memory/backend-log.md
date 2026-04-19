@@ -32,6 +32,23 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W2D1 — W-BE-3) — AuthMethod enum + refactor generateAccessToken
+
+### Xong
+- Xác nhận AuthMethod.java, JwtTokenProvider.java, JwtTokenProviderTest.java đã được implement đầy đủ từ phiên trước.
+- Grep toàn bộ: không còn call `generateAccessToken` nào với 1 argument — tất cả đều đúng `(user, AuthMethod.X)`.
+- JwtTokenProviderTest có đủ 4 test mới: generateAccessTokenWithPasswordMethod, generateAccessTokenWithOauthMethod, getAuthMethodFromTokenPassword, getAuthMethodFromTokenOauth.
+- mvn test: 17/17 PASS, BUILD SUCCESS. Test count tăng từ 13 → 17.
+
+### Đang dở
+- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — tiếp tục W2.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- Tất cả refactor W-BE-3 đã hoàn thành trước session này — không cần viết code mới. Chỉ verify + chạy test.
+
 ## 2026-04-19 (W1 Fix — Pre-Phase 3B) — Phân biệt AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED
 
 ### Xong

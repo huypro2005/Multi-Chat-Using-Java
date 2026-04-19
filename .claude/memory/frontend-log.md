@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-04-19 (Tuần 2, Ngày 1) — W-FE-2: tokenStorage migration
+
+### Xong
+- Audit codebase: `tokenStorage.ts`, `api.ts`, `authStore.ts` đã implement đúng pattern trước khi task bắt đầu (migration đã xảy ra ở Tuần 1, Ngày 4 nhưng chưa được verify chính thức).
+- Verify `globalThis` hoàn toàn absent trong toàn bộ `src/` (grep kết quả rỗng).
+- `npm run build`: 0 error, 0 warning — PASS.
+- `npm run lint`: 0 error — PASS.
+- Cập nhật `frontend-knowledge.md`: TODO Tuần 2 → implemented section, Auth Store pattern bỏ globalThis, thêm pitfall sync.
+
+### Đang dở
+- Login/Register chưa call API thật (task Tuần 2 tiếp theo)
+
+### Blocker
+- Không có
+
+### Ghi chú kỹ thuật
+- `tokenStorage.ts` không import bất kỳ module nào trong project — dependency graph sạch.
+- `authStore.ts` onRehydrateStorage gọi `tokenStorage.setRefreshToken()` sau khi hydrate từ localStorage — đảm bảo interceptor có token ngay khi app load mà không cần user action.
+- `api.ts` chỉ gọi `tokenStorage.setTokens()` trong refresh interceptor (không gọi authStore) — đúng pattern, tránh double-write race.
+
+---
+
 ## Template
 
 ```

@@ -104,8 +104,17 @@
 
 ---
 
+### AuthMethod enum (Tuần 2, W-BE-3)
+- Enum tại `com.chatapp.user.enums.AuthMethod`: PASSWORD("password"), OAUTH2_GOOGLE("oauth2_google").
+- `generateAccessToken(User, AuthMethod)` — luôn truyền enum, không truyền string thô.
+- `getAuthMethodFromToken(String)` — extract từ JWT claim "auth_method", fallback về PASSWORD nếu unknown.
+- JWT claim key: "auth_method", value là string lowercase từ `enum.getValue()`.
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W2D1: Thêm AuthMethod enum pattern (W-BE-3).
 - 2026-04-19 W1 Fix: Thêm JWT Token Validation Pattern (validateTokenDetailed, AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED).
 - 2026-04-19 Ngày 3: Thêm Security/JWT patterns, ErrorResponse shape, pitfall @SpringBootTest excludeAutoConfiguration, CORS gotcha, jjwt 0.12.x API notes.
 - 2026-04-19: Thêm UUID/timestamp pattern, entity pattern, package structure, pitfall Spring Data Redis WARN.

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios'
+import { tokenStorage } from './tokenStorage'
 
 // ---------------------------------------------------------------------------
 // Refresh queue — tránh race condition khi nhiều request cùng nhận 401
@@ -33,14 +34,10 @@ const api: AxiosInstance = axios.create({
 })
 
 // ---------------------------------------------------------------------------
-// Request interceptor — attach access token từ authStore
+// Request interceptor — attach access token từ tokenStorage
 // ---------------------------------------------------------------------------
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  // Import lazy để tránh circular dependency khi authStore cũng import api.
-  // useAuthStore.getState() là cách đúng trong non-React context.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const getState = (globalThis as any).__authStoreGetState as (() => { accessToken: string | null }) | undefined
-  const token = getState?.()?.accessToken ?? null
+  const token = tokenStorage.getAccessToken()
 
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
@@ -85,14 +82,7 @@ api.interceptors.response.use(
         isRefreshing = true
 
         try {
-          // Lấy refreshToken từ store (non-React context)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const getState = (globalThis as any).__authStoreGetState as
-            | (() => { refreshToken: string | null; setAuth: (r: unknown) => void; clearAuth: () => void })
-            | undefined
-
-          const storeState = getState?.()
-          const refreshToken = storeState?.refreshToken ?? null
+          const refreshToken = tokenStorage.getRefreshToken()
 
           if (!refreshToken) {
             throw new Error('No refresh token available')
@@ -107,8 +97,10 @@ api.interceptors.response.use(
             user: unknown
           }>('/api/auth/refresh', { refreshToken })
 
-          // Cập nhật store với token mới
-          storeState?.setAuth(data)
+          // Cập nhật tokenStorage với token mới.
+          // authStore.setAuth() sẽ được gọi bởi caller nếu cần sync store,
+          // nhưng interceptor chỉ cần tokenStorage — đủ để retry request.
+          tokenStorage.setTokens(data.accessToken, data.refreshToken)
 
           processQueue(null, data.accessToken)
 
@@ -122,12 +114,9 @@ api.interceptors.response.use(
         } catch (refreshError) {
           processQueue(refreshError, null)
 
-          // Refresh fail → clear auth, redirect login
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const getState = (globalThis as any).__authStoreGetState as
-            | (() => { clearAuth: () => void })
-            | undefined
-          getState?.()?.clearAuth()
+          // Refresh fail → clear token cache, redirect login
+          // authStore.clearAuth() sẽ được gọi khi app detect unauthenticated state
+          tokenStorage.clear()
           window.location.href = '/login'
 
           return Promise.reject(refreshError)
@@ -137,14 +126,10 @@ api.interceptors.response.use(
       }
 
       // -----------------------------------------------------------------------
-      // CASE 2: Không có token / token invalid → clear, redirect login
+      // CASE 2: Không có token / token invalid → clear cache, redirect login
       // -----------------------------------------------------------------------
       if (errorCode === 'AUTH_REQUIRED') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const getState = (globalThis as any).__authStoreGetState as
-          | (() => { clearAuth: () => void })
-          | undefined
-        getState?.()?.clearAuth()
+        tokenStorage.clear()
         window.location.href = '/login'
       }
     }

@@ -1,6 +1,8 @@
 package com.chatapp.security;
 
 import com.chatapp.user.entity.User;
+import com.chatapp.user.enums.AuthMethod;
+import io.jsonwebtoken.Claims;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,7 +44,7 @@ class JwtTokenProviderTest {
 
     @Test
     void generateAndValidateAccessToken() {
-        String token = jwtTokenProvider.generateAccessToken(testUser);
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
 
         assertThat(token).isNotBlank();
         assertThat(jwtTokenProvider.validateToken(token)).isTrue();
@@ -67,7 +69,7 @@ class JwtTokenProviderTest {
 
     @Test
     void accessTokenAndRefreshTokenShouldHaveDifferentJti() {
-        String accessToken = jwtTokenProvider.generateAccessToken(testUser);
+        String accessToken = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
         String refreshToken = jwtTokenProvider.generateRefreshToken(testUser);
 
         String accessJti = jwtTokenProvider.getJtiFromToken(accessToken);
@@ -85,14 +87,14 @@ class JwtTokenProviderTest {
                 604800000L
         );
 
-        String token = expiredProvider.generateAccessToken(testUser);
+        String token = expiredProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
 
         assertThat(expiredProvider.validateToken(token)).isFalse();
     }
 
     @Test
     void invalidSignatureShouldBeRejected() {
-        String token = jwtTokenProvider.generateAccessToken(testUser);
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
 
         // Tamper signature — modify last few chars
         String tampered = token.substring(0, token.length() - 4) + "XXXX";
@@ -104,5 +106,31 @@ class JwtTokenProviderTest {
     void randomStringTokenShouldBeInvalid() {
         assertThat(jwtTokenProvider.validateToken("not.a.jwt")).isFalse();
         assertThat(jwtTokenProvider.validateToken("")).isFalse();
+    }
+
+    @Test
+    void generateAccessTokenWithPasswordMethod() {
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
+        Claims claims = jwtTokenProvider.getClaims(token);
+        assertThat(claims.get("auth_method")).isEqualTo("password");
+    }
+
+    @Test
+    void generateAccessTokenWithOauthMethod() {
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.OAUTH2_GOOGLE);
+        Claims claims = jwtTokenProvider.getClaims(token);
+        assertThat(claims.get("auth_method")).isEqualTo("oauth2_google");
+    }
+
+    @Test
+    void getAuthMethodFromTokenPassword() {
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.PASSWORD);
+        assertThat(jwtTokenProvider.getAuthMethodFromToken(token)).isEqualTo(AuthMethod.PASSWORD);
+    }
+
+    @Test
+    void getAuthMethodFromTokenOauth() {
+        String token = jwtTokenProvider.generateAccessToken(testUser, AuthMethod.OAUTH2_GOOGLE);
+        assertThat(jwtTokenProvider.getAuthMethodFromToken(token)).isEqualTo(AuthMethod.OAUTH2_GOOGLE);
     }
 }

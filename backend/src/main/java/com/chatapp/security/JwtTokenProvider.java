@@ -1,6 +1,7 @@
 package com.chatapp.security;
 
 import com.chatapp.user.entity.User;
+import com.chatapp.user.enums.AuthMethod;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;
@@ -59,16 +60,18 @@ public class JwtTokenProvider {
     }
 
     /**
-     * Tạo access token (1 giờ theo config).
+     * Tạo access token (15 phút theo config).
      * Claims: sub=userId, username, auth_method, jti (UUID random).
-     * auth_method hardcode "password" — Tuần 2 sẽ truyền dynamic khi có OAuth.
+     *
+     * @param user       user entity
+     * @param authMethod phương thức xác thực — PASSWORD hoặc OAUTH2_GOOGLE
      */
-    public String generateAccessToken(User user) {
+    public String generateAccessToken(User user, AuthMethod authMethod) {
         long now = System.currentTimeMillis();
         return Jwts.builder()
                 .subject(user.getId().toString())
                 .claim("username", user.getUsername())
-                .claim("auth_method", "password")
+                .claim("auth_method", authMethod.getValue())
                 .id(UUID.randomUUID().toString())
                 .issuedAt(new Date(now))
                 .expiration(new Date(now + accessExpirationMs))
@@ -125,13 +128,14 @@ public class JwtTokenProvider {
     /**
      * Generate access token với expiration tùy chỉnh — chỉ dùng trong unit/integration test.
      * Package-private để không expose ra ngoài package security.
+     * Dùng AuthMethod.PASSWORD làm default vì test expired-token không quan tâm đến auth_method.
      */
     String generateTokenWithExpiration(User user, long expirationMs) {
         long now = System.currentTimeMillis();
         return Jwts.builder()
                 .subject(user.getId().toString())
                 .claim("username", user.getUsername())
-                .claim("auth_method", "password")
+                .claim("auth_method", AuthMethod.PASSWORD.getValue())
                 .id(UUID.randomUUID().toString())
                 .issuedAt(new Date(now))
                 .expiration(new Date(now + expirationMs))
@@ -156,5 +160,23 @@ public class JwtTokenProvider {
 
     public String getJtiFromToken(String token) {
         return getClaims(token).getId();
+    }
+
+    /**
+     * Extract auth_method từ JWT claim và map về AuthMethod enum.
+     * Fallback về PASSWORD nếu claim không tồn tại hoặc giá trị không khớp enum nào.
+     * Dùng ở Tuần 2 khi cần phân biệt flow OAuth vs password trong các endpoint bảo vệ.
+     */
+    public AuthMethod getAuthMethodFromToken(String token) {
+        String value = getClaims(token).get("auth_method", String.class);
+        if (value != null) {
+            for (AuthMethod method : AuthMethod.values()) {
+                if (method.getValue().equals(value)) {
+                    return method;
+                }
+            }
+        }
+        log.warn("Unknown or missing auth_method claim '{}' in token — falling back to PASSWORD", value);
+        return AuthMethod.PASSWORD;
     }
 }

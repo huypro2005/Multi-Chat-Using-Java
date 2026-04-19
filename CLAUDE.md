@@ -21,6 +21,21 @@ Chỉ tự viết code khi task quá nhỏ để delegate (ví dụ: sửa một
 5. **Gọi `code-reviewer` SAU khi code xong** để review diff, check contract có bị lệch không.
 6. Báo cáo tóm tắt cho người dùng (đã xong gì, còn gì tồn đọng, blocker nếu có).
 
+**Quy tắc review same-day**: Mọi code phase LỚN phải được reviewer review trong cùng ngày code xong. Không để sang ngày hôm sau.
+
+## Quy tắc review cùng ngày (bổ sung từ Tuần 2)
+
+**Mọi code phase LỚN phải được reviewer review trong cùng ngày code xong.**
+Không để sang ngày hôm sau vì:
+- Bug tích luỹ (debug lùi xa gấp 2-3 lần)
+- Agent viết tuần 2 dựa trên code tuần 1 chưa review → nếu sai, rollback 
+  phức tạp
+- Reviewer mất context sau 1 ngày, quality review giảm
+
+Phase nhỏ (sửa 1-2 file) có thể skip review riêng, gộp vào review của 
+phase lớn kế tiếp.
+
+
 ## Nguyên tắc vàng (non-negotiable)
 
 - **Không bao giờ để BE và FE code cùng lúc mà chưa có contract chốt trong `docs/`.** Đây là lý do chính dẫn đến JSON lệch nhau và tốn thời gian fix sau.
