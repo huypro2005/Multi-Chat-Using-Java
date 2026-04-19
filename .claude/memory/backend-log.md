@@ -32,6 +32,34 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (Tuần 4, Ngày 1) — Messages schema + 2 REST endpoints
+
+### Xong
+- [BE][W4-D1][2026-04-19] feat: V5 messages migration, Message entity/repo/service/controller, 13 tests
+  - `V5__create_messages.sql`: bảng messages, 3 index (conv+created_at DESC, sender, reply partial), deferred FK constraint cho last_read_message_id.
+  - `MessageType.java`: enum TEXT/IMAGE/FILE/SYSTEM.
+  - `Message.java`: entity với @PrePersist (UUID + UTC createdAt), self-ref replyToMessage, soft delete via deleted_at.
+  - `MessageRepository.java`: Spring Data method naming (tránh H2 TIMESTAMPTZ @Query bug).
+  - 5 DTOs: SendMessageRequest, SenderDto, ReplyPreviewDto, MessageDto, MessageListResponse.
+  - `MessageService.java`: sendMessage (membership check, reply validate, rate limit 30/min, save + touchLastMessage), getMessages (cursor pagination, reverse DESC→ASC, nextCursor=oldest item UTC).
+  - `MessageController.java`: POST + GET, parseCursor normalize to UTC.
+  - `MessageControllerTest.java`: 13 tests, tất cả pass.
+  - `docs/API_CONTRACT.md`: thêm Messages API section v0.6.0-messages-rest.
+  - `mvn test`: 83 tests total, 0 failures.
+
+### Đang dở
+- WebSocket layer (tin nhắn realtime) — chưa implement, phase tiếp theo.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- H2 TIMESTAMPTZ pitfall (QUAN TRỌNG): H2 trong `MODE=PostgreSQL` không handle TIMESTAMP WITH TIME ZONE đúng — stored values có timezone shift khi read back. Hậu quả: cursor pagination test FAIL khi send messages qua REST (sub-ms timestamps + timezone shift làm cursor comparison sai). Fix: test insert messages trực tiếp qua repository với explicit UTC timestamps cách nhau rõ ràng (plusDays). Chi tiết đã ghi vào backend-knowledge.md.
+- Spring Data method naming với OffsetDateTime parameter hoạt động đúng trong JPQL (tránh issue timezone binding của @Query với H2).
+- `OffsetDateTime.now(ZoneOffset.UTC)` trong @PrePersist — normalize về UTC ngay lúc tạo để tránh inconsistency.
+
+---
+
 ## 2026-04-19 (Tuần 3, Ngày 5) — fix TD-8: MethodArgumentTypeMismatchException → 400
 
 ### Xong

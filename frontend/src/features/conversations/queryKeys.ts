@@ -1,3 +1,7 @@
+export const messageKeys = {
+  all: (convId: string) => ['messages', convId] as const,
+}
+
 export const conversationKeys = {
   all: ['conversations'] as const,
   lists: () => [...conversationKeys.all, 'list'] as const,

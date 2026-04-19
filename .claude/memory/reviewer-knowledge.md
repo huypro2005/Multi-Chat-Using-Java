@@ -141,7 +141,7 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.5.2-conversations (thêm `GET /api/users/{id}` W3D4 — dùng lại UserSearchDto shape, 404 merge not-exist+inactive. Conversations 4 endpoints v0.5.1 giữ nguyên. Auth v0.4.0-auth-complete giữ nguyên.)
+- **API_CONTRACT.md**: v0.6.0-messages-rest (thêm Messages API W4D1 — POST + GET cursor-based, MessageDto/SenderDto/ReplyPreviewDto shape, rate limit 30/min, anti-enum 404 cho non-member. Conversations + Auth previous versions giữ nguyên.)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
@@ -233,6 +233,7 @@
 | 2026-04-19 | v0.5.0-conversations | Draft 4 Conversations endpoints (W3D1, pending implement): POST /api/conversations (type UPPERCASE, memberIds exclude caller, GROUP name required + 1..100, ONE_ON_ONE idempotency → 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId); GET list (offset pagination page/size, displayName/displayAvatarUrl computed, unreadCount placeholder=0 V1, sort lastMessageAt DESC NULLS LAST); GET detail (merge 404 CONV_NOT_FOUND cho cả not-exist + not-member để chống enumeration); GET /api/users/search (q ≥2 sau trim, exclude caller + non-active, sort username ASC, không trả email). Rate limits riêng từng endpoint. Documented soft-leave/soft-hide out-of-scope V1, documented race dup ONE_ON_ONE acceptable V1. |
 | 2026-04-19 | v0.5.1-conversations | POST /api/conversations rate limit đổi "30/giờ" → "10/phút/user" (W3D3 implement) để khớp code. Rate limit error kèm `details.retryAfterSeconds` lấy từ Redis TTL thực. |
 | 2026-04-19 | v0.5.2-conversations | Thêm `GET /api/users/{id}` (W3D4). Dùng lại `UserSearchDto` shape (id, username, fullName, avatarUrl — không expose email/status/lastSeenAt). 404 `USER_NOT_FOUND` merge cả not-exist và status!='active' để chống enumeration (pattern giống CONV_NOT_FOUND). Documented V4 migration thêm `last_seen_at` column nhưng KHÔNG expose V1 (AD-9). |
+| 2026-04-19 | v0.6.0-messages-rest | Thêm Messages API (W4D1): POST `/api/conversations/{convId}/messages` (gửi tin nhắn, validation 1-5000 chars, reply phải thuộc đúng conv) + GET cursor-based pagination (items ASC, nextCursor = createdAt cũ nhất, hasMore detect bằng limit+1 query). Rate limit 30/min/user (Redis INCR fail-open). Anti-enumeration 404 CONV_NOT_FOUND cho non-member. ReplyPreviewDto shallow 1-level (không recursive). Soft-delete via `deleted_at`. Reply tới soft-deleted message KHÔNG bị block V1 (AD-12, defer Tuần 6). |
 
 ---
 

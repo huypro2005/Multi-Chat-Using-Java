@@ -5,6 +5,14 @@
 
 ---
 
+[FE][W4-D1][2026-04-19] feat: message types, API functions, useMessages (infinite query), useSendMessage (optimistic), frontend-knowledge.md consolidated
+- Tạo: src/types/message.ts — MessageType (const obj), MessageSenderDto, ReplyPreviewDto, MessageDto, MessageListResponse, SendMessageRequest, OptimisticMessage
+- Tạo: src/features/messages/api.ts — sendMessage(), getMessages() (cursor-based)
+- Sửa: src/features/conversations/queryKeys.ts — thêm messageKeys factory { all: (convId) => ['messages', convId] }
+- Tạo: src/features/messages/hooks.ts — useMessages (useInfiniteQuery, cursor-based), useSendMessage (optimistic: cancelQueries → snapshot → append → onError rollback → onSuccess replace-by-tempId → onSettled invalidate conversations)
+- Consolidate: frontend-knowledge.md 294→265 lines (gộp pattern tương tự, xóa outdated notes)
+- build: 0 TS error | lint: 0 ESLint error
+
 [FE][W3-D4][2026-04-19] feat: ConversationDetailPage, ConversationHeader, MessagesAreaPlaceholder, MessageInput (disabled), ConversationInfoPanel
 - Tạo: src/features/conversations/components/ConversationHeader.tsx — Back(mobile), Avatar, DisplayName, sub-text (@username | N thành viên), Info + More buttons
 - Tạo: src/features/messages/components/MessagesAreaPlaceholder.tsx — placeholder cho tuần 4 MessagesList

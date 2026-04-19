@@ -687,6 +687,92 @@ Field notes:
 
 ---
 
+## Messages API (v0.6.0-messages-rest — W4-D1)
+
+Base URL: `/api/conversations/{convId}/messages`
+
+Auth: Bearer JWT bắt buộc cho tất cả endpoints.
+
+### MessageDto shape
+
+```json
+{
+  "id": "uuid",
+  "conversationId": "uuid",
+  "sender": {
+    "id": "uuid",
+    "username": "string",
+    "fullName": "string",
+    "avatarUrl": "string|null"
+  },
+  "type": "TEXT|IMAGE|FILE|SYSTEM",
+  "content": "string",
+  "replyToMessage": {
+    "id": "uuid",
+    "senderName": "string",
+    "contentPreview": "string (max 100 chars + '...' nếu truncated)"
+  } | null,
+  "editedAt": "ISO8601|null",
+  "createdAt": "ISO8601 UTC"
+}
+```
+
+### POST /api/conversations/{convId}/messages
+
+Gửi tin nhắn vào conversation.
+
+**Request:**
+```json
+{
+  "content": "string (1-5000 chars, required)",
+  "type": "TEXT|IMAGE|FILE|SYSTEM (optional, default TEXT)",
+  "replyToMessageId": "uuid (optional)"
+}
+```
+
+**Response 201:** MessageDto
+
+**Errors:**
+| Code | HTTP | Mô tả |
+|------|------|-------|
+| VALIDATION_FAILED | 400 | content trống/quá dài, replyToMessageId không tồn tại trong conv |
+| AUTH_REQUIRED | 401 | Không có JWT |
+| CONV_NOT_FOUND | 404 | Conversation không tồn tại hoặc user không phải thành viên (anti-enumeration) |
+| RATE_LIMITED | 429 | Quá 30 messages/phút. details: `{ retryAfterSeconds: 60 }` |
+
+### GET /api/conversations/{convId}/messages
+
+Lấy lịch sử tin nhắn với cursor-based pagination.
+
+**Query params:**
+| Param | Type | Default | Mô tả |
+|-------|------|---------|-------|
+| cursor | string (ISO8601) | null | Lấy messages có createdAt < cursor. Null = trang đầu |
+| limit | int | 50 | Số messages per page (1-100) |
+
+**Response 200:**
+```json
+{
+  "items": [MessageDto],
+  "hasMore": true,
+  "nextCursor": "ISO8601 UTC string | null"
+}
+```
+
+Note:
+- `items` sorted **ASC** (cũ nhất đến mới nhất).
+- `nextCursor` = `createdAt` của item **cũ nhất** trong page (dùng để lấy page tiếp theo với messages cũ hơn).
+- `nextCursor` null khi `hasMore=false`.
+
+**Errors:**
+| Code | HTTP | Mô tả |
+|------|------|-------|
+| VALIDATION_FAILED | 400 | limit ngoài range 1-100, cursor không đúng ISO8601 |
+| AUTH_REQUIRED | 401 | Không có JWT |
+| CONV_NOT_FOUND | 404 | Conversation không tồn tại hoặc user không phải thành viên |
+
+---
+
 ## Files
 
 (reviewer sẽ thêm khi phase file upload bắt đầu)
@@ -697,6 +783,7 @@ Field notes:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.6.0-messages-rest | Thêm Messages API: POST /api/conversations/{convId}/messages (gửi tin nhắn), GET /api/conversations/{convId}/messages (lịch sử, cursor-based). Rate limit 30/min. Anti-enumeration 404 cho non-member. ReplyPreviewDto shallow 1-level. nextCursor = createdAt của item cũ nhất. |
 | 2026-04-19 | v0.5.2-conversations | Thêm `GET /api/users/{id}` vào mục Users (W3D4). Response dùng lại `UserSearchDto` shape (không expose email/status/lastSeenAt). Merge 404 `USER_NOT_FOUND` cho cả not-exist + inactive để chống enumeration. Documented `last_seen_at` column đã add ở V4 migration nhưng KHÔNG expose ở V1 (xem WARNINGS.md). |
 | 2026-04-19 | v0.5.1-conversations | POST /api/conversations: đổi rate limit từ "30/giờ" → "10/phút" để khớp implementation; rate limit block giờ trả `details.retryAfterSeconds` với TTL thực từ Redis. |
 | 2026-04-19 | v0.5.0-conversations | Thêm 4 endpoints Conversations phase: POST /api/conversations, GET /api/conversations, GET /api/conversations/{id}, GET /api/users/search. Chốt UPPERCASE ONE_ON_ONE/GROUP (ADR-012). Chốt pattern auth-merge-with-404 cho GET detail (không leak existence). Idempotency ONE_ON_ONE trả 409 CONV_ONE_ON_ONE_EXISTS kèm conversationId. Noted race dup và soft-leave/soft-hide out-of-scope V1. |

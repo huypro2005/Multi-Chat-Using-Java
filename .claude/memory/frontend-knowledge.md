@@ -17,22 +17,21 @@
 ### Routing
 - **React Router v6** (không phải v7)
 - Routes: `/` (Home), `/login`, `/register`, `/conversations` (protected), wildcard `*` redirect về `/`
-- **ProtectedRoute pattern**: layout route dùng `<Outlet />` (KHÔNG dùng `children` prop — không tương thích với nested routes).
+- **ProtectedRoute pattern**: layout route dùng `<Outlet />` (KHÔNG dùng `children` prop).
 - **Redirect pattern**: `<Navigate to="/login" state={{ from: location }} replace />` — login đọc `location.state.from?.pathname`.
 - **Nested route structure**: `<Route element={<ProtectedRoute />}> <Route path="/conversations" element={<ConversationsLayout />}> <Route index .../> <Route path=":id" .../> </Route> </Route>`
 
 ### API client
-- **Axios** instance singleton tại `src/lib/api.ts`
-- baseURL từ `VITE_API_URL` env var, fallback `/api`
-- Vite proxy: `/api` → `http://localhost:8080`
+- **Axios** instance singleton tại `src/lib/api.ts`, export default `api`
+- baseURL từ `VITE_API_URL` env var, fallback `/api`; Vite proxy: `/api` → `http://localhost:8080`
+- API functions trong features gọi `api.post/get('/api/...')` — prefix `/api` được ghi trong path, KHÔNG trong baseURL
 
 ### WebSocket client
-- **@stomp/stompjs + sockjs-client** (chưa implement, sẽ làm Tuần 2+)
+- **@stomp/stompjs + sockjs-client** (chưa implement, sẽ làm Tuần 4+)
 
 ### Styling
 - **TailwindCSS v4** via `@tailwindcss/vite` plugin (KHÔNG dùng PostCSS config)
 - Import duy nhất trong `index.css`: `@import "tailwindcss";`
-- Không viết CSS thuần trừ khi Tailwind không làm được
 
 ### Bundler
 - **Vite v8** với `@vitejs/plugin-react`
@@ -55,35 +54,29 @@
 ## Pattern đã dùng trong codebase
 
 ### Component organization
-- Feature-first: mọi thứ liên quan auth đi trong `src/features/auth/`
-  - `src/features/auth/schemas/` — Zod schemas
-  - `src/features/auth/components/` — feature-specific components
-- Shared UI trong `src/components/`
-- Pages (route-level) trong `src/pages/`
+- Feature-first: `src/features/{feature}/` chứa cả `components/`, `hooks.ts`, `api.ts`, `types.ts` (nếu có)
+- Shared UI trong `src/components/`; Pages trong `src/pages/`
 
-### Form handling — RHF + Zod pattern
+### Form handling — RHF + Zod
 ```tsx
 const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
   resolver: zodResolver(schema),
-  mode: 'onTouched',  // validate khi blur, không phải mỗi keystroke
+  mode: 'onTouched',  // validate khi blur
 })
 ```
-- Error hiển thị inline dưới field: `{errors.field && <p className="text-red-500 text-sm">{errors.field.message}</p>}`
-- Input có error state: thêm `border-red-500` vào className khi `errors.field` truthy
-- Dùng `role="alert"` trên error `<p>` để accessible
-
-### Validation schema — Login vs Register khác nhau
-- **Login schema**: chỉ validate không để trống (contract note: server KHÔNG validate format để tránh lộ thông tin)
-- **Register schema**: validate đầy đủ format (alphanumeric, chữ hoa, số, v.v.) theo contract `/api/auth/register`
+- Error inline: `{errors.field && <p className="text-red-500 text-sm" role="alert">{errors.field.message}</p>}`
+- **Login schema**: chỉ validate không trống; **Register schema**: validate đầy đủ format
 
 ### Toast — Custom component (không dùng thư viện ngoài)
-- Vì không có sonner/react-hot-toast trong dependencies
-- Tạo `src/components/Toast.tsx` + `src/hooks/useToast.ts`
-- Pattern: `const { toasts, addToast, removeToast } = useToast()` rồi render `<ToastContainer>` ở cuối component
+- `src/components/Toast.tsx` + `src/hooks/useToast.ts`
+- `const { toasts, addToast, removeToast } = useToast()` → render `<ToastContainer>`
 - Fixed bottom-right, auto-dismiss 3s, slide animation
 
-### Custom hooks đã có
-- `useToast` — manage toast queue (add/remove), dùng `useState` + `useCallback`
+### TypeScript enum → const object (erasableSyntaxOnly mode)
+```ts
+export const FooType = { A: 'A', B: 'B' } as const
+export type FooType = (typeof FooType)[keyof typeof FooType]
+```
 
 ---
 
@@ -91,15 +84,17 @@ const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
 
 ```
 src/
-├── pages/          # Route-level components (LoginPage, RegisterPage, HomePage)
-├── components/     # Shared reusable UI components
-├── features/       # Feature modules (auth, chat, ...) — feature-first
-├── hooks/          # Shared custom hooks (useAuth, useSocket)
+├── pages/          # Route-level components
+├── components/     # Shared reusable UI
+├── features/
+│   ├── auth/       # schemas/, components/
+│   ├── conversations/ # components/, hooks.ts, api.ts, queryKeys.ts
+│   ├── messages/   # components/, hooks.ts, api.ts
+│   └── users/
+├── hooks/          # Shared hooks (useDebounce, useToast)
 ├── stores/         # Zustand stores
-├── services/       # Alias của api/ — REST client functions
-├── lib/
-│   └── api.ts    # Axios singleton instance với refresh queue
-├── types/          # Shared TypeScript types (api.ts, socket.ts)
+├── lib/            # api.ts (Axios), queryClient.ts, tokenStorage.ts, firebase.ts
+├── types/          # Shared TS types: auth.ts, conversation.ts, message.ts
 └── utils/
 ```
 
@@ -109,105 +104,142 @@ src/
 
 Flag `isRefreshing` + `failedQueue[]` để tránh race condition khi nhiều request 401 cùng lúc.
 `processQueue(error, token)` → resolve/reject toàn bộ queue sau khi refresh done.
-Lưu ý: dùng `axios.post` (KHÔNG phải `api.post`) cho `/refresh` để tránh interceptor loop.
+Dùng `axios.post` (KHÔNG phải `api.post`) cho `/refresh` để tránh interceptor loop.
 Phân biệt 2 error code: `AUTH_TOKEN_EXPIRED` → refresh + retry; `AUTH_REQUIRED` → clear + redirect.
 
-## Auth Store Pattern
+## Auth Store + tokenStorage Pattern
 
-Persist: `refreshToken` + `user` (KHÔNG persist `accessToken` vì 15 phút TTL).
-`isHydrated` flag để UI biết khi nào store đã load từ localStorage (tránh flash redirect).
-Circular dep `api.ts ↔ authStore.ts` đã giải quyết bằng `tokenStorage.ts` (module trung gian, không import api.ts).
-`main.tsx` KHÔNG cần import authStore chỉ để wire global — dependency chain sạch.
-
-## tokenStorage pattern (đã implement Tuần 2)
-
-`src/lib/tokenStorage.ts` — module trung gian, KHÔNG import api.ts, phá circular dep.
-- In-memory: `accessToken` (không persist) + `refreshToken` (mirror từ Zustand)
-- API: `getAccessToken()`, `setAccessToken()`, `getRefreshToken()`, `setRefreshToken()`, `setTokens()`, `clear()`
-- `api.ts` import tokenStorage để đọc/ghi trong interceptors
-- `authStore.ts` gọi `tokenStorage.setTokens()` trong `setAuth`, `tokenStorage.clear()` trong `clearAuth`
-- Sync 2 chiều bắt buộc: gọi tokenStorage cùng lúc với set() Zustand — không tách ra 2 call
-- onRehydrateStorage: sau khi Zustand hydrate từ localStorage, gọi `tokenStorage.setRefreshToken()` để interceptor có refreshToken ngay
-
-## Zustand (set) signature
-
-Nếu không dùng `get` tham số thứ 2, bỏ hẳn: `(set) => ({...})`. Đừng dùng `_get` — ESLint vẫn báo `no-unused-vars` với underscore prefix trừ khi có rule riêng. Để tránh lỗi lint, chỉ khai báo tham số nào thực sự dùng.
+- Persist: `refreshToken` + `user` (KHÔNG persist `accessToken` vì 15 phút TTL)
+- `isHydrated` flag để UI biết khi nào store đã load từ localStorage (tránh flash redirect)
+- `src/lib/tokenStorage.ts` — module trung gian, KHÔNG import api.ts → phá circular dep
+- Sync 2 chiều bắt buộc: gọi `tokenStorage.setTokens()` cùng lúc với set() Zustand
+- `onRehydrateStorage`: sau hydrate, gọi `tokenStorage.setRefreshToken()` để interceptor có refreshToken ngay
 
 ## authService.init() pattern
 
 `src/services/authService.ts` — chạy khi app mount, trước khi routes render.
-- Dùng `rawAxios` (axios.create() riêng, KHÔNG phải `api` instance) để tránh interceptor loop
-- Logic: no refreshToken → unauthenticated; có accessToken → ready; có refreshToken không có accessToken → call /refresh
-- Refresh fail → clearAuth(), trả `{ isAuthenticated: false }` (không throw, luôn resolve)
-- Tích hợp: App.tsx useEffect → `init()` → `setIsInitialized(true)` → render routes
-- `isInitialized` gate ngăn routes render khi chưa biết auth state → tránh flash redirect /login
-- `void authService.init().finally(...)` — dùng `void` để lint không cảnh báo floating promise
+- Dùng `rawAxios` (axios.create() riêng) để tránh interceptor loop
+- Refresh fail → `clearAuth()`, trả `{ isAuthenticated: false }` (không throw)
+- `isInitialized` gate trong App.tsx tránh flash redirect /login
+- `void authService.init().finally(...)` — `void` để tránh lint floating promise
+
+## Error handling — auth API errors
+
+`src/features/auth/utils/handleAuthError.ts`:
+- `setFormError(field, msg)` cho lỗi user fix được (INVALID_CREDENTIALS, EMAIL_TAKEN, USERNAME_TAKEN)
+- `showToast(msg, type)` cho lỗi hệ thống (RATE_LIMITED, ACCOUNT_DISABLED, unknown)
 
 ---
 
-## Error handling pattern — auth API errors
+## React Query patterns
 
-`src/features/auth/utils/handleAuthError.ts` — utility xử lý error codes từ backend.
-- `setFormError(field, msg)`: set inline error dưới field (cho INVALID_CREDENTIALS, EMAIL_TAKEN, USERNAME_TAKEN, VALIDATION_FAILED)
-- `showToast(msg, type)`: global toast (cho RATE_LIMITED, ACCOUNT_DISABLED, unknown errors)
-- Fallback: nếu không có apiError.error → showToast generic
-- Pattern: inline error cho lỗi user có thể fix ngay, toast cho lỗi hệ thống
+### Query key factories
+```ts
+// src/features/conversations/queryKeys.ts
+export const messageKeys = {
+  all: (convId: string) => ['messages', convId] as const,
+}
+export const conversationKeys = {
+  all: ['conversations'] as const,
+  lists: () => [...conversationKeys.all, 'list'] as const,
+  list: (page, size) => [...conversationKeys.lists(), { page, size }] as const,
+  detail: (id) => [...conversationKeys.all, 'detail', id] as const,
+}
+```
 
-## ProtectedRoute — W-C-4 RESOLVED (2026-04-19)
+### useInfiniteQuery — cursor-based messages
+```ts
+useInfiniteQuery({
+  queryKey: messageKeys.all(convId),
+  queryFn: ({ pageParam }) => getMessages(convId, pageParam as string | undefined),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: (lastPage) => lastPage.hasMore ? lastPage.nextCursor ?? undefined : undefined,
+  enabled: !!convId,
+  staleTime: 10_000,
+})
+```
+- `items` sorted ASC (oldest first), UI scroll-up để load trang cũ hơn
+- `nextCursor` là ISO8601 string (createdAt của message cũ nhất trong page)
 
-`src/components/ProtectedRoute.tsx` — layout route (dùng `<Outlet />`, KHÔNG nhận `children` prop).
-- `isHydrated` false → spinner indigo-600 centered (tránh flash redirect khi store chưa hydrate từ localStorage)
-- `isAuthenticated` false → `<Navigate to="/login" state={{ from: location }} replace />`
-- `isAuthenticated` true → `<Outlet />`
-- LoginPage đọc: `(location.state as { from?: { pathname?: string } })?.from?.pathname ?? '/conversations'`
+### Optimistic update — useSendMessage
+1. `cancelQueries` → snapshot → tạo `tempId = temp-${Date.now()}-${random}` → append optimisticMsg (id = tempId)
+2. `onError`: restore snapshot
+3. `onSuccess`: replace item có `id === tempId` bằng `realMsg`
+4. `onSettled`: `invalidateQueries(['conversations'])` để sidebar refresh `lastMessageAt`
+- Type cho setQueryData: `(old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) => ...`
 
-## Layout 2 cột (ConversationsLayout)
+### Pagination — Spring Page format
+BE trả `{ content, page, size, totalElements, totalPages }` — KHÔNG phải `{ items, total, pageSize }`
+Áp dụng cho conversations list; messages dùng cursor-based (khác).
 
-`src/pages/ConversationsLayout.tsx` — pattern layout sidebar + main.
-- Sidebar: `w-80 flex-shrink-0 bg-white border-r border-gray-200` (fixed width, không co)
-- Main: `flex-1 min-w-0` (flex-1 để fill remaining, min-w-0 tránh overflow)
-- Mobile: đọc `useParams().id` — có id → ẩn sidebar (hidden md:flex), hiện main; không id → hiện sidebar, ẩn main (hidden md:flex)
-- Outlet trong main: `<Outlet />` — render ConversationsIndexPage (index) hoặc detail page (:id)
+### 409 CONV_ONE_ON_ONE_EXISTS
+Return `{ existingConversationId }` thay vì throw — caller navigate sang conversation đó.
 
-## W-FE-1 RESOLVED
+### useDebounce hook
+`src/hooks/useDebounce.ts` — dùng cho search input (300ms delay, `enabled` khi >= 2 chars)
 
-Username regex: `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` — khớp BE regex (3-50 ký tự, không bắt đầu bằng số).
-`.min()/.max()` riêng đã bỏ — regex đã enforce.
+---
+
+## Layout patterns
+
+### Layout 2 cột (ConversationsLayout)
+- Sidebar: `w-80 flex-shrink-0 bg-white border-r border-gray-200`
+- Main: `flex-1 min-w-0`
+- Mobile: ẩn/hiện sidebar/main dựa vào `useParams().id`
+
+### ConversationDetailPage — 3-section vertical
+`flex flex-col h-full` → header (`flex-shrink-0`) + body (`flex flex-1 overflow-hidden`) + input (`flex-shrink-0` inside body column)
+- `disabled` prop cho MessageInput: `true` tuần 3 (placeholder), `false` tuần 4 khi wire STOMP
+
+### Dialog pattern
+Controlled `open` prop, Esc handler qua `useEffect`, `autoFocus` input, `handleClose()` gộp reset + `onClose()`.
+
+### ConversationListItem
+`displayName` / `displayAvatarUrl` server-computed trong `ConversationSummaryDto` — không cần client compute.
+`React.memo` để tránh re-render.
+
+---
+
+## Firebase JS SDK
+
+`src/lib/firebase.ts` — lazy init (check `getApps().length === 0` trước `initializeApp`).
+OAuth: `signInWithPopup` → `getIdToken()` → `oauthApi({ firebaseIdToken })` → `setAuth(response)` → navigate.
+Edge case popup closed: catch `auth/popup-closed-by-user` hoặc `auth/cancelled-popup-request` → return silently.
+
+## Logout pattern
+Best-effort logout API, luôn `clearAuth()` + `navigate('/login')` trong `finally`.
 
 ---
 
 ## Pitfall đã gặp (đừng lặp lại)
 
-- **TypeScript 5.8+ với `baseUrl`**: bị deprecated warning, cần thêm `"ignoreDeprecations": "6.0"` vào `tsconfig.app.json`. Không dùng `"5.0"` sẽ vẫn báo lỗi.
-- **`@tailwindcss/vite` (v4)**: KHÔNG cần `tailwind.config.js`, KHÔNG cần `postcss.config.js`. Chỉ cần plugin trong `vite.config.ts` và `@import "tailwindcss"` trong CSS.
-- **Register username regex**: đã fix W2D3. Regex mới: `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/`.
-- **authStore ↔ tokenStorage sync**: gọi tokenStorage.setTokens() trong cùng action với set() Zustand. Không tách thành 2 chỗ — race condition khi axios interceptor đọc tokenStorage ngay lập tức.
-- **accessToken không persist → phải init() khi startup**: mỗi lần reload, accessToken = null. authService.init() restore session từ refreshToken. Nếu không có init(), user bị redirect /login ngay dù session còn valid.
-- **rawAxios vs api instance trong init()**: dùng axios.create() riêng trong authService, KHÔNG dùng api.ts instance. Lý do: api.ts có interceptor catch 401 → call refresh → nếu init() cũng dùng api.ts sẽ tạo loop (init gọi refresh, refresh 401, interceptor gọi refresh nữa, ...).
-- **confirmPassword không gửi lên server**: RegisterPage bỏ confirmPassword trước khi gọi API (Zod schema FE có nhưng BE không expect field này). Dùng explicit object `{ email, username, password, fullName }` thay vì spread `...data` — lint không cần ESLint `argsIgnorePattern`.
-- **Destructure unused var lint error**: dùng `{ confirmPassword: _, ...rest }` sẽ bị ESLint `@typescript-eslint/no-unused-vars` báo lỗi nếu không có `argsIgnorePattern`. Thay bằng explicit object build.
+- **TypeScript 5.8+ `baseUrl` deprecated**: thêm `"ignoreDeprecations": "6.0"` vào `tsconfig.app.json`.
+- **TailwindCSS v4**: KHÔNG cần `tailwind.config.js` / `postcss.config.js`. Chỉ plugin trong vite.config.ts.
+- **authStore ↔ tokenStorage sync**: gọi tokenStorage.setTokens() trong cùng action với set() Zustand.
+- **accessToken không persist → phải init()**: mỗi reload, accessToken = null. authService.init() restore session.
+- **rawAxios trong init()**: KHÔNG dùng api.ts instance (loop). Dùng axios.create() riêng.
+- **confirmPassword không gửi BE**: dùng explicit object `{ email, username, password, fullName }`, không spread `...data`.
+- **Zustand (set) signature**: chỉ khai báo tham số thực sự dùng. `_get` vẫn bị ESLint no-unused-vars.
+- **`react-hooks/set-state-in-effect`**: KHÔNG dùng `useEffect` để reset state khi prop thay đổi. Reset trong event handler.
+- **Username regex**: `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` — khớp BE (3-50 ký tự, không bắt đầu bằng số).
 
 ---
 
 ## Thư viện đã chọn
 
-| Library | Version | Lý do chọn |
-|---------|---------|------------|
-| react | 19+ | Latest stable |
-| react-router-dom | 6 | Standard routing, v6 API |
-| zustand | latest | Lightweight client state |
-| @tanstack/react-query | v5 | Server state, cache, infinite query |
-| axios | latest | HTTP client với interceptor support |
-| react-hook-form | latest | Form state management |
-| @hookform/resolvers | latest | Zod integration cho RHF |
-| zod | latest | Schema validation |
-| lucide-react | latest | Icon set nhẹ, tree-shakeable |
-| date-fns | latest | Date formatting (thay moment) |
-| @stomp/stompjs | latest | STOMP over WebSocket |
-| sockjs-client | latest | WebSocket fallback |
-| firebase | latest | Google OAuth via Firebase JS SDK |
-| tailwindcss | v4 | Utility-first CSS |
-| @tailwindcss/vite | v4 | Vite plugin cho TailwindCSS v4 |
+| Library | Lý do |
+|---------|-------|
+| react 19+ | Latest stable |
+| react-router-dom v6 | Standard routing |
+| zustand | Lightweight client state |
+| @tanstack/react-query v5 | Server state, cache, infinite query |
+| axios | HTTP client với interceptor |
+| react-hook-form + @hookform/resolvers + zod | Form + validation |
+| lucide-react | Icons nhẹ, tree-shakeable |
+| date-fns | Date formatting (thay moment) |
+| @stomp/stompjs + sockjs-client | STOMP over WebSocket |
+| firebase | Google OAuth |
+| tailwindcss v4 + @tailwindcss/vite | CSS utility-first |
 
 ---
 
@@ -215,80 +247,19 @@ Username regex: `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` — khớp BE regex (3-50 ký 
 
 - File component: PascalCase (`MessageBubble.tsx`)
 - File hook: camelCase với prefix `use` (`useSocket.ts`)
-- File type: camelCase (`api.ts`, `socket.ts`) trong `src/types/`
-- CSS class: Tailwind utilities, KHÔNG viết CSS thuần trừ khi buộc phải
-- Event handler: `handle<Event>` (`handleSubmit`, `handleClick`)
+- File type: camelCase trong `src/types/` (`message.ts`, `auth.ts`)
+- Event handler: `handle<Event>` (`handleSubmit`, `handleClose`)
 
 ---
 
-## Firebase JS SDK pattern
-
-`src/lib/firebase.ts` — lazy init (check `getApps().length === 0` trước `initializeApp`).
-VITE_ env vars: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`.
-Lấy config: Firebase Console → Project Settings → Your apps → Web app → firebaseConfig.
-Nếu env chưa có → Firebase vẫn init với giá trị undefined, KHÔNG crash khi build — chỉ crash lúc runtime khi thực sự gọi `signInWithPopup`.
-
-## OAuth Popup pattern
-
-`signInWithPopup` → `getIdToken()` → `oauthApi({ firebaseIdToken })` → `setAuth(response)` → `navigate('/')`.
-Edge case 'popup closed': catch `error.code === 'auth/popup-closed-by-user'` hoặc `'auth/cancelled-popup-request'` → return silently, KHÔNG gọi `onError`.
-Google SVG logo hard-coded trong component (không cần thêm library cho icon Google).
-`OAuthResponse extends AuthResponse` — thêm `isNewUser: boolean` — nằm trong `src/types/auth.ts`.
-`setAuth(response)` từ authStore nhận `AuthResponse` (structural typing) — `OAuthResponse` có thêm field `isNewUser` vẫn pass vì TS dùng structural subtyping.
-
-## Logout pattern
-
-Best-effort: `logoutApi({ refreshToken })` (có thể fail nếu offline/BE unavailable).
-Luôn `clearAuth()` + `navigate('/login')` trong `finally` — local state được clear dù API fail.
-Toast khác nhau: `'success'` khi API ok, `'info'` khi offline/catch.
-`tokenStorage.getRefreshToken()` — lấy refreshToken từ in-memory cache để gửi lên BE.
-W-C-3 logout **RESOLVED**.
-
-## React Query — Conversation layer (W3-D2)
-
-- `queryClient` singleton tại `src/lib/queryClient.ts`, import vào `main.tsx` (không define inline)
-- Query key factory pattern: `conversationKeys` object với `.all`, `.lists()`, `.list(page, size)`, `.detail(id)` — type-safe `as const`
-- `useConversations(page, size)` — list paginated; `useConversation(id)` — detail với `enabled: !!id`
-- `useCreateConversation()` — onSuccess: `invalidateQueries(lists())` + `setQueryData(detail(id), data)` để seed cache
-- 409 CONV_ONE_ON_ONE_EXISTS: return `{ existingConversationId }` thay vì throw — caller handle redirect
-- BE response Spring Page: `{ content, page, size, totalElements, totalPages }` — KHÔNG phải `{ items, total, pageSize }`
-- `useUserSearch(query, limit)` — debounce 300ms, `enabled` khi >= 2 chars (khớp contract)
-- `useDebounce<T>(value, delay)` hook tại `src/hooks/useDebounce.ts`
-- TypeScript `erasableSyntaxOnly`: KHÔNG dùng `enum` — thay bằng `const object + type` pattern:
-  ```ts
-  export const ConversationType = { ONE_ON_ONE: 'ONE_ON_ONE', GROUP: 'GROUP' } as const
-  export type ConversationType = (typeof ConversationType)[keyof typeof ConversationType]
-  ```
-
-## Conversation UI patterns (W3-D3)
-
-- `ConversationListItem` dùng `ConversationSummaryDto` (list API), KHÔNG phải `ConversationDto` (detail)
-- `displayName` / `displayAvatarUrl` server-computed trong `ConversationSummaryDto` — không cần client compute
-- **409 UX pattern**: khi `CONV_ONE_ON_ONE_EXISTS` → navigate sang `existingConversationId`, không show error toast — UX mượt
-- **Dialog pattern**: controlled `open` prop, Esc handler qua `useEffect` (chỉ add/remove listener), `autoFocus` input, `handleClose()` function gộp reset state + gọi `onClose()`
-- `React.memo` cho list items (`ConversationListItem`) để tránh re-render không cần thiết
-- **Pitfall `react-hooks/set-state-in-effect`**: KHÔNG dùng `useEffect` để reset state khi prop thay đổi. Thay vào đó reset trong event handler (`handleClose`) — ESLint rule này rất strict trong project
-
-## ConversationDetailPage pattern (W3-D4)
-
-- **3-section vertical layout**: `flex flex-col h-full` → header (`flex-shrink-0`) + body (`flex flex-1 overflow-hidden`) + input (`flex-shrink-0` inside body column)
-- `disabled` prop pattern cho MessageInput: `disabled=true` tuần 3 (placeholder), `disabled=false` tuần 4 khi wire STOMP. `onSend` prop undefined tuần 3.
-- MessagesAreaPlaceholder sẽ được thay bằng MessagesList tuần 4 — component riêng, không inline.
-- Error 404 detection: `(error as { response?: { status?: number } })?.response?.status === 404`
-- ConversationInfoPanel: dùng conditional `md:hidden` + `translate-x-full` cho mobile slide-in behavior.
-- Feature folder `src/features/messages/components/` cho tất cả message-level components (MessagesAreaPlaceholder, MessageInput, và sắp tới MessageBubble, MessagesList).
-
 ## Changelog file này
 
-- 2026-04-19 (W3D4): ConversationDetailPage (3-section vertical), ConversationHeader, MessagesAreaPlaceholder, MessageInput (disabled pattern), ConversationInfoPanel. features/messages/ folder created. build + lint: 0 error.
-- 2026-04-19 (W3D3): ConversationListItem, Sidebar, CreateDialog, UserAvatar, utils. Dialog/memo/409 patterns. build + lint: 0 error.
-- 2026-04-19 (W3D2): Conversation types, API functions, React Query hooks, queryKeys, useDebounce. enum → const object (erasableSyntaxOnly). build + lint: 0 error.
-- 2026-04-19 (W3D1): ProtectedRoute (Outlet pattern + isHydrated spinner + location.state.from). ConversationsLayout (2-col sidebar). Route nesting. W-C-4 RESOLVED. build + lint: 0 error.
-- 2026-04-19 (W2D4 Phase B): Firebase SDK + GoogleLoginButton + oauthApi + logoutApi. Wire Login/Register/HomePage. build + lint: 0 error.
-- 2026-04-19 (W2D3 Phase C): Wire Login + Register với API thật. handleAuthError utility. ProtectedRoute. W-FE-1 fix (username regex). build + lint: 0 error.
-- 2026-04-19 (W2D2 Phase A): authService.init() + AppLoadingScreen. isInitialized gate trong App.tsx. rawAxios pattern tránh interceptor loop. build + lint: 0 error.
-- 2026-04-19 (Tuần 2, Ngày 1): W-FE-2 done. Migrate TODO → implemented section. Cập nhật Auth Store pattern (xóa globalThis, dùng tokenStorage). Thêm pitfall authStore ↔ tokenStorage sync.
-- 2026-04-19 (Ngày 4): Fix stale axios.ts reference → api.ts. Thêm tokenStorage migration TODO. Thêm username regex pitfall.
-- 2026-04-19 (Ngày 3): Thêm Axios refresh queue pattern, Auth Store pattern, Zustand (set) signature pitfall.
-- 2026-04-19 (Ngày 2): Chốt design tokens (indigo-600, rounded-lg, v.v.). Ghi pattern form RHF+Zod, toast custom, feature structure auth. Thêm useToast hook.
-- 2026-04-19 (Ngày 1): Khởi tạo project Tuần 1. Ghi pitfall TypeScript deprecation và Tailwind v4 setup.
+- 2026-04-19 (W4-D1): CONSOLIDATE (xóa outdated notes, gộp pattern). Thêm: message types, useInfiniteQuery pattern, optimistic update useSendMessage, messageKeys factory.
+- 2026-04-19 (W3D4): ConversationDetailPage 3-section, MessageInput disabled pattern, features/messages/ folder.
+- 2026-04-19 (W3D3): ConversationListItem, dialog/memo/409 patterns.
+- 2026-04-19 (W3D2): Conversation types, React Query hooks, queryKeys, useDebounce, enum→const pattern.
+- 2026-04-19 (W3D1): ProtectedRoute Outlet pattern, ConversationsLayout 2-col, route nesting.
+- 2026-04-19 (W2D4): Firebase SDK, OAuth popup, logout pattern.
+- 2026-04-19 (W2D3): handleAuthError utility, wire Login/Register API.
+- 2026-04-19 (W2D2): authService.init(), isInitialized gate, rawAxios pattern.
+- 2026-04-19 (W2D1): tokenStorage, Axios refresh queue, Auth Store pattern.

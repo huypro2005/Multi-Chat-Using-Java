@@ -203,8 +203,24 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### Messages Domain Pattern (W4-D1)
+
+- Package: `com.chatapp.message.{enums,entity,repository,dto,service,controller}`.
+- UUID pattern: `@PrePersist` với `if (id == null) id = UUID.randomUUID()` + `if (createdAt == null) createdAt = OffsetDateTime.now(ZoneOffset.UTC)` — LUÔN normalize createdAt về UTC để tránh H2 timezone stripping.
+- Cursor pagination: query `limit+1` rows → `hasMore = results.size() > limit` → `items = subList(0, limit)` → reverse (DESC→ASC) → `nextCursor = items.get(0).getCreatedAt().atZoneSameInstant(UTC).toString()`.
+- nextCursor = createdAt của item CŨ NHẤT trong page (sau reverse = index 0). FE dùng cursor này để lấy page tiếp theo (messages cũ hơn cursor).
+- Shallow nested DTO: `ReplyPreviewDto(id, senderName, contentPreview)` — không recursive, contentPreview cắt 100 chars.
+- Repository: dùng Spring Data method naming `findByConversation_IdAndDeletedAtIsNullOrderByCreatedAtDesc` thay vì `@Query` với `OffsetDateTime` parameter — tránh H2 timezone comparison bug với `@Query` JPQL.
+- Anti-enumeration: sendMessage + getMessages đều trả 404 CONV_NOT_FOUND cho cả không-phải-thành-viên lẫn conv-không-tồn-tại.
+- Rate limit: key `rate:msg:{userId}`, limit 30/60s, fail-open khi Redis down.
+- FK defer pattern: V3 tạo `last_read_message_id` column chưa có FK. V5 thêm `ALTER TABLE conversation_members ADD CONSTRAINT fk_members_last_read FOREIGN KEY(last_read_message_id) REFERENCES messages(id) ON DELETE SET NULL`.
+- H2 TIMESTAMPTZ pitfall: test cursor pagination KHÔNG dùng REST endpoint để send messages (timestamps có timezone shift giữa store/read). Thay vào đó insert trực tiếp qua repository với explicit UTC timestamps cách nhau rõ ràng (vd: `plusDays(i)` thay vì sub-second diffs).
+
+---
+
 ## Changelog file này
 
+- 2026-04-19 W4D1: Thêm Messages domain pattern, cursor pagination logic, H2 TIMESTAMPTZ pitfall cho test.
 - 2026-04-19 W3D2: Thêm W3-BE-1 fix pattern, findOrCreate 1-1 SQL, anti-enumeration 404, flush+clear pattern, H2 UUID native query workaround.
 - 2026-04-19 W3D1: Thêm Conversation domain pattern, enum string mapping, JOIN FETCH repo pattern, index naming convention, DROP/recreate DB flow.
 - 2026-04-19 W2D4: Thêm Firebase OAuth pattern, Logout + blacklist, OAuthResponse shape, JwtAuthFilter blacklist check.

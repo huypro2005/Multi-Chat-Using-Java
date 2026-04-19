@@ -26,6 +26,95 @@
 
 ---
 
+## 2026-04-19 — W4D1 Review: Messages REST endpoints + FE hooks scaffold
+
+### Verdict
+⚠️ APPROVE WITH COMMENTS (0 BLOCKING, 4 WARNING non-blocking)
+
+### Files reviewed
+- `backend/src/main/resources/db/migration/V5__create_messages.sql`: schema messages + index `(conversation_id, created_at DESC)` + defer FK `last_read_message_id → messages`.
+- `backend/src/main/java/com/chatapp/message/{entity,enums,dto,repository,service,controller}/*`: full module — Message entity với @PrePersist UUID + UTC normalization; SendMessageRequest validation; MessageService với cursor pagination + rate limit fail-open + reply validation; MessageController inject @AuthenticationPrincipal User.
+- `backend/src/test/java/com/chatapp/message/MessageControllerTest.java`: 13 tests (T01-T13) full integration coverage — happy path, non-member 404, validation, cross-conv reply, rate limit, cursor pagination ASC sort.
+- `frontend/src/types/message.ts`: TS types khớp BE record shape.
+- `frontend/src/features/messages/{api,hooks}.ts`: useInfiniteQuery + useMutation với optimistic update pattern (snapshot rollback on error, replace tempId on success).
+- `frontend/src/features/conversations/queryKeys.ts`: thêm `messageKeys.all(convId)`.
+- `docs/API_CONTRACT.md`: section Messages API v0.6.0-messages-rest mới.
+
+### Contract verification
+✅ POST `/api/conversations/{convId}/messages` request/response shape khớp BE record (SendMessageRequest, MessageDto).
+✅ GET cursor pagination semantics đúng — items ASC, nextCursor = createdAt cũ nhất.
+✅ Error codes documented: VALIDATION_FAILED, AUTH_REQUIRED, CONV_NOT_FOUND, RATE_LIMITED.
+✅ Rate limit 30/min consistent giữa contract + code (`RATE_LIMIT_PER_MINUTE = 30`).
+
+### Blocking issues
+Không có.
+
+### Warnings (non-blocking)
+1. **[BE] Race condition `lastMessageAt` update khi 2 messages concurrent**: `MessageService.sendMessage` load Conversation bằng `findById` rồi `touchLastMessage` rồi `save`. Không có optimistic lock (no @Version) → 2 sends đồng thời có thể last-write-wins, nhưng vì `touchLastMessage` chỉ set khi `messageTime.isAfter(this.lastMessageAt)` → kết quả cuối vẫn convergent (max). Acceptable V1, log vào WARNINGS như tech debt khi presence/typing scale lên.
+2. **[BE] N+1 trong `toMessageDto` cho list response**: mỗi message có `sender` LAZY + `replyToMessage.sender` LAZY → page 50 messages có thể fire 50-100 SELECT. Service đang dùng `findById` + lazy access. Fix bằng JOIN FETCH trong query (`@Query("... LEFT JOIN FETCH m.sender LEFT JOIN FETCH m.replyToMessage rm LEFT JOIN FETCH rm.sender ...")`). V1 traffic thấp acceptable, nhưng đáng add vào WARNINGS.
+3. **[BE] Reply to soft-deleted message không bị block**: `existsByIdAndConversation_Id` không filter `deletedAt IS NULL`. User có thể reply tới message đã bị xóa mềm — sender thấy preview của message đã "deleted". Hỏi orchestrator: V1 cho phép hay block? Nếu block → đổi thành `existsByIdAndConversation_IdAndDeletedAtIsNull` (chưa có method, cần thêm). Tuần 6 (Edit/Delete) đụng tới sẽ chốt. Document vào WARNINGS.
+4. **[BE] `toMessageDto` reload sau save tốn 1 query thừa**: `messageRepository.save(message)` đã trả entity đầy đủ. Sau đó lại `findById(message.getId())` reload. Có thể OK nếu cần force flush LAZY proxy `sender`/`replyToMessage`, nhưng `sender` là `getReferenceById` → access field sẽ fire SELECT. Cleaner: load eagerly từ đầu hoặc dùng `userRepository.findById` thay `getReferenceById` cho `sender`. V1 acceptable.
+
+### Suggestions (FE, hoàn toàn tùy chọn)
+- `OptimisticMessage` type được define trong `types/message.ts` nhưng không dùng — `useSendMessage` cast thẳng tempId vào `MessageDto.id`. Cleanup hoặc dùng cho status tracking (SENDING/FAILED) khi UI cần spinner per-message.
+- `messageKeys.all(convId)` đặt ở `features/conversations/queryKeys.ts` — về module boundary nên ở `features/messages/queryKeys.ts`. Không blocking, nhưng nếu thêm `messageKeys.list(convId)`, `messageKeys.detail(convId, msgId)` sau này → nên tách file.
+- `onMutate` optimistic message hardcode `sender: { fullName: 'Bạn' }` — nên đọc từ authStore current user để hiển thị avatar/username thật trong khi chờ ACK.
+
+### Deep-dive verification (BLOCKING checklist pass)
+
+**Schema (V5)**
+- ✅ `idx_messages_conv_created` = `(conversation_id, created_at DESC)` — match query pattern getMessages.
+- ✅ Defer FK `fk_members_last_read` apply đúng V5 (column đã có ở V3).
+- ✅ `ON DELETE SET NULL` cho `sender_id` đúng business: message giữ lại khi user bị xóa, sender_id null → `toMessageDto` gracefully trả `sender=null` (entity nullable @JoinColumn không có nullable=false).
+  - Caveat: V5 SQL declare `sender_id NOT NULL` + `ON DELETE SET NULL` → CONFLICT! PostgreSQL sẽ raise constraint violation khi cascade. **Wait**: chính xác — `NOT NULL` + `ON DELETE SET NULL` → khi user bị xóa thật, PG sẽ throw error "null value in column "sender_id" violates not-null constraint". Tuy nhiên V1 không có user-deletion endpoint nên KHÔNG trigger. Vẫn nên log: nếu future thêm DELETE /api/users/{id} → migration fix `sender_id` thành NULL. → **Đã thêm vào WARNINGS pre-production list (W4-BE-1)**.
+
+**Cursor pagination**
+- ✅ `limit+1` query → `subList(0, min(size, limit))` — đúng. Không IndexOutOfBoundsException khi `size < limit`.
+- ✅ `hasMore = results.size() > limit` — đúng.
+- ✅ `nextCursor` = `pageItems.get(0).getCreatedAt()` sau reverse → item cũ nhất → đúng (next page sẽ lấy `createdAt < nextCursor`).
+- ✅ Edge case exactly `limit` messages: `results.size() == limit` (vì query fetch limit+1 nhưng DB chỉ có `limit`) → `hasMore=false`, không fire query thừa.
+- ✅ Items reverse → trả ASC cho FE (verified bằng T08 assert content order First/Second/Third).
+- ✅ `nextCursor` format ISO8601 normalize UTC → FE parse nhất quán.
+
+**Anti-enumeration**
+- ✅ Non-member → `existsByConversation_IdAndUser_Id == false` → 404 CONV_NOT_FOUND (giống pattern Conversations W3D2).
+- ✅ Non-existent convId → cũng false → cùng 404. Không leak.
+
+**Reply validation**
+- ✅ `existsByIdAndConversation_Id` verify message thuộc đúng conv (T05 cross-conv test pass).
+- ⚠️ Soft-deleted: không block (đã warning ở trên).
+
+**Rate limit**
+- ✅ Pattern consistent ADR-005: INCR + set TTL khi count==1, fail-open via `catch (DataAccessException)`.
+- ✅ `details.retryAfterSeconds` có (hardcode 60, ngược lại Conversations dùng `getExpire()` — minor inconsistency nhưng acceptable vì TTL fixed 60s).
+- ✅ 30/min phù hợp cho chat (1 message/2s) — đủ cho user gõ nhanh, chặn spam.
+
+**FE optimistic update**
+- ✅ `tempId = "temp-${Date.now()}-${random}"` prefix `temp-` không conflict với UUID v4 (UUID không bắt đầu `temp-`).
+- ✅ `onMutate` cancel queries trước mutate.
+- ✅ `onError` rollback dùng `context?.snapshot` (nullable safe).
+- ✅ `onSuccess` replace bằng `item.id === tempId` — đúng id reference.
+- ✅ `onSettled` invalidate `['conversations']` only (KHÔNG invalidate messages → tránh mất tempId nếu invalidate trigger refetch trước onSuccess).
+- ✅ `setQueryData` callback type: `{ pages: MessageListResponse[]; pageParams: unknown[] }` — không `any`. (`pageParams: unknown[]` là acceptable cho cursor-based.)
+
+**FE useInfiniteQuery**
+- ✅ `initialPageParam: undefined` — đúng cho cursor null = trang đầu.
+- ✅ `getNextPageParam` trả undefined khi `!hasMore` → React Query tự stop, không loop.
+- ✅ `enabled: !!convId` guard convId rỗng/null khi user chưa chọn conv.
+
+### Contract changes
+- v0.5.2-conversations → **v0.6.0-messages-rest** (minor bump vì thêm phase mới Messages REST). Section Messages API thêm vào contract, changelog có entry.
+
+### ADR mới
+Không có ADR mới (cursor pagination strategy là pattern standard, soft-delete cũng đã pattern. Reply-to-soft-deleted policy CHƯA quyết định → defer ADR sang Tuần 6).
+
+### Knowledge updates
+- Thêm 1 BLOCKING-watch item vào WARNINGS (W4-BE-1: NOT NULL + SET NULL conflict).
+- Thêm 3 acceptable items vào WARNINGS (lastMessageAt race, N+1 list messages, reply soft-deleted).
+- Knowledge file (reviewer-knowledge.md) chưa cần thêm pattern mới — cursor pagination + optimistic update đều là pattern chuẩn React Query, không phải approved-pattern lần đầu của team.
+
+---
+
 ## 2026-04-19 — W3D5 Consolidation: WARNINGS.md restructure
 
 ### Verdict
