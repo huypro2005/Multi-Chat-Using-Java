@@ -32,6 +32,26 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (Tuần 3, Ngày 5) — fix TD-8: MethodArgumentTypeMismatchException → 400
+
+### Xong
+- [BE][W3-D5][2026-04-19] fix(TD-8): MethodArgumentTypeMismatchException → 400 VALIDATION_FAILED
+  - `GlobalExceptionHandler`: thêm `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` → 400 `VALIDATION_FAILED` với details `{field, error}`. Cover mọi endpoint có `@PathVariable UUID`.
+  - `ConversationControllerTest`: thêm 2 test case — `getConversation_malformedUUID_returns400` và `getConversation_validUUIDNonExistent_returns404`.
+  - `docs/WARNINGS.md`: TD-8 moved từ "Tech debt nhỏ" → "Resolved".
+  - `mvn test`: 70 tests pass (0 failures, ConversationControllerTest tăng từ 18 → 20).
+
+### Đang dở
+- Không có.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `MethodArgumentTypeMismatchException` là subclass của `MethodArgumentConversionNotSupportedException` — handler đặt TRƯỚC catch-all Exception để intercept đúng. Spring dispatch theo exception hierarchy: handler specific nhất được ưu tiên.
+
+---
+
 ## 2026-04-19 (Tuần 3, Ngày 4) — GET /api/users/{id}, V4 last_seen_at migration
 
 ### Xong

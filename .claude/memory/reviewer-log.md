@@ -26,6 +26,45 @@
 
 ---
 
+## 2026-04-19 — W3D5 Consolidation: WARNINGS.md restructure
+
+### Verdict
+N/A (không phải review code — housekeeping tri thức tech debt).
+
+### Files modified
+- `docs/WARNINGS.md`: rewrite theo format mới với 4 section ưu tiên 🔴 Pre-production / 🟡 Documented acceptable / 🔵 Cleanup / ✅ Resolved. Bảng có cột Effort (XS/S/M/L) + "Fix khi nào" giúp developer nhìn 1 cái thấy ngay backlog.
+
+### Thay đổi chính
+1. **Mark resolved (W3)**: W3-BE-1 (UUID @PrePersist W3D2), W3-BE-3 (pgcrypto extension W3D2), W3-BE-6 (rate limit POST /conversations W3D3), TD-8 (MethodArgumentTypeMismatch handler W3D5), W-C-4 (ProtectedRoute wire W3D1).
+2. **Promote lên bảng rõ ràng**: W3-BE-2 (ON DELETE SET NULL dead code), W3-BE-4 (N+1 list conv), W3-BE-5 schema (no updated_at conversation_members), ADR-013 (ONE_ON_ONE race) vào Documented acceptable.
+3. **Thêm Cleanup**: W3-BE-5 code (UserController cross-package ConversationService), W3-FE-1 (double hydration gate), W3-FE-4 (inline onClick phá React.memo), TD-3 (map với CL-1 useAuth orphan TODO).
+4. **Audit trail entry** cho W3D5.
+
+### Pre-production count (sau consolidation)
+5 items — W-BE-4, W-BE-5, W-BE-6, W-BE-7, W-BE-8. Tất cả thuộc auth/security, fix tuần 6 hardening phase.
+
+### Documented acceptable count
+14 items (AD-1 → AD-10 + W3-BE-2 + W3-BE-4 + W3-BE-5 schema + ADR-013).
+
+### Cleanup count
+17 items (6 CL-* + 3 W3-FE/BE-* cleanup + 8 TD-*).
+
+### Resolved count
+W3: 5 items. W2: 3 items.
+
+### Contract impact
+Không.
+
+### Memory file sizes check (sau W3D5)
+- `backend-knowledge.md`: 215 dòng — OK (<300 limit).
+- `frontend-knowledge.md`: 294 dòng — OK (<300 limit, gần tới ngưỡng, watch W4).
+- `reviewer-knowledge.md`: 248 dòng — OK (<400 limit).
+- `reviewer-log.md`: 587+ dòng (sẽ tăng khi commit entry này) — append-only, chưa cần rotate.
+
+Không consolidate knowledge vì đều dưới ngưỡng. Tiếp tục theo dõi `frontend-knowledge.md` ở 294/300.
+
+---
+
 ## 2026-04-19 — W3D4 Review: ConversationDetailPage + GET /api/users/{id} + last_seen_at
 
 ### Verdict

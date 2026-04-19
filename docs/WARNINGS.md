@@ -1,88 +1,100 @@
 # Warnings Tracking
+_Last updated: 2026-04-19 (W3-D5 consolidation)_
 
-> File này tổng hợp mọi warning / TODO / tech debt đã biết trong codebase tính đến `v0.2.0-w2`.
-> Được tạo trong audit cuối Tuần 2 (2026-04-19).
+> File này tổng hợp mọi warning / TODO / tech debt đã biết trong codebase.
 > **Quy tắc**: mỗi TODO trong code phải map với 1 ID trong file này hoặc có plan cụ thể. Orphan TODO không được phép.
 >
-> Phân loại ưu tiên:
-> - **Pre-production**: phải fix trước khi deploy production (V1 public launch).
-> - **Documented acceptable**: V1 chấp nhận, đã cân nhắc trade-off.
-> - **Cleanup tuần 8**: dọn dẹp trong phase hardening cuối roadmap.
-> - **Tech debt nhỏ**: có thể fix bất cứ khi nào tiện tay.
+> Format mới (W3-D5 restructure): mỗi section có bảng nhỏ, ưu tiên "tình trạng tech debt" để developer thấy ngay "phải fix gì trước deploy" vs "đã chấp nhận" vs "dọn sau".
 
 ---
 
-## Resolved (đã fix)
+## 🔴 Pre-production (BẮT BUỘC fix trước deploy V1)
 
-| ID | Vấn đề | Fix | Ngày |
-|----|--------|-----|------|
-| W3-BE-3 | Schema V2 không có `CREATE EXTENSION IF NOT EXISTS pgcrypto` — developer mới clone repo, fresh DB → `gen_random_uuid()` fail ở V2. | Thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu `V2__create_users_and_auth_providers.sql`. Thêm `repair-on-migrate: true` vào `application.yml` để developer có DB cũ tự động repair checksum khi start app. | 2026-04-19 |
-| W3-BE-6 | `POST /api/conversations` không có rate limit — user có thể tạo hàng trăm conversation / giây. | Thêm Redis INCR rate limit vào đầu `ConversationService.createConversation()`: key `rate:conv_create:{userId}`, TTL 60s, max 10 creates/min/user. Vượt ngưỡng → `AppException` 429 `RATE_LIMITED`. | 2026-04-19 |
+Mọi ID dưới đây phải được resolve trước khi deploy V1 public. Effort ước lượng: XS <30p · S 0.5d · M 1d · L >1d.
 
----
-
-## Pre-production (BẮT BUỘC fix trước deploy)
-
-| ID | File:Line | Vấn đề | Solution | Effort |
-|----|-----------|--------|----------|--------|
-| W-BE-4 | `backend/src/main/java/com/chatapp/auth/service/AuthService.java:~122` (register + OAuth create branch) | Race condition `existsByEmail` → `save`. 2 request cùng email vượt check rồi cùng insert → DB UNIQUE violate → `DataIntegrityViolationException` → catch-all trả 500 `INTERNAL_ERROR` thay vì 409 `AUTH_EMAIL_TAKEN` / `AUTH_USERNAME_TAKEN`. | Catch `DataIntegrityViolationException` trong `register()` và `oauth()` create-new branch; map constraint name (`users_email_key`, `users_username_key`) sang `AppException` 409 với error code tương ứng. | S (0.5d) |
-| W-BE-5 | `backend/src/main/java/com/chatapp/auth/service/AuthService.java` (login path) | `passwordHash = null` cho OAuth-only user. Nếu attacker gọi `/login` với username của OAuth user → `BCryptPasswordEncoder.matches()` throw `IllegalArgumentException` → 500. | Guard `if (user.getPasswordHash() == null) throw AUTH_INVALID_CREDENTIALS` TRƯỚC khi gọi `passwordEncoder.matches()`. Cùng error code để không leak "tài khoản OAuth-only". | XS (15 phút) |
-| W-BE-6 | `backend/src/main/java/com/chatapp/auth/controller/AuthController.java:125-131` | `extractClientIp()` lấy `X-Forwarded-For[0]` không sanitize. Attacker forge header → ghi Redis key rác `rate:login:{arbitrary_string}`. Không phải command injection (serializer escape), nhưng abuse counter space & bypass rate limit IP. | Validate IP format bằng `InetAddressValidator` (commons-validator) hoặc regex IPv4/IPv6 trước khi dùng làm key suffix. IP invalid → fallback `getRemoteAddr()`. | S (0.5d) |
-| W-BE-7 | `backend/src/main/java/com/chatapp/security/JwtAuthFilter.java` (blacklist check) | Fail-open khi Redis down: logged-out access token vẫn valid đến natural expiry (≤1h). | Option A: monitoring alert khi Redis down → ops rotate JWT secret. Option B (preferred V2): circuit breaker đếm failure rate, switch fail-closed sau ngưỡng. V1 acceptable vì Redis managed, nhưng document runbook cho incident. | M (1d — monitoring + runbook) |
-| W-BE-8 | `backend/src/main/java/com/chatapp/auth/service/AuthService.java` (oauth generateUniqueUsername) | Race condition khi 2 OAuth concurrent tạo username từ cùng `displayName` → cả 2 chọn cùng suffix → DB UNIQUE violate → 500. | Dùng retry loop (max 3 lần) bắt `DataIntegrityViolationException` trong create branch, regenerate username với suffix mới. Gộp chung W-BE-4. | S (gộp W-BE-4) |
+| ID | Mô tả | File:Line | Effort | Fix khi nào |
+|----|-------|-----------|--------|-------------|
+| W-BE-4 | Race condition `existsByEmail` → `save` → 500 INTERNAL_ERROR thay vì 409 AUTH_EMAIL_TAKEN/AUTH_USERNAME_TAKEN. Cần catch `DataIntegrityViolationException` và map constraint name (`users_email_key`, `users_username_key`) sang `AppException` 409. | `backend/src/main/java/com/chatapp/auth/service/AuthService.java:~122` | S | Tuần 6 (hardening) |
+| W-BE-5 | `passwordHash = null` cho OAuth-only user. Attacker gọi `/login` với username OAuth → `BCryptPasswordEncoder.matches()` throw `IllegalArgumentException` → 500. Guard `if (user.getPasswordHash() == null) throw AUTH_INVALID_CREDENTIALS` TRƯỚC khi gọi matches(). | `backend/src/main/java/com/chatapp/auth/service/AuthService.java` (login path) | XS | Tuần 6 |
+| W-BE-6 | `extractClientIp()` lấy `X-Forwarded-For[0]` không sanitize → IP spoofing ghi Redis key rác `rate:login:{arbitrary}` bypass rate limit. Validate IP format (`InetAddressValidator` hoặc regex IPv4/IPv6) trước khi dùng làm key suffix; invalid → fallback `getRemoteAddr()`. | `backend/src/main/java/com/chatapp/auth/controller/AuthController.java:125-131` | S | Tuần 6 |
+| W-BE-7 | Fail-open JWT blacklist khi Redis down → logged-out access token vẫn valid đến natural expiry (≤1h). V1 cần monitoring alert + runbook (rotate JWT_SECRET nếu nghi ngờ compromised token). V2 circuit breaker. | `backend/src/main/java/com/chatapp/security/JwtAuthFilter.java` (blacklist check) | M | Tuần 6 |
+| W-BE-8 | `generateUniqueUsername` race OAuth concurrent: 2 request cùng displayName chọn cùng suffix → DB UNIQUE violate → 500. Retry loop max 3 lần bắt `DataIntegrityViolationException` → regenerate. Gộp fix với W-BE-4. | `backend/src/main/java/com/chatapp/auth/service/AuthService.java` (oauth create branch) | S | Tuần 6 (gộp W-BE-4) |
 
 ---
 
-## Documented acceptable (V1 chấp nhận)
+## 🟡 Documented acceptable (V1 chấp nhận, đã cân nhắc trade-off)
 
-| ID | Vấn đề | Lý do chấp nhận |
-|----|--------|-----------------|
-| AD-1 | Redis fail SAU khi save user (register) → user tồn tại DB nhưng không có refresh token trong Redis. `@Transactional` không bao Redis. | FE sẽ nhận response lỗi → user retry login. Không có data corruption. `TransactionSynchronizationManager` để rollback Redis phức tạp & không atomic thật → không làm. Traffic V1 thấp, Redis bền. |
-| AD-2 | Rate limit counter KHÔNG reset sau refresh thành công. User legit refresh 10 lần/60s (hiếm) sẽ bị throttle. | Window 60s ngắn, tự hồi phục. FE refresh queue pattern đảm bảo KHÔNG gọi /refresh song song. |
-| AD-3 | Rate limit refresh lấy userId từ token chưa validate Redis hash trước. Attacker gửi JWT reused (signature valid) vẫn consume counter của userId đó → potential DoS nhắm 1 user cụ thể. | Cần lấy được raw refresh token đã ký trước → threat thấp. V1 scale nhỏ, nếu có attack chủ đích thì đã có nhiều vector khác dễ hơn. |
-| AD-4 | `refresh()` DELETE trước SAVE refresh token: nếu crash giữa 2 bước → user mất session phải login lại. | Acceptable cho V1. V2 có thể dùng Redis MULTI/EXEC. Trade-off giữa "có cửa sổ 2 token" và "có cửa sổ 0 token" — chọn cái sau vì security. |
-| AD-5 | `email_verified` claim không check khi auto-link (Google luôn verified). | Google OAuth: `email_verified=true` mặc định. An toàn cho V1. **BẮT BUỘC add check này khi mở rộng sang Facebook/Apple/email OAuth khác** (xem ADR-007 + Security standards). |
-| AD-6 | `HomePage.handleLogout`: nếu `tokenStorage.getRefreshToken()` trả null sau rehydrate race → skip `/logout` API call → access token không blacklist. | Access token tự expire ≤1h. Edge case race giữa Zustand rehydrate và click logout rất hẹp. Acceptable. |
-| AD-7 | `registerSchema` gộp length + format vào 1 regex `^[a-zA-Z_][a-zA-Z0-9_]{2,49}$` → error message khi user gõ >50 ký tự sẽ nói "bắt đầu bằng chữ cái" thay vì "quá dài". | UX trade-off nhỏ. Schema match contract BE chính xác (W-FE-1 resolved). |
-| AD-8 | Register rate limit tính MỌI request, kể cả success (10/15min/IP). User legitimate tạo 10 account hợp lệ bị chặn. | Phù hợp intent anti-abuse. Không ai normal tạo 10 account/15min; nếu có nhu cầu (testing) dùng env khác. |
-| AD-9 | `users.last_seen_at` (V4 migration) KHÔNG expose qua bất kỳ API response nào ở V1 (`UserSearchDto`, `GET /api/users/{id}`, `GET /api/users/search`, `ConversationDto.members`). Column chỉ dùng internal (JwtAuthFilter update mỗi ~30s khi có request auth). | Privacy V1: hiển thị "last seen" sẽ bị scrape tracking behavior. V2 chốt policy (opt-in hiển thị, granularity "online/5min ago/hôm qua", respect block list) rồi mới expose. Column đã có sẵn để không tốn migration sau. |
-| AD-10 | `JwtAuthFilter` update `last_seen_at` **dùng `userRepository.save(user)` ghi full entity** → không phải partial UPDATE. Nếu request khác đang update User (ví dụ đổi avatar, đổi status) cùng lúc → **lost update window**: save của filter có thể overwrite field đã đổi ở thread kia do filter dùng snapshot User cũ load đầu request. Thiếu `@Transactional` → mỗi save = 1 auto-commit tx. | V1 traffic thấp, user hiếm khi concurrent self-update. Fix V2: dùng `@Modifying @Query("UPDATE User u SET u.lastSeenAt = :now WHERE u.id = :id AND (u.lastSeenAt IS NULL OR u.lastSeenAt < :threshold)")` — partial UPDATE, không động field khác. Hoặc move logic ra Redis `presence:last_seen:{userId}` TTL 5m + batch flush DB mỗi 5 phút (giảm write DB tải giảm ~99% vs pattern hiện tại). |
+Các item này đã được review và chấp nhận cho V1. Có ADR hoặc rationale rõ ràng. Không bắt buộc fix.
 
----
-
-## Cleanup tuần 8
-
-| ID | Vấn đề | Timeline |
-|----|--------|----------|
-| CL-1 | `frontend/src/hooks/useAuth.ts:16-30` — comment "Tuần 2 sẽ call /api/auth/logout" + `TODO Tuần 2` outdated. Logout đã implement trong `HomePage.tsx` dùng `logoutApi` trực tiếp, không qua hook. `useAuth.logout()` hiện chỉ clear local state. | Tuần 3-4 (khi refactor nav/header) — quyết định: (a) dẹp `useAuth.logout` và ép mọi component dùng `logoutApi + clearAuth` trực tiếp; HOẶC (b) đưa logic API call vào `useAuth.logout` để centralize. |
-| CL-2 | `frontend/src/pages/LoginPage.tsx:201` & `RegisterPage.tsx:277` — check `apiErr?.error === 'PROVIDER_ALREADY_LINKED'`. BE không emit error code này và contract không define. Dead branch. | Tuần 3 (khi touch OAuth UX) — xóa 2 branch này; giữ fallback chung `handleAuthError`. |
-| CL-3 | `frontend/src/features/auth/utils/handleAuthError.ts:28` — case `AUTH_ACCOUNT_DISABLED` dead. BE chỉ throw `AUTH_ACCOUNT_LOCKED`. | Tuần 3 — xóa case hoặc gộp vào `AUTH_ACCOUNT_LOCKED`. |
-| CL-4 | `backend/src/test/java/com/chatapp/auth/AuthControllerTest.java:511` — Test 17 `refreshWithExpiredToken_returnsExpiredError` fallback test INVALID signature vì không tạo được expired token thật (TTL config 7 ngày). EXPIRED path chỉ có unit test ở `JwtTokenProviderTest`. | Tuần 8 — dùng `@SpyBean JwtTokenProvider` + stub `validateTokenDetailed()` trả EXPIRED; hoặc configurable TTL qua profile. |
-| CL-5 | `backend/src/main/java/com/chatapp/security/JwtTokenProvider.java:189` — comment "Tuần 2 sẽ truyền dynamic" về `auth_method`. AuthMethod enum đã implement từ W2D1 (W-BE-3 resolved). | Tuần 3 — xóa comment lỗi thời. |
-| CL-6 | Contract `docs/API_CONTRACT.md:256` — `AUTH_FIREBASE_UNAVAILABLE` chỉ nói "timeout sau 5 giây" nhưng thực tế cũng cover case "SDK chưa init (bean null)". Ngữ nghĩa đúng, câu chưa phản ánh đủ. | Tuần 3 — mở rộng câu: "Firebase Admin SDK timeout 5s HOẶC chưa init (credentials chưa config)". |
+| ID | Mô tả | Lý do chấp nhận |
+|----|-------|-----------------|
+| AD-1 | Redis fail SAU khi save user (register) → user tồn tại DB nhưng không có refresh token. `@Transactional` không bao Redis. | FE retry login. Không data corruption. `TransactionSynchronizationManager` rollback Redis phức tạp & không atomic thật. Traffic V1 thấp. |
+| AD-2 | Rate limit counter KHÔNG reset sau refresh thành công. User legit refresh 10 lần/60s (hiếm) bị throttle. | Window 60s ngắn, tự hồi phục. FE refresh queue pattern đảm bảo không gọi /refresh song song. |
+| AD-3 | Rate limit refresh lấy userId từ token chưa validate Redis hash trước. JWT reused (sig valid) vẫn consume counter → DoS nhắm user cụ thể. | Threat thấp; V1 scale nhỏ. Attacker có các vector dễ hơn. |
+| AD-4 | `refresh()` DELETE trước SAVE: crash giữa 2 bước → user mất session phải login lại. | ADR-006. Trade-off chọn "cửa sổ 0 token" (security) thay "cửa sổ 2 token". V2: Redis MULTI/EXEC. |
+| AD-5 | `email_verified` claim không check khi auto-link (Google luôn verified). | ADR-007. Google OAuth luôn email_verified=true. **BẮT BUỘC add check khi mở Facebook/Apple**. |
+| AD-6 | `HomePage.handleLogout`: `tokenStorage.getRefreshToken()` null sau rehydrate race → skip /logout API → access token không blacklist. | Access token tự expire ≤1h. Edge case race rất hẹp. |
+| AD-7 | `registerSchema` regex gộp length + format → error message khi >50 ký tự nói "bắt đầu bằng chữ cái". | UX trade-off nhỏ. Schema match contract BE chính xác. |
+| AD-8 | Register rate limit tính MỌI request (10/15min/IP). User legit tạo 10 account hợp lệ bị chặn. | Anti-abuse intent. Không ai normal tạo 10 account/15min. |
+| AD-9 | `users.last_seen_at` KHÔNG expose qua bất kỳ API V1 (UserSearchDto, GET /api/users/{id}, etc). Column chỉ dùng internal. | Privacy V1 chưa chốt policy (opt-in, granularity, block list). V2 expose khi có policy. Column có sẵn để không tốn migration sau. |
+| AD-10 | `JwtAuthFilter` update `last_seen_at` dùng `userRepository.save(user)` full entity → lost-update window + auto-commit tx. | V1 traffic thấp, user hiếm concurrent self-update. V2 fix: partial `@Modifying @Query` hoặc Redis presence pattern (giảm write DB ~99%). |
+| W3-BE-2 | `Conversation.createdBy` DB column `ON DELETE SET NULL` là dead code V1 (soft-delete pattern, không DELETE thật). | Future-proof khi V2 hard-delete. Không tốn gì giữ constraint. |
+| W3-BE-4 | N+1 query risk khi list conversations (custom `@Query` aggregate member/last_message). | Traffic V1 <1000 users + index có sẵn. Optimize tuần 4-5 nếu query plan thực tế cho thấy tải cao. |
+| W3-BE-5 (schema) | `conversation_members` không có `updated_at` + trigger BEFORE UPDATE. | `joined_at` immutable + `last_read_message_id` tự track thay đổi. V1 đủ. |
+| ADR-013 | ONE_ON_ONE race no-lock V1: 2 request concurrent cùng pair → có thể tạo 2 conv duplicate. | P(collision) < 0.01%. SERIALIZABLE + advisory lock overhead không đáng. V2: partial UNIQUE index. Clean-up script merge dup. |
 
 ---
 
-## Tech debt nhỏ
+## 🔵 Cleanup (tuần 8 hoặc khi có bandwidth)
 
-| ID | Vấn đề | Ưu tiên |
-|----|--------|---------|
-| TD-1 | `AppLoadingScreen.tsx` hiển thị text không dấu "Dang khoi dong..." trong khi toàn app dùng tiếng Việt có dấu. | Thấp — visual consistency. |
-| TD-2 | `AuthService.register` logs `WARN` chỉ ở `GlobalExceptionHandler`, không có log riêng cho security events (rate limit hit, account locked). Khó trace. | Trung bình — thêm structured log khi phase observability (tuần 7). |
-| TD-3 | `authService.init()` FE catch empty, nuốt mọi error bao gồm network timeout. Dev debug khó. | Thấp — thêm `console.warn('[authService.init] refresh failed', e)`. |
-| TD-4 | Controller comment block chỉ list 2 endpoints (`register`, `login`) nhưng thực tế có 5. `AuthController.java:25-28`. | Thấp — update javadoc. |
-| TD-5 | `JwtAuthFilter` query DB (`userRepository.findById`) mỗi request authenticated. Khi load tăng nên cache User vào Redis (TTL ngắn). | Trung bình — tuần 5-6 khi bắt đầu optimize. |
-| TD-6 | `application-test.yml` JWT secret để rõ trong file. Chấp nhận cho dev/test nhưng đảm bảo không leak sang prod config. | Thấp — guard bằng profile split. |
-| TD-7 | `GlobalExceptionHandler.AppException` log ở level DEBUG. Nếu client spam `AUTH_INVALID_CREDENTIALS` sẽ không thấy trong log level INFO → khó phát hiện brute force. | Trung bình — đổi WARN cho 4xx security errors (401, 403, 429). |
-| TD-8 | `GlobalExceptionHandler` không có handler cho `MethodArgumentTypeMismatchException`. FE gửi `GET /api/users/not-a-uuid` hoặc `GET /api/conversations/garbage` → Spring convert fail → catch-all Exception → trả 500 INTERNAL_ERROR thay vì 400 VALIDATION_FAILED. Ảnh hưởng tất cả endpoint có `@PathVariable UUID id`. | Thấp — FE kiểm soát URL, user rất hiếm gõ tay URL sai format. Thêm handler chung 1 lần cover hết: catch `MethodArgumentTypeMismatchException` → `AppException(400, "VALIDATION_FAILED", "Invalid path parameter: " + e.getName())`. |
-| TD-9 | `ConversationDetailPage` error state khi không phải 404 chỉ có button "Quay lại" — không có "Thử lại" in-place. User phải navigate ra list rồi click lại item để retry. UX chấp nhận V1 vì `useConversation` tự retry 3 lần mặc định của React Query (exponential backoff) trước khi báo `isError`. Nếu user vẫn thấy error thì thường là server down → retry thủ công cũng ít khả năng thành công. | Thấp — nếu QoL cần nâng, thêm button `onClick={() => refetch()}` dùng trực tiếp `refetch` từ `useQuery`. |
-| TD-10 | `UserController.getUserById` nhận `@AuthenticationPrincipal User currentUser` nhưng **không dùng** trong method body → compiler warning "unused parameter". Giữ vì `@AuthenticationPrincipal` còn đóng vai trò guard (Spring inject null nếu chưa auth → SecurityConfig `.authenticated()` đã reject trước đó nên thực tế không null). Cosmetic. | Thấp — (a) xóa param vì SecurityConfig đã enforce auth; HOẶC (b) dùng nó tương lai để filter block list (khi `user_blocks` wire thì sẽ cần). Khuyến nghị giữ param + suppress warning. |
+Effort XS-S, không ảnh hưởng chức năng. Dọn khi có thời gian hoặc ghép vào PR gần đó.
+
+| ID | Mô tả | File:Line | Effort | Ưu tiên |
+|----|-------|-----------|--------|---------|
+| CL-1 / TD-3 | `useAuth.ts` orphan TODO: comment "Tuần 2 sẽ call /api/auth/logout" + logic outdated. Logout đã implement ở `HomePage.tsx` (`logoutApi` trực tiếp). Quyết: (a) dẹp `useAuth.logout`; HOẶC (b) centralize logic vào hook. | `frontend/src/hooks/useAuth.ts:16-30` | S | Thấp — Tuần 3 nav refactor |
+| CL-2 | `LoginPage.tsx` + `RegisterPage.tsx` check `apiErr?.error === 'PROVIDER_ALREADY_LINKED'` — BE không emit, contract không define. Dead branch. | `LoginPage.tsx:201`, `RegisterPage.tsx:277` | XS | Thấp — xóa |
+| CL-3 | `handleAuthError.ts` case `AUTH_ACCOUNT_DISABLED` dead — BE chỉ throw `AUTH_ACCOUNT_LOCKED`. Xóa hoặc gộp. | `frontend/src/features/auth/utils/handleAuthError.ts:28` | XS | Thấp |
+| CL-4 | Test 17 `refreshWithExpiredToken_returnsExpiredError` fallback sang INVALID signature vì không tạo expired token thật. EXPIRED path chỉ có unit test ở `JwtTokenProviderTest`. | `backend/.../AuthControllerTest.java:511` | S | Thấp — dùng `@SpyBean` stub `validateTokenDetailed()` |
+| CL-5 | Comment "Tuần 2 sẽ truyền dynamic" về `auth_method` — AuthMethod enum đã implement từ W2D1 (W-BE-3 resolved). Xóa comment. | `backend/.../JwtTokenProvider.java:189` | XS | Thấp |
+| CL-6 | Contract `AUTH_FIREBASE_UNAVAILABLE` nói "timeout 5s" — thực tế cũng cover "SDK chưa init". Mở rộng câu. | `docs/API_CONTRACT.md:256` | XS | Thấp |
+| W3-BE-5 (code) | `UserController` inject `ConversationService` cross-package để tìm user. Nên có `UserService` riêng trong `com.chatapp.user`. | `backend/.../user/controller/UserController.java` | S | Thấp — refactor khi touch user module |
+| W3-FE-1 | `ProtectedRoute.tsx` có `isHydrated` check dù `App.tsx` đã gate `isInitialized`. Branch spinner trong ProtectedRoute là dead code. Chọn: (a) xóa; (b) giữ với comment "defense-in-depth". | `frontend/src/components/ProtectedRoute.tsx:19` + `App.tsx:23` | XS | Thấp |
+| W3-FE-4 | Inline arrow `onClick={() => navigate(...)}` trong `ConversationListSidebar` L106 phá `React.memo` của `ConversationListItem` → re-render hết list mỗi khi sidebar re-render. Fix: `useCallback` + pattern `onSelect(id)`. | `frontend/.../ConversationListSidebar.tsx:106` | S | Thấp — khi list scale >50 items |
+| TD-1 | `AppLoadingScreen.tsx` text không dấu "Dang khoi dong...". | `frontend/src/components/AppLoadingScreen.tsx` | XS | Thấp |
+| TD-2 | `AuthService.register` thiếu structured log cho security events (rate limit hit, account locked). | `backend/.../auth/service/AuthService.java` | S | Trung bình — phase observability tuần 7 |
+| TD-4 | `AuthController` javadoc outdated (list 2 endpoints thay vì 5). | `backend/.../auth/controller/AuthController.java:25-28` | XS | Thấp |
+| TD-5 | `JwtAuthFilter` query DB `userRepository.findById` mỗi request authenticated. Cache User vào Redis TTL ngắn khi load tăng. | `backend/.../security/JwtAuthFilter.java` | M | Trung bình — tuần 5-6 |
+| TD-6 | `application-test.yml` JWT secret rõ trong file. OK cho test nhưng guard profile split không leak prod. | `backend/src/main/resources/application-test.yml` | XS | Thấp |
+| TD-7 | `GlobalExceptionHandler.AppException` log level DEBUG → spam `AUTH_INVALID_CREDENTIALS` không thấy trong INFO → khó phát hiện brute force. Đổi WARN cho 4xx security (401, 403, 429). | `backend/.../exception/GlobalExceptionHandler.java` | XS | Trung bình |
+| TD-9 | `ConversationDetailPage` error state chỉ có "Quay lại", không có "Thử lại" in-place. React Query đã tự retry 3 lần. | `frontend/src/pages/ConversationDetailPage.tsx` | XS | Thấp |
+| TD-10 | `UserController.getUserById` nhận `@AuthenticationPrincipal User currentUser` không dùng trong method body → compiler warning. | `backend/.../user/controller/UserController.java` | XS | Thấp — giữ param cho V2 block-list filter, suppress warning |
+
+---
+
+## ✅ Resolved (W3)
+
+| ID | Mô tả | Resolved khi | Fix |
+|----|-------|-------------|-----|
+| W3-BE-1 | `@GeneratedValue(UUID) + insertable=false` conflict Hibernate 6 cho Conversation/ConversationMember. | W3-D2 | Migrate sang `@PrePersist` Option B: `if (id == null) id = UUID.randomUUID()`. Test `savingConversation_shouldPersistWithNonNullId` confirm `save()` trả entity với id != null. |
+| W3-BE-3 | `CREATE EXTENSION pgcrypto` thiếu migration V2 → developer clone fresh DB fail `gen_random_uuid()`. | W3-D2 | Thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu V2. `repair-on-migrate: true` trong application.yml cho DB cũ. |
+| W3-BE-6 | `POST /api/conversations` không có rate limit → user tạo unlimited conv. | W3-D3 | Redis INCR `rate:conv_create:{userId}` TTL 60s, max 10/min/user. 429 RATE_LIMITED khi vượt. |
+| TD-8 | `MethodArgumentTypeMismatchException` cho `@PathVariable UUID id` → 500 INTERNAL_ERROR thay vì 400 VALIDATION_FAILED. | W3-D5 | `GlobalExceptionHandler.handleTypeMismatch()` map sang `AppException(400, "VALIDATION_FAILED", "Invalid path parameter: " + name)`. Cover toàn bộ endpoint `@PathVariable UUID`. |
+| W-C-4 | `ProtectedRoute` chưa wire vào router tree. | W3-D1 | ProtectedRoute wrap `/conversations/*` routes trong `App.tsx`; redirect `/login` nếu không auth. |
+
+---
+
+## ✅ Resolved (Tuần 2)
+
+| ID | Vấn đề | Fix | Resolved |
+|----|--------|-----|----------|
+| W-BE-3 | `generateAccessToken` hardcode `auth_method="password"` → OAuth user cũng bị gắn password claim → sai nghiệp vụ. | Introduce `AuthMethod` enum (PASSWORD / GOOGLE) tại `com.chatapp.user.enums`. `generateAccessToken(User, AuthMethod)` nhận enum. Reader fallback PASSWORD khi claim unknown. | W2-D1 (ADR-010) |
+| W-FE-1 | Username regex FE lệch BE constraint. | Sync regex `/^[a-zA-Z_][a-zA-Z0-9_]{2,49}$/` trong `registerSchema.ts`. First char không cho phép digit, total 3-50 ký tự. | W2-D3 |
+| W-FE-2 | Circular dep `api.ts <-> authStore.ts` dùng `globalThis` workaround. | Migrate sang `tokenStorage.ts` pattern (module in-memory trung gian). `authStore.setAuth()` / `clearAuth()` sync 2 chiều. `onRehydrateStorage` restore refreshToken. accessToken không persist (ADR-003). | W2-D1 |
 
 ---
 
 ## Audit trail
 
-- **2026-04-19**: File tạo mới trong audit cuối Tuần 2 (trước tag `v0.2.0-w2`). Tổng hợp từ:
-  - `reviewer-log.md` entries W2D1, W2D2, W2D3, W2D3.5, W2D4.
-  - Grep codebase tìm `TODO|FIXME|HACK|W-*-` → 1 TODO orphan (useAuth.ts) + 4 references "Tuần 2" trong comment (JwtTokenProvider, useAuth × 2, AuthController).
-  - Grep controllers: 5 auth endpoints + 1 health, khớp 100% với contract `v0.4.0-auth-complete`.
+- **2026-04-19 (W2 Final Audit)**: File tạo mới trước tag `v0.2.0-w2`. Tổng hợp từ reviewer-log W2D1-W2D4. 5 pre-production, 8 documented acceptable, 6 cleanup, 7 tech debt nhỏ.
+- **2026-04-19 (W3D4)**: Thêm AD-9 (last_seen_at non-exposed), AD-10 (JwtAuthFilter save full entity), TD-8, TD-9, TD-10.
+- **2026-04-19 (W3D5 consolidation)**: Restructure theo format mới (emoji priority + bảng effort + "Fix khi nào"). Mark resolved: W3-BE-1, W3-BE-3, W3-BE-6, TD-8. Thêm documented acceptable: W3-BE-2, W3-BE-4, W3-BE-5 (schema). Thêm cleanup: W3-BE-5 (code), W3-FE-1, W3-FE-4. Developer giờ nhìn là thấy ngay pre-production backlog = 5 items trước deploy V1.

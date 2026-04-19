@@ -588,4 +588,36 @@ class ConversationControllerTest {
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error").value("AUTH_REQUIRED"));
     }
+
+    // =========================================================================
+    // TD-8: @PathVariable UUID parse fail must return 400, not 500
+    // =========================================================================
+
+    /**
+     * TD-8: Malformed UUID in path → MethodArgumentTypeMismatchException → 400 VALIDATION_FAILED.
+     * Before fix: catch-all Exception handler returned 500 INTERNAL_ERROR.
+     */
+    @Test
+    void getConversation_malformedUUID_returns400() throws Exception {
+        String validToken = register("td8a@test.com", "td8_userA");
+
+        mockMvc.perform(get("/api/conversations/not-a-uuid")
+                        .header("Authorization", "Bearer " + validToken))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+    }
+
+    /**
+     * TD-8: Well-formed UUID that does not exist → 404 CONV_NOT_FOUND (anti-enumeration).
+     * Verifies the 400 fix does not interfere with the normal 404 path.
+     */
+    @Test
+    void getConversation_validUUIDNonExistent_returns404() throws Exception {
+        String validToken = register("td8b@test.com", "td8_userB");
+
+        mockMvc.perform(get("/api/conversations/00000000-0000-0000-0000-000000000000")
+                        .header("Authorization", "Bearer " + validToken))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("CONV_NOT_FOUND"));
+    }
 }

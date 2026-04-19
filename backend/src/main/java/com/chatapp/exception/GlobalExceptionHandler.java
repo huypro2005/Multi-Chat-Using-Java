@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
@@ -81,6 +82,23 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(HttpStatus.BAD_REQUEST)
                 .body(ErrorResponse.of("VALIDATION_FAILED", "Dữ liệu không hợp lệ", details));
+    }
+
+    /**
+     * MethodArgumentTypeMismatchException — @PathVariable hoặc @RequestParam không convert được.
+     * Ví dụ: GET /api/conversations/not-a-uuid → UUID parse fail → 400 thay vì 500.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        String field = ex.getName();
+        log.debug("Type mismatch for parameter '{}': {}", field, ex.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(ErrorResponse.of(
+                        "VALIDATION_FAILED",
+                        "Invalid format for parameter: " + field,
+                        Map.of("field", field, "error", "Định dạng ID không hợp lệ")
+                ));
     }
 
     /**
