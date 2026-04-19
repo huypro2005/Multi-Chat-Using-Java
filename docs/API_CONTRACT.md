@@ -46,6 +46,10 @@ Một số error có thêm field `details` để FE hiển thị lỗi per-field
 | 429 | `RATE_LIMITED` | Vượt rate limit, kèm `details.retryAfterSeconds` |
 | 500 | `INTERNAL_ERROR` | Lỗi server không xác định |
 
+**Phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED:**
+- `AUTH_REQUIRED`: chưa có token, hoặc token sai format/signature — FE redirect về /login
+- `AUTH_TOKEN_EXPIRED`: token đúng format nhưng hết hạn — FE trigger refresh queue (gọi /refresh, retry request)
+
 ---
 
 ## Token response shape (chuẩn cho mọi endpoint trả token)
@@ -413,5 +417,6 @@ Validation rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-19 | v0.2.1-auth | Thêm note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED vào mục Error codes dùng chung. |
 | 2026-04-19 | v0.2-auth | Thêm 5 Auth endpoints: register, login, oauth, refresh, logout. Chốt contract cho BE/FE tuần 1. |
 | (khởi tạo) | v0.1 | Initial skeleton, chưa có endpoint. |

@@ -32,6 +32,51 @@
 
 *(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
 
+## 2026-04-19 (W1 Fix — Pre-Phase 3B) — Phân biệt AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED
+
+### Xong
+- JwtTokenProvider: thêm `TokenValidationResult` enum (VALID/EXPIRED/INVALID) và `validateTokenDetailed()`. `validateToken()` cũ delegate sang đây — backward compatible.
+- Thêm package-private `generateTokenWithExpiration(User, long)` helper cho test — không hardcode JWT string.
+- JwtAuthFilter: thay `validateToken()` → `validateTokenDetailed()`. Set `request.setAttribute("jwt_expired", true)` khi EXPIRED.
+- SecurityConfig authenticationEntryPoint: check `jwt_expired` attribute, trả `AUTH_TOKEN_EXPIRED` + message tiếng Việt khi expired, `AUTH_REQUIRED` khi không có/invalid token.
+- SecurityConfigTest: thêm 2 test mới `expiredTokenShouldReturnAuthTokenExpired` và `invalidTokenShouldReturnAuthRequired`. Tổng 13/13 tests PASS (mvn test BUILD SUCCESS).
+
+### Đang dở
+- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — Phase 3B.
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `ExpiredJwtException` là subclass của `JwtException` nên phải catch nó TRƯỚC trong multi-catch — thứ tự catch quan trọng (không phải vấn đề ở đây vì dùng separate catch blocks nhưng cần nhớ nếu refactor).
+- Test dùng package-private method: SecurityConfigTest nằm cùng package `com.chatapp.security` với JwtTokenProvider nên truy cập được method package-private mà không cần reflection.
+
+## 2026-04-19 (Tuần 1, Ngày 3) — Spring Security 6 + JWT utility + GlobalExceptionHandler
+
+### Xong
+- JwtTokenProvider: generateAccessToken/RefreshToken, validateToken, getClaims, getUserIdFromToken, getJtiFromToken. jjwt 0.12.x API. Secret dùng UTF-8 bytes trực tiếp.
+- JwtAuthFilter: OncePerRequestFilter, extract Bearer token, validate, load User từ UserRepository, set SecurityContext. Không throw exception — chỉ log.warn và skip.
+- SecurityConfig: STATELESS, JWT filter, CORS từ property, authenticationEntryPoint + accessDeniedHandler trả JSON (không phải HTML). BCrypt(12) PasswordEncoder bean.
+- ErrorResponse record: shape chuẩn { error, message, timestamp, details? } với @JsonInclude(NON_NULL).
+- AppException: business exception dùng chung (HttpStatus, errorCode, message).
+- GlobalExceptionHandler: handle AppException, MethodArgumentNotValidException (với details.fields), ConstraintViolationException, generic Exception (500).
+- application.yml: update JWT secret đủ dài cho HS256, chuẩn hóa property names.
+- application-test.yml: test profile với H2 in-memory, flyway disabled.
+- JwtTokenProviderTest: 6 tests (generate, validate, expired, tampered, random). PASS.
+- SecurityConfigTest: 4 tests (health public, 401 JSON, invalid token 401, auth endpoints not 401). PASS.
+- Tổng: 11/11 tests pass (mvn test BUILD SUCCESS).
+
+### Đang dở
+- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — Ngày 4+.
+- UserDetailsService chưa implement (không cần cho filter, sẽ xem xét khi làm AuthenticationManager cho login endpoint).
+
+### Blocker
+- Không có.
+
+### Ghi chú kỹ thuật
+- `@SpringBootTest` KHÔNG có `excludeAutoConfiguration` attribute → phải dùng `properties = "spring.autoconfigure.exclude=..."`. Mất 1 lần compile fail để phát hiện. Đã ghi vào knowledge.
+- CORS: `allowedOrigins("*")` + `allowCredentials(true)` = Spring Security exception. Phải dùng origins cụ thể.
+
 ## 2026-04-19 (Tuần 1, Ngày 2) — V2 migration + JPA entities + repositories
 
 ### Xong

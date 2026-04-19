@@ -102,6 +102,26 @@ src/
 
 ---
 
+## Axios Refresh Queue Pattern
+
+Flag `isRefreshing` + `failedQueue[]` để tránh race condition khi nhiều request 401 cùng lúc.
+`processQueue(error, token)` → resolve/reject toàn bộ queue sau khi refresh done.
+Lưu ý: dùng `axios.post` (KHÔNG phải `api.post`) cho `/refresh` để tránh interceptor loop.
+Phân biệt 2 error code: `AUTH_TOKEN_EXPIRED` → refresh + retry; `AUTH_REQUIRED` → clear + redirect.
+
+## Auth Store Pattern
+
+Persist: `refreshToken` + `user` (KHÔNG persist `accessToken` vì 15 phút TTL).
+`isHydrated` flag để UI biết khi nào store đã load từ localStorage (tránh flash redirect).
+Tránh circular dep `api.ts ↔ authStore.ts`: wire `globalThis.__authStoreGetState = useAuthStore.getState` trong authStore.ts khi module load, api.ts đọc qua global thay vì import trực tiếp.
+Import authStore sớm trong `main.tsx` để đảm bảo global được wire trước khi api.ts chạy.
+
+## Zustand (set) signature
+
+Nếu không dùng `get` tham số thứ 2, bỏ hẳn: `(set) => ({...})`. Đừng dùng `_get` — ESLint vẫn báo `no-unused-vars` với underscore prefix trừ khi có rule riêng. Để tránh lỗi lint, chỉ khai báo tham số nào thực sự dùng.
+
+---
+
 ## Pitfall đã gặp (đừng lặp lại)
 
 - **TypeScript 5.8+ với `baseUrl`**: bị deprecated warning, cần thêm `"ignoreDeprecations": "6.0"` vào `tsconfig.app.json`. Không dùng `"5.0"` sẽ vẫn báo lỗi.
@@ -143,5 +163,6 @@ src/
 
 ## Changelog file này
 
+- 2026-04-19 (Ngày 3): Thêm Axios refresh queue pattern, Auth Store pattern, Zustand (set) signature pitfall.
 - 2026-04-19 (Ngày 2): Chốt design tokens (indigo-600, rounded-lg, v.v.). Ghi pattern form RHF+Zod, toast custom, feature structure auth. Thêm useToast hook.
 - 2026-04-19 (Ngày 1): Khởi tạo project Tuần 1. Ghi pitfall TypeScript deprecation và Tailwind v4 setup.

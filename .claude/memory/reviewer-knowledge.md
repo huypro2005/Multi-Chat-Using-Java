@@ -22,7 +22,7 @@
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: v0.2-auth (5 Auth endpoints: register, login, oauth, refresh, logout — chốt 2026-04-19)
+- **API_CONTRACT.md**: v0.2.1-auth (5 Auth endpoints + note phân biệt AUTH_REQUIRED vs AUTH_TOKEN_EXPIRED — chốt 2026-04-19)
 - **SOCKET_EVENTS.md**: v0.1 (skeleton, chưa có event)
 
 *(Tăng minor version khi thêm endpoint/event, major khi breaking change.)*
@@ -43,7 +43,7 @@
 *(Ghi khi phát hiện vấn đề nào đó XUẤT HIỆN NHIỀU LẦN trong review — cần nâng thành quy tắc.)*
 
 ### Vấn đề thường gặp ở BE
-- (chưa có)
+- Luôn kiểm tra phân biệt token expired vs invalid — ảnh hưởng FE refresh logic. EXPIRED phai set request attribute riêng; INVALID để SecurityContext rỗng. Không gộp chung 1 catch block.
 
 ### Vấn đề thường gặp ở FE
 - (chưa có)

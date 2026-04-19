@@ -27,6 +27,31 @@
 
 ## Entries
 
+## 2026-04-19 (Tuần 1, Ngày 3) — Register page, Axios client, Zustand auth store
+
+### Xong
+- `src/features/auth/schemas/registerSchema.ts`: Zod schema đầy đủ (email, username regex, fullName, password chữ hoa+số, confirmPassword với .refine cross-field)
+- `src/pages/RegisterPage.tsx`: form 5 field, toggle show/hide password + confirmPassword, RHF + zodResolver, loading spinner, link về /login, design tokens nhất quán với LoginPage
+- `src/lib/api.ts`: axios singleton thay thế axios.ts cũ — refresh queue pattern (isRefreshing flag + failedQueue[]), phân biệt AUTH_TOKEN_EXPIRED (refresh + retry) vs AUTH_REQUIRED (clear + redirect)
+- `src/stores/authStore.ts`: Zustand persist — refreshToken + user persist, accessToken KHÔNG persist (15 phút TTL), isHydrated flag, wire globalThis.__authStoreGetState để api.ts đọc không bị circular dep
+- `src/hooks/useAuth.ts`: hook expose user, isAuthenticated, isHydrated, logout (stub — sẽ call API Tuần 2)
+- `src/main.tsx`: bọc QueryClientProvider, import authStore sớm để wire globalThis trước api.ts
+- Xóa `src/lib/axios.ts` (placeholder cũ)
+- `npm run build`: 0 TypeScript error — PASS
+- `npm run lint`: 0 error — PASS
+
+### Đang dở
+- login / register chưa call API thật (sẽ implement Tuần 2)
+- authStore.setAuth chưa được gọi từ UI (chờ API sẵn sàng)
+
+### Blocker
+- Không có
+
+### Ghi chú kỹ thuật
+- Circular dep giữa api.ts ↔ authStore.ts: giải quyết bằng globalThis.__authStoreGetState — authStore tự wire khi module load, api.ts đọc qua global thay vì import trực tiếp
+- Dùng axios.post (không phải api.post) cho /api/auth/refresh để tránh interceptor loop
+- ESLint @typescript-eslint/no-unused-vars không chấp nhận prefix `_` nếu không có rule. Bỏ `get` hoàn toàn trong Zustand (set) => ({...}) thay vì dùng `_get`
+
 ## 2026-04-19 (Tuần 1, Ngày 2) — Login page UI tĩnh
 
 ### Xong
