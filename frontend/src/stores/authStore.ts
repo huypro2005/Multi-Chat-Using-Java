@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { tokenStorage } from '@/lib/tokenStorage'
+import { timerRegistry } from '@/features/messages/timerRegistry'
+import { editTimerRegistry } from '@/features/messages/editTimerRegistry'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,6 +60,9 @@ export const useAuthStore = create<AuthState>()(
       },
 
       clearAuth: () => {
+        // Clear pending send + edit timers để tránh stale callbacks sau logout
+        timerRegistry.clearAll()
+        editTimerRegistry.clearAll()
         // Sync tokenStorage cùng lúc để interceptor không dùng token cũ
         tokenStorage.clear()
         set({

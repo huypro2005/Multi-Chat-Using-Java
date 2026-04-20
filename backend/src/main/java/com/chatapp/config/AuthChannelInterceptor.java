@@ -221,6 +221,7 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
      */
     DestinationPolicy resolveSendPolicy(String destination) {
         if (destination.endsWith(".message")) return DestinationPolicy.STRICT_MEMBER;
+        if (destination.endsWith(".edit"))    return DestinationPolicy.STRICT_MEMBER;
         if (destination.endsWith(".typing"))  return DestinationPolicy.SILENT_DROP;
         if (destination.endsWith(".read"))    return DestinationPolicy.SILENT_DROP;
         return DestinationPolicy.STRICT_MEMBER;

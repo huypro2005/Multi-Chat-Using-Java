@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.1-w4_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4_
+_Version: v1.3-w5d2_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit message (W5-D2) thêm unified ACK queue_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -47,11 +47,12 @@ _Owner: code-reviewer (architect)_
 
 ### Client → Server (FE gửi, BE nhận)
 
-| Destination | Mô tả | Rate limit | Phase |
-|------------|-------|-----------|-------|
-| `/app/conv.{conversationId}.message` | **Gửi tin nhắn (Path B, ADR-016)** | 30 msg/phút/user | **Post-W4 / Tuần 5** |
-| `/app/conv.{conversationId}.typing` | Typing indicator | 1 event/2s/user/conv | Tuần 5 |
-| `/app/conv.{conversationId}.read` | Read receipt | 1 event/5s/user/conv | Tuần 5 |
+| Destination | Mô tả | Auth policy | Rate limit | Phase |
+|------------|-------|-------------|-----------|-------|
+| `/app/conv.{conversationId}.message` | **Gửi tin nhắn (Path B, ADR-016)** | STRICT_MEMBER | 30 msg/phút/user | **Post-W4 / Tuần 5** |
+| `/app/conv.{convId}.edit` | Edit message | STRICT_MEMBER | 10 edit/phút/user | Tuần 5 |
+| `/app/conv.{conversationId}.typing` | Typing indicator | SILENT_DROP | 1 event/2s/user/conv | Tuần 5 |
+| `/app/conv.{conversationId}.read` | Read receipt | SILENT_DROP | 1 event/5s/user/conv | Tuần 5 |
 
 ### User queues (Server → Client, sender-only)
 
@@ -120,19 +121,31 @@ Trường `type` luôn UPPERCASE snake-like. `payload` là object tự do, shape
 
 > **Tại sao BẮT BUỘC dedupe?**: Sender A gửi REST `POST /messages` → React Query `onSuccess` set message vào cache với id thật → BE ALSO broadcast MESSAGE_CREATED qua `/topic/conv.{id}` → A nhận broadcast với CÙNG id → nếu không dedupe sẽ duplicate UI. Sender B (receiver) nhận broadcast → không có trong cache → append bình thường.
 
-### 3.2 MESSAGE_UPDATED _(Tuần 6 — chưa implement)_
+### 3.2 MESSAGE_UPDATED _(Tuần 5 — W5-D2)_
 
+**Trigger**: Sau khi STOMP `/app/conv.{convId}.edit` save thành công và commit DB. Xem chi tiết flow tại **§3c**.
+
+**Destination**: `/topic/conv.{convId}` (broadcast tới tất cả members, gồm cả sender để sync UI nhiều tab).
+
+**Envelope**:
 ```json
 {
   "type": "MESSAGE_UPDATED",
   "payload": {
     "id": "uuid",
     "conversationId": "uuid",
-    "content": "edited content",
+    "content": "new content",
     "editedAt": "2026-04-20T10:05:00Z"
   }
 }
 ```
+
+**FE action khi nhận MESSAGE_UPDATED**:
+1. Parse `frame.body` → `WsEvent<MessageUpdatedPayload>`.
+2. Tìm message trong cache theo `payload.id`. Nếu không có (user chưa load conv đó) → skip.
+3. **Dedupe theo editedAt** (BẮT BUỘC): nếu `broadcast.editedAt <= cache.editedAt` → skip (broadcast cũ đến sau ACK mới, hoặc duplicate từ retry). So sánh bằng timestamp ISO8601 lexicographic (UTC Z format đồng nhất) hoặc parse Date.
+4. Nếu broadcast mới hơn → update fields `content` + `editedAt` của message tương ứng. Giữ nguyên `id`, `sender`, `createdAt`, `replyToMessage`.
+5. KHÔNG invalidate `['conversations']` trừ khi message này là `lastMessage` của conv (V1 đơn giản: luôn invalidate, sidebar tự refresh `lastMessagePreview` nếu BE trả snippet).
 
 ### 3.3 MESSAGE_DELETED _(Tuần 6 — chưa implement)_
 
@@ -225,6 +238,8 @@ TYPING_STOPPED shape giống hệt.
 ```
 
 Shape của `message` **IDENTICAL** với `MessageDto` ở REST `POST /messages` response và broadcast payload `MESSAGE_CREATED`. Reuse cùng `MessageMapper` phía BE.
+
+> **Migration W5-D2 (ADR-017)**: Shape này sẽ đổi sang `{operation: "SEND", clientId: tempId, message}` khi implement edit message, để unify với EDIT ACK. BE + FE phải deploy đồng bộ. Xem §3c.3 + ADR-017 + changelog v1.3-w5d2.
 
 ### 3b.3 Server → Client (sender-only): ERROR
 
@@ -367,6 +382,196 @@ Mỗi message trong FE cache có trường `status: 'sending' | 'sent' | 'failed
 | STOMP mất kết nối khi đang gõ | Disable send button, show banner "Mất kết nối, đang thử lại…". Queue trong @stomp/stompjs tự replay khi reconnect. |
 
 > **REST không deprecated hoàn toàn** — giữ để: (1) fallback khi STOMP bất khả dụng nhiều ngày (infra outage), (2) batch import từ CSV/migration tool, (3) bot tích hợp 3rd-party dùng HTTP không STOMP, (4) integration test dễ viết với REST hơn STOMP.
+
+---
+
+## 3c. Edit Message via STOMP — W5-D2
+
+> **Thêm W5-D2**: Cho phép user sửa tin nhắn đã gửi trong cửa sổ 5 phút kể từ `createdAt`. Dùng STOMP send (không REST) để thống nhất transport với Path B và tận dụng dedup + ACK pipeline. Broadcast kết quả qua `MESSAGE_UPDATED` trên `/topic/conv.{convId}` (đã fill §3.2).
+
+### 3c.1 Client → Server: `/app/conv.{convId}.edit`
+
+**Destination**: `/app/conv.{convId}.edit`
+
+**Auth**: STOMP `Principal` đã set ở CONNECT (xem mục 1). `AuthChannelInterceptor` enforce STRICT_MEMBER policy (§7.1) — non-member throw `MessageDeliveryException("FORBIDDEN")` → ERROR frame.
+
+**Payload**:
+```json
+{
+  "clientEditId": "uuid v4 (client-generated, dùng để dedup + ACK routing)",
+  "messageId": "uuid (real server id — message đã tồn tại)",
+  "newContent": "string (1-5000 chars, trim sau đó non-empty)"
+}
+```
+
+### 3c.2 Validation rules (server-side)
+
+1. **`clientEditId`**: bắt buộc, UUID v4 format. Reject `VALIDATION_FAILED` nếu sai.
+2. **`messageId`**: bắt buộc, UUID format. Lookup DB — nếu không tồn tại HOẶC `message.conversationId != convId` HOẶC sender không phải owner HOẶC đã bị soft-delete (`deleted_at IS NOT NULL`) → trả `MSG_NOT_FOUND` (merge các case để anti-enumeration, giống pattern REST 404).
+3. **Owner check**: `message.senderId == userId` (từ Principal). Merge với not-found → trả cùng `MSG_NOT_FOUND` — KHÔNG dùng `FORBIDDEN` để tránh tiết lộ "message tồn tại nhưng không phải của bạn".
+4. **Edit window**: `now() - message.createdAt ≤ 300 giây` (5 phút). Vượt → `MSG_EDIT_WINDOW_EXPIRED`. Dùng clock server (UTC) làm authority; clock skew xử lý ở FE (xem mục 8 Limitations).
+5. **`newContent`**: trim whitespace đầu cuối, sau đó:
+   - Rỗng hoặc toàn whitespace → `VALIDATION_FAILED`.
+   - `> 5000 chars` → `MSG_CONTENT_TOO_LONG`.
+   - `== message.content` (sau khi trim cả 2) → `MSG_NO_CHANGE` (không waste DB write + broadcast cho no-op edit).
+6. **Rate limit**: 10 edit/phút/user. Redis key `rate:msg-edit:{userId}` INCR + EX 60 (pattern ADR-005). Vượt → `MSG_RATE_LIMITED`.
+
+> **Không cho phép edit** nếu message là `type != 'TEXT'` — IMAGE/FILE/SYSTEM edit không có nghĩa. Trả `VALIDATION_FAILED` với message rõ.
+
+### 3c.3 Server → Client (sender-only): ACK — **unified `/user/queue/acks` với operation discriminator** (ADR-017)
+
+**Destination**: `/user/queue/acks` (reuse cùng queue với SEND ACK — tránh proliferation queues).
+
+**Payload**:
+```json
+{
+  "operation": "EDIT",
+  "clientId": "clientEditId (echo từ request)",
+  "message": {
+    "id": "uuid (messageId đã edit)",
+    "conversationId": "uuid",
+    "sender": { "id": "uuid", "username": "...", "fullName": "...", "avatarUrl": null },
+    "type": "TEXT",
+    "content": "new content (sau trim)",
+    "replyToMessage": null,
+    "editedAt": "2026-04-20T10:05:00Z",
+    "createdAt": "2026-04-20T10:00:00Z"
+  }
+}
+```
+
+**Discriminator contract**:
+- `operation`: `"SEND" | "EDIT"` (tương lai `"DELETE" | "REACT"` sẽ thêm). FE dùng `switch(operation)` để route handler.
+- `clientId`: tên thống nhất cho `tempId` (SEND) hoặc `clientEditId` (EDIT). Là UUID v4 client sinh, server echo nguyên văn.
+- `message`: MessageDto đầy đủ (shape IDENTICAL với REST response + broadcast payload của MESSAGE_CREATED, reuse `MessageMapper`). Với EDIT, `editedAt != null` và content là bản mới.
+
+> **Migration note (ADR-017)**: Shape SEND ACK cũ là `{tempId, message}` (xem §3b.2) — sẽ migrate sang `{operation: "SEND", clientId: tempId, message}` cùng lúc khi implement EDIT. BE + FE phải deploy đồng bộ (breaking change cho Path B hiện tại). Xem changelog v1.3-w5d2 ở cuối file.
+
+### 3c.4 Server → Client (sender-only): ERROR — **unified `/user/queue/errors` với operation discriminator**
+
+**Destination**: `/user/queue/errors`
+
+**Payload**:
+```json
+{
+  "operation": "EDIT",
+  "clientId": "clientEditId (echo từ request)",
+  "error": "string (human-readable, có thể i18n sau)",
+  "code": "MSG_NOT_FOUND | MSG_EDIT_WINDOW_EXPIRED | MSG_NO_CHANGE | MSG_CONTENT_TOO_LONG | VALIDATION_FAILED | MSG_RATE_LIMITED | AUTH_REQUIRED | INTERNAL"
+}
+```
+
+**Error code table**:
+
+| code | Điều kiện | FE action |
+|------|-----------|-----------|
+| `MSG_NOT_FOUND` | messageId không tồn tại / không thuộc conv / không phải owner / đã soft-delete | Mark edit = failed, hiện "Tin nhắn không tồn tại hoặc không thể sửa". Revert UI về content cũ. |
+| `MSG_EDIT_WINDOW_EXPIRED` | `createdAt` cách now > 5 phút | Mark failed, hiện "Đã hết thời gian sửa (5 phút)". Revert + disable nút Edit. |
+| `MSG_NO_CHANGE` | `newContent.trim() == message.content.trim()` | Mark failed nhẹ (no toast), revert UI về idle. Không xem là lỗi nghiêm trọng. |
+| `MSG_CONTENT_TOO_LONG` | `newContent > 5000 chars` sau trim | Mark failed, hiện "Nội dung quá dài (tối đa 5000 ký tự)". Giữ content đang edit để user sửa. |
+| `VALIDATION_FAILED` | clientEditId/messageId malformed, content rỗng/whitespace, message type != TEXT | Mark failed, hiện message cụ thể. Không retry. |
+| `MSG_RATE_LIMITED` | Vượt 10 edit/phút | Mark failed, hiện "Sửa quá nhanh, thử lại sau N giây". FE backoff theo `retryAfterSeconds` (nếu BE gửi kèm trong `error`). |
+| `AUTH_REQUIRED` | Principal null giữa chừng | Trigger refresh flow → reconnect. |
+| `INTERNAL` | DB down, NPE, unexpected | Mark failed, hiện "Lỗi server, thử lại sau". Cho phép user retry thủ công. |
+
+> **Dual-delivery invariant**: mỗi request `/app/conv.{id}.edit` → CHÍNH XÁC 1 response (ACK hoặc ERROR). Client timeout 10s dựa trên invariant này.
+
+### 3c.5 Dedup Strategy (server-side, Redis)
+
+- **Key**: `msg:edit-dedup:{userId}:{clientEditId}`
+- **TTL**: 60 giây (giống send — chống network retry trong window ngắn).
+- **Value**: `messageId` (echo cho ACK retry mà không cần re-query DB).
+
+**Flow** (giống §3b.4 nhưng cho operation EDIT):
+1. BE nhận STOMP frame từ `/app/conv.{id}.edit`.
+2. Validate payload shape (tempId/clientEditId + messageId UUID + content length).
+3. Authorize member (interceptor đã check STRICT_MEMBER ở SEND; service-level cũng kiểm tra lại — defense in depth).
+4. `SET msg:edit-dedup:{userId}:{clientEditId} <placeholder> NX EX 60` atomic:
+   - Nếu return 0 (duplicate): GET value → nếu != "PENDING" → load Message từ DB, map DTO, re-send ACK. Nếu == "PENDING" → log WARN + silent drop (client sẽ timeout retry với clientEditId MỚI).
+5. Nếu return 1 (mới): chạy validation nghiệp vụ (owner check, edit window, no-change, rate limit) → update `message.content` + `message.editedAt = now()` trong `@Transactional` → update dedup value với `messageId` (TTL giữ 60s) → publish `MessageUpdatedEvent` → ACK trong `afterCommit`.
+
+> **BLOCKING checks** (giống 3b.4):
+> - `SET NX EX` atomic — không tách SETNX + EXPIRE.
+> - Dedup TRƯỚC transaction DB (không sau).
+> - ACK + broadcast trong `afterCommit` để không bay trước rollback.
+
+### 3c.6 FE State Machine (edit lifecycle)
+
+Mỗi message có thêm field `editState: 'idle' | 'editing' | 'saving' | 'error'` (ngoài `status` đã có cho send).
+
+```
+  idle
+    │ click "Edit" button
+    ▼
+  editing                    (user đang gõ trong textarea inline)
+    │ click "Save"
+    │ generate clientEditId = UUID v4
+    │ publish /app/conv.{id}.edit
+    │ start 10s timer
+    ▼
+  saving
+    │
+    ├── ACK received (operation="EDIT", clientId matches)
+    │      │
+    │      ▼
+    │    saved → idle       (update content + editedAt, clear clientEditId)
+    │
+    ├── ERROR received
+    │      │
+    │      ▼
+    │    error              (keep editing textarea content, show code + message)
+    │      │
+    │      ├── click retry → saving (new clientEditId, republish)
+    │      └── click cancel → idle  (revert to original content)
+    │
+    └── 10s timeout
+           │
+           ▼
+         error (failureCode = "TIMEOUT")
+```
+
+**Chi tiết từng bước**:
+1. **Click Edit**: set `editState = 'editing'`, clone `message.content` vào local `draftContent`.
+2. **Click Save**: generate `clientEditId = crypto.randomUUID()`, publish frame `{clientEditId, messageId, newContent: draftContent}`, set `editState = 'saving'`, start 10s timer. KHÔNG update UI content ngay (chờ ACK) — tránh flash nếu server reject.
+3. **ACK received**: clear timer, update message fields (`content`, `editedAt`) từ `ack.message`, clear `clientEditId`, set `editState = 'idle'`.
+4. **ERROR received**: clear timer, set `editState = 'error'`, lưu `failureCode + failureReason`. UI hiện inline error trên textarea, giữ `draftContent` để user sửa tiếp hoặc cancel.
+5. **Timeout 10s**: set `editState = 'error'` với `failureCode = 'TIMEOUT'`, message "Server không phản hồi".
+6. **Cancel**: discard `draftContent`, set `editState = 'idle'`, content về bản gốc.
+
+> **BLOCKING check FE**:
+> - Timer PHẢI clear trong CẢ 3 branch (ACK, ERROR, timeout) — leak timer khi user edit 10 lần liên tiếp = 10 timer pending.
+> - Routing ACK/ERROR PHẢI dựa trên `operation` field (ADR-017). Không gộp chung với SEND ACK handler — sẽ patch sai cache (ví dụ replace tempId message bằng edit message).
+> - `clientEditId` trong ACK PHẢI match với client's current edit session. Nếu user đã cancel nhưng ACK về muộn → skip (editState != 'saving').
+
+### 3c.7 Broadcast — `MESSAGE_UPDATED` (reuse §3.2)
+
+Spec đầy đủ tại §3.2. Tóm tắt flow BE:
+
+1. Service `editMessage` update DB thành công trong `@Transactional`.
+2. Publish `MessageUpdatedEvent(convId, messageDto)`.
+3. `MessageBroadcaster` `@TransactionalEventListener(AFTER_COMMIT)` → `convertAndSend("/topic/conv.{convId}", {type: "MESSAGE_UPDATED", payload: {id, conversationId, content, editedAt}})`.
+
+**Payload shape** (Broadcast): minimal — chỉ fields thay đổi.
+```json
+{
+  "type": "MESSAGE_UPDATED",
+  "payload": {
+    "id": "uuid",
+    "conversationId": "uuid",
+    "content": "new content",
+    "editedAt": "ISO8601"
+  }
+}
+```
+
+Lý do payload minimal (không phải MessageDto đầy đủ): receiver đã có message trong cache — chỉ cần update 2 field thay đổi. Giảm payload size cho group lớn.
+
+**FE dedupe invariant**: nếu `broadcast.editedAt <= cache.editedAt` → skip (có thể là broadcast cũ đến sau edit mới của chính user — rare nhưng có thể với 2 tab).
+
+### 3c.8 Interaction với các tab khác của cùng user
+
+- **Sender tab khác**: nhận MESSAGE_UPDATED broadcast (vì subscribe cùng `/topic/conv.{id}`), update cache qua handler MESSAGE_UPDATED (§3.2). KHÔNG nhận ACK vì ACK là user-queue session-scoped? **Caveat**: Spring `convertAndSendToUser` gửi tới TẤT CẢ sessions của user đó → cả tab A và tab B đều nhận ACK. Tab B không có session edit active → route handler check `clientEditId not in activeEditSessions` → ignore ACK. Đây là lý do FE cần module-level `editTimerRegistry` (tương tự `timerRegistry` cho send): tab A store `clientEditId`, tab B không có → tab B bỏ qua ACK.
+- **Receiver (user khác)**: chỉ nhận broadcast MESSAGE_UPDATED, không nhận ACK (queue khác user). Update UI bình thường qua handler §3.2.
 
 ---
 
@@ -935,6 +1140,8 @@ BE gửi STOMP ERROR frame với header `message` chứa error code. FE map theo
 | Dedup key TTL = 60s | Retry sau 60s sẽ tạo message duplicate | FE tempId mới mỗi retry — không reuse | Acceptable V1 |
 | Client timeout cố định 10s | Request slow hợp lệ có thể bị mark failed | FE retry tempId mới — server dedup chống duplicate trong 60s | Acceptable V1 |
 | `@TransactionalEventListener(AFTER_COMMIT)` không re-fire khi listener crash | Broadcast có thể miss nếu broker thread chết | Try-catch toàn bộ trong listener, log lỗi nhưng không propagate (REST 201 / ACK đã trả) | V2 retry queue nếu cần |
+| Edit message 5 phút window tính từ `createdAt` | Sau 5 phút không sửa được; clock skew client/server có thể gây race ở ranh giới | FE disable nút Edit sớm hơn (ở giây 290 / 4:50) thay vì đợi tới 300 — tránh user bấm Save ở 4:59 và server reject vì clock skew 2s. Authority là server clock (UTC). | V2 cân nhắc tăng window hoặc cho phép admin override |
+| Unified ACK queue `/user/queue/acks` gửi tới TẤT CẢ sessions của cùng user | Tab không active edit vẫn nhận ACK của tab khác | FE check `clientId` in local `editTimerRegistry` → ignore nếu không match session | Acceptable V1 |
 
 ---
 
@@ -945,6 +1152,7 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 - **ADR-014** _(Superseded bởi ADR-016)_: W4 chọn REST-gửi + STOMP-broadcast cho đơn giản, không dùng tempId inbound.
 - **ADR-015**: SimpleBroker → RabbitMQ V2 khi scale >1 BE instance hoặc cần persistent queue.
 - **ADR-016**: Chuyển path gửi tin từ REST → STOMP (Path B). Client gửi qua `/app/conv.{id}.message` với tempId, server ACK qua `/user/queue/acks`, ERROR qua `/user/queue/errors`. Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s. REST giữ cho batch/bot/fallback.
+- **ADR-017**: **Unified ACK/ERROR queue với `operation` discriminator** thay vì tách queue per operation (`/user/queue/acks-edit`, `/user/queue/acks-delete`, ...). Payload shape: `{operation: "SEND"|"EDIT"|"DELETE"|"REACT", clientId: UUID, message|error, ...}`. Lý do: (1) tránh proliferation queues khi thêm operation (DELETE, REACT, REPLY), (2) FE routing đơn giản qua `switch(operation)` một chỗ thay vì mount N subscription, (3) giữ `/user/queue/acks` + `/user/queue/errors` làm 2 entry-point duy nhất cho mọi operation client-initiated. Trade-off: SEND ACK shape cũ `{tempId, message}` phải migrate breaking — BE + FE deploy đồng bộ. `tempId` rename thành `clientId` ở contract mới (generic hơn), nhưng giá trị vẫn là UUID v4 client sinh. Ngày: 2026-04-20 (W5-D2).
 
 ---
 
@@ -1018,3 +1226,4 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 | 2026-04-19 | v1.0-draft-w4 | Draft contract W4: REST-gửi + STOMP-broadcast model. `/topic/conv.{id}` + `MESSAGE_CREATED` event shape IDENTICAL với `POST /messages` REST response. BE implementation guide (WebSocketConfig + AuthChannelInterceptor + `@TransactionalEventListener(AFTER_COMMIT)`). FE guide (stompClient singleton + useConvSubscription hook với dedupe bắt buộc). Security: message size 64KB, origin từ config, member check ở SUBSCRIBE. Limitations V1 documented. Placeholder MESSAGE_UPDATED/DELETED (W6), TYPING/PRESENCE (W5). |
 | 2026-04-20 | v1.1-w4 | **Path B (ADR-016)**: Chuyển send path từ REST → STOMP. Thêm inbound `/app/conv.{convId}.message` với payload `{tempId, content, type}`. Thêm 2 user queue `/user/queue/acks` (payload `{tempId, message}`) + `/user/queue/errors` (payload `{tempId, error, code}`). Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s atomic SET NX EX. FE tempId lifecycle state machine: optimistic → ACK/ERROR/timeout 10s. BE handler + `@MessageExceptionHandler` pattern. Rate limit 30/phút khớp REST. REST `POST /messages` không deprecated — giữ cho batch/bot/fallback. Error codes mới: MSG_CONTENT_TOO_LONG, MSG_RATE_LIMITED, FORBIDDEN, INTERNAL. Bỏ "draft" suffix vì contract đã được accept sau W4D4. |
 | 2026-04-20 | v1.2-w5d1 | **Destination-aware auth policy (W5-D1)**: Thêm mục 7.1 Destination Policy Table. `AuthChannelInterceptor.handleSend()` refactored với `DestinationPolicy` enum: `.message` → STRICT_MEMBER (throw FORBIDDEN), `.typing` + `.read` → SILENT_DROP (pass through, handler tự xử lý). Không còn throw FORBIDDEN cho `.typing` — fix spec mismatch (typing phải silent drop, không ERROR frame). |
+| 2026-04-20 | v1.3-w5d2 | **Edit Message via STOMP (W5-D2)** + **Unified ACK queue (ADR-017)**. Thêm inbound `/app/conv.{convId}.edit` với payload `{clientEditId, messageId, newContent}`. Fill §3.2 MESSAGE_UPDATED đầy đủ (trước đây là placeholder W6, nay dời sang W5). Thêm §3c toàn bộ spec: validation (UUID, 1-5000, 5 phút window, owner + not-found merge chống enumeration, no-change check, TEXT-only), ACK shape mới `{operation: "SEND"|"EDIT", clientId, message}` thay thế shape cũ `{tempId, message}` (breaking — BE + FE deploy đồng bộ), ERROR shape mới `{operation, clientId, error, code}`. Error codes mới: `MSG_NOT_FOUND`, `MSG_EDIT_WINDOW_EXPIRED`, `MSG_NO_CHANGE`. Dedup Redis key `msg:edit-dedup:{userId}:{clientEditId}` TTL 60s atomic SET NX EX (giống send). Rate limit 10 edit/phút/user (`rate:msg-edit:{userId}`). FE state machine idle → editing → saving → saved/error với timer 10s. Thêm row mới vào destinations table (§2) + §7.1 Destination Policy Table (STRICT_MEMBER cho `.edit`). Thêm limitation về clock skew edit window (FE disable sớm ở 4:50) + unified queue multi-session caveat. ADR-017 thêm vào §9. Broadcast MESSAGE_UPDATED giữ minimal payload (id + conversationId + content + editedAt) — không phải MessageDto đầy đủ. FE dedup broadcast theo `editedAt` timestamp. |

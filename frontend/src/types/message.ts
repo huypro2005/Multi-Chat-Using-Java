@@ -34,6 +34,11 @@ export interface MessageDto {
   replyToMessage: ReplyPreviewDto | null
   editedAt: string | null // ISO8601
   createdAt: string // ISO8601
+  // Optimistic / Path B fields — chỉ set trên client, không có trong REST response
+  clientTempId?: string
+  status?: 'sending' | 'sent' | 'failed'
+  failureCode?: string
+  failureReason?: string
 }
 
 export interface MessageListResponse {
@@ -48,8 +53,42 @@ export interface SendMessageRequest {
   replyToMessageId?: string // UUID, optional
 }
 
-// Optimistic message (trước khi BE confirm)
-export interface OptimisticMessage extends MessageDto {
-  tempId: string
-  status: 'SENDING' | 'FAILED'
+// Optimistic message (trước khi BE confirm) — Path B (ADR-016)
+export interface OptimisticMessage extends Omit<MessageDto, 'status'> {
+  clientTempId: string
+  status: 'sending' | 'failed'
 }
+
+// ---------------------------------------------------------------------------
+// Unified ACK/ERROR envelope (ADR-017) — breaking change từ {tempId, message}
+// operation discriminator dùng để route handler trong useAckErrorSubscription
+// ---------------------------------------------------------------------------
+export interface AckEnvelope {
+  operation: 'SEND' | 'EDIT' | 'DELETE'
+  clientId: string // tempId cho SEND, clientEditId cho EDIT
+  message: MessageDto
+}
+
+export interface ErrorEnvelope {
+  operation: 'SEND' | 'EDIT' | 'DELETE'
+  clientId: string
+  error: string
+  code: string
+}
+
+// Legacy — giữ lại để không break import cũ nếu có, nhưng sẽ dùng AckEnvelope/ErrorEnvelope
+/** @deprecated Use AckEnvelope instead */
+export interface AckPayload {
+  tempId: string
+  message: MessageDto
+}
+
+/** @deprecated Use ErrorEnvelope instead */
+export interface ErrorPayload {
+  tempId: string
+  error: string
+  code: string
+}
+
+// Edit state cho optimistic UI
+export type EditStatus = 'idle' | 'editing' | 'saving' | 'saved' | 'error'

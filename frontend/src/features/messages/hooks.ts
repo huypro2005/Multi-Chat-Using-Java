@@ -1,8 +1,12 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { useCallback } from 'react'
 import { messageKeys } from '../conversations/queryKeys'
-import { getMessages, sendMessage } from './api'
-import type { MessageDto, MessageListResponse, SendMessageRequest } from '@/types/message'
+import { getMessages } from './api'
+import { timerRegistry } from './timerRegistry'
+import type { MessageDto, MessageListResponse } from '@/types/message'
 import { useAuthStore } from '@/stores/authStore'
+import { publishConversationMessage } from '@/lib/stompClient'
+import { getStompClient } from '@/lib/stompClient'
 
 // ---------------------------------------------------------------------------
 // useMessages — cursor-based infinite query (oldest first, scroll-up to load more)
@@ -20,26 +24,115 @@ export function useMessages(convId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// useSendMessage — mutation với optimistic update
+// Cache helpers
+// ---------------------------------------------------------------------------
+
+type InfiniteCache = { pages: MessageListResponse[]; pageParams: unknown[] } | undefined
+
+/**
+ * Append message vào page cuối cùng của infinite cache.
+ * Tương tự appendToCache trong useConvSubscription nhưng không dedupe bằng id
+ * (optimistic message chưa có real id).
+ */
+function appendToInfiniteCache(old: InfiniteCache, msg: MessageDto): InfiniteCache {
+  if (!old) return old
+  const pages = [...old.pages]
+  if (pages.length === 0) return old
+  // Append vào page đầu (newest window) — nhất quán với pattern cũ
+  pages[0] = {
+    ...pages[0],
+    items: [...pages[0].items, msg],
+  }
+  return { ...old, pages }
+}
+
+/**
+ * Patch message có id === messageId (real server id) với các fields mới.
+ * Dùng cho edit operation — khác patchMessageByTempId dùng clientTempId.
+ */
+export function patchMessageById(
+  old: InfiniteCache,
+  messageId: string,
+  patch: Partial<MessageDto>,
+): InfiniteCache {
+  if (!old) return old
+  const pages = old.pages.map((page) => {
+    const idx = page.items.findIndex((m) => m.id === messageId)
+    if (idx === -1) return page
+    const nextItems = [...page.items]
+    nextItems[idx] = { ...nextItems[idx], ...patch }
+    return { ...page, items: nextItems }
+  })
+  return { ...old, pages }
+}
+
+/**
+ * Patch message có clientTempId === tempId với các fields mới.
+ * Duyệt tất cả pages để find + patch.
+ */
+export function patchMessageByTempId(
+  old: InfiniteCache,
+  tempId: string,
+  patch: Partial<MessageDto>,
+): InfiniteCache {
+  if (!old) return old
+  const pages = old.pages.map((page) => {
+    const idx = page.items.findIndex((m) => m.clientTempId === tempId)
+    if (idx === -1) return page
+    const nextItems = [...page.items]
+    nextItems[idx] = { ...nextItems[idx], ...patch }
+    return { ...page, items: nextItems }
+  })
+  return { ...old, pages }
+}
+
+/**
+ * Replace message có clientTempId === tempId bằng real message từ ACK.
+ * Xoá clientTempId + đặt status='sent'.
+ */
+export function replaceTempWithReal(
+  old: InfiniteCache,
+  tempId: string,
+  realMsg: MessageDto,
+): InfiniteCache {
+  if (!old) return old
+  const pages = old.pages.map((page) => {
+    const idx = page.items.findIndex((m) => m.clientTempId === tempId)
+    if (idx === -1) return page
+    const nextItems = [...page.items]
+    // Replace toàn bộ bằng real message, thêm status='sent', xoá clientTempId
+    nextItems[idx] = { ...realMsg, status: 'sent', clientTempId: undefined }
+    return { ...page, items: nextItems }
+  })
+  return { ...old, pages }
+}
+
+// ---------------------------------------------------------------------------
+// SEND_TIMEOUT_MS — 10 giây (khớp contract mục 3b.4)
+// ---------------------------------------------------------------------------
+const SEND_TIMEOUT_MS = 10_000
+
+// ---------------------------------------------------------------------------
+// useSendMessage — Path B (ADR-016): gửi qua STOMP với tempId + optimistic update
 // ---------------------------------------------------------------------------
 export function useSendMessage(convId: string) {
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
 
-  return useMutation({
-    mutationFn: (data: SendMessageRequest) => sendMessage(convId, data),
+  const sendMessage = useCallback(
+    (content: string): { tempId: string } => {
+      const client = getStompClient()
+      if (!client?.connected) {
+        throw new Error('STOMP_NOT_CONNECTED')
+      }
 
-    onMutate: async (variables) => {
-      // Cancel in-flight refetches để tránh optimistic bị overwrite
-      await queryClient.cancelQueries({ queryKey: messageKeys.all(convId) })
+      // 1. Generate tempId (UUID v4)
+      const tempId = crypto.randomUUID()
 
-      // Snapshot current cache để rollback nếu fail
-      const snapshot = queryClient.getQueryData(messageKeys.all(convId))
-
-      // Tạo tempId và optimistic message
-      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      // 2. Tạo optimistic message với status='sending'
       const optimisticMsg: MessageDto = {
-        id: tempId,
+        id: tempId, // tạm dùng tempId làm id để MessageItem render key
+        clientTempId: tempId,
         conversationId: convId,
         sender: {
           id: user?.id ?? '',
@@ -47,59 +140,51 @@ export function useSendMessage(convId: string) {
           fullName: user?.fullName ?? 'Bạn',
           avatarUrl: user?.avatarUrl ?? null,
         },
-        type: variables.type ?? 'TEXT',
-        content: variables.content,
+        type: 'TEXT',
+        content,
         replyToMessage: null,
         editedAt: null,
         createdAt: new Date().toISOString(),
+        status: 'sending',
       }
 
-      // Append vào last page của infinite query
-      queryClient.setQueryData(
-        messageKeys.all(convId),
-        (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) => {
-          if (!old) return old
-          const pages = [...old.pages]
-          const lastIdx = pages.length - 1
-          if (lastIdx < 0) return old
-          pages[lastIdx] = {
-            ...pages[lastIdx],
-            items: [...pages[lastIdx].items, optimisticMsg],
-          }
-          return { ...old, pages }
-        },
+      // 3. Cancel in-flight refetches để tránh race với optimistic
+      void queryClient.cancelQueries({ queryKey: messageKeys.all(convId) })
+
+      // 4. Append vào cache
+      queryClient.setQueryData(messageKeys.all(convId), (old: InfiniteCache) =>
+        appendToInfiniteCache(old, optimisticMsg),
       )
 
-      return { snapshot, tempId }
-    },
+      // 5. Publish STOMP frame
+      publishConversationMessage(convId, { tempId, content, type: 'TEXT' })
 
-    onError: (_err, _vars, context) => {
-      // Rollback về snapshot trước khi optimistic update
-      if (context?.snapshot !== undefined) {
-        queryClient.setQueryData(messageKeys.all(convId), context.snapshot)
-      }
-    },
-
-    onSuccess: (realMsg, _vars, context) => {
-      // Thay thế optimistic message (id = tempId) bằng message thật từ BE
-      queryClient.setQueryData(
-        messageKeys.all(convId),
-        (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) => {
+      // 6. Start 10s timeout timer
+      const timerId = window.setTimeout(() => {
+        // Chỉ mark failed nếu vẫn còn 'sending' (tránh race với ACK muộn)
+        queryClient.setQueryData(messageKeys.all(convId), (old: InfiniteCache) => {
           if (!old) return old
-          const pages = old.pages.map((page) => ({
-            ...page,
-            items: page.items.map((item) =>
-              item.id === context?.tempId ? realMsg : item,
-            ),
-          }))
-          return { ...old, pages }
-        },
-      )
-    },
+          // Check xem message này có còn 'sending' không
+          const stillSending = old.pages.some((p) =>
+            p.items.some((m) => m.clientTempId === tempId && m.status === 'sending'),
+          )
+          if (!stillSending) return old
+          return patchMessageByTempId(old, tempId, {
+            status: 'failed',
+            failureCode: 'TIMEOUT',
+            failureReason: 'Server không phản hồi sau 10 giây',
+          })
+        })
+        timerRegistry.clear(tempId) // xoá entry sau khi timer fires
+      }, SEND_TIMEOUT_MS)
 
-    onSettled: () => {
-      // Invalidate conversations list để sidebar cập nhật lastMessageAt
-      void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      // 7. Lưu timer + convId vào registry
+      timerRegistry.set(tempId, { timerId, convId })
+
+      return { tempId }
     },
-  })
+    [convId, queryClient, user],
+  )
+
+  return sendMessage
 }

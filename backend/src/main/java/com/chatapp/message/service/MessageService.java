@@ -7,18 +7,25 @@ import com.chatapp.exception.AppException;
 import com.chatapp.message.dto.*;
 import com.chatapp.message.entity.Message;
 import com.chatapp.message.enums.MessageType;
+import com.chatapp.message.event.MessageCreatedEvent;
+import com.chatapp.message.event.MessageUpdatedEvent;
 import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -27,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -34,13 +42,22 @@ import java.util.concurrent.TimeUnit;
 public class MessageService {
 
     private static final int RATE_LIMIT_PER_MINUTE = 30;
-    private static final int CONTENT_PREVIEW_MAX_LENGTH = 100;
+    private static final int EDIT_RATE_LIMIT_PER_MINUTE = 10;
+    private static final int CONTENT_MAX_LENGTH = 5000;
+    private static final long EDIT_WINDOW_SECONDS = 300; // 5 minutes
+    private static final Duration DEDUP_TTL = Duration.ofSeconds(60);
+    private static final Pattern UUID_PATTERN =
+            Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    Pattern.CASE_INSENSITIVE);
 
     private final MessageRepository messageRepository;
     private final ConversationMemberRepository memberRepository;
     private final ConversationRepository conversationRepository;
     private final UserRepository userRepository;
     private final StringRedisTemplate redisTemplate;
+    private final MessageMapper messageMapper;
+    private final ApplicationEventPublisher eventPublisher;
+    private final SimpMessagingTemplate messagingTemplate;
 
     // =========================================================================
     // sendMessage
@@ -101,7 +118,112 @@ public class MessageService {
 
         // Load full message for mapping (reload to get eager sender/replyTo)
         Message saved = messageRepository.findById(message.getId()).orElseThrow();
-        return toMessageDto(saved);
+        MessageDto dto = messageMapper.toDto(saved);
+        eventPublisher.publishEvent(new MessageCreatedEvent(convId, dto));
+        return dto;
+    }
+
+    // =========================================================================
+    // sendViaStomp — Path B (ADR-016)
+    // =========================================================================
+
+    /**
+     * Handles STOMP inbound message from /app/conv.{convId}.message.
+     *
+     * Flow:
+     *  1. Validate payload (tempId UUID format, content 1..5000 chars non-blank)
+     *  2. Authorize: sender must be member of conversation
+     *  3. Rate limit: 30 msg/min/user via Redis INCR
+     *  4. Dedup: SET NX EX 60 on key msg:dedup:{userId}:{tempId}
+     *     - If key already exists (duplicate/retry frame): re-send ACK idempotently
+     *     - If key is new: save DB, update dedup value to real messageId
+     *  5. Publish MessageCreatedEvent → broadcaster sends broadcast AFTER_COMMIT
+     *  6. Send ACK to /user/queue/acks AFTER_COMMIT via TransactionSynchronization
+     *
+     * tempId is propagated through AppException.details so @MessageExceptionHandler
+     * can echo it back in the ERROR frame.
+     */
+    @Transactional
+    public void sendViaStomp(UUID convId, UUID userId, SendMessagePayload payload) {
+        String tempId = payload.tempId();
+
+        // Step 1: Validate
+        validateStompPayload(payload, tempId);
+        // log.info("[STOMP] Payload validated for userId={}, convId={}, tempId={}", userId, convId, tempId);
+        // Step 2: Authorize (anti-enumeration: 404 for both non-member and non-existent conv)
+        if (!memberRepository.existsByConversation_IdAndUser_Id(convId, userId)) {
+            throw new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
+                    "Không tìm thấy cuộc trò chuyện",
+                    Map.of("tempId", tempId));
+        }
+
+        // Step 3: Rate limit (fail-open when Redis down)
+        checkStompRateLimit(userId, tempId);
+
+        // Step 4: Dedup — SET NX EX (atomic, must run BEFORE save)
+        String dedupKey = "msg:dedup:" + userId + ":" + tempId;
+        Boolean isNew = redisTemplate.opsForValue()
+                .setIfAbsent(dedupKey, "PENDING", DEDUP_TTL);
+
+        if (Boolean.FALSE.equals(isNew)) {
+            // Key already exists → duplicate frame or retry
+            handleDuplicateFrame(userId, tempId, dedupKey);
+            return;
+        }
+
+        // Step 5: Save DB
+        User sender = userRepository.getReferenceById(userId);
+        Conversation conversation = conversationRepository.getReferenceById(convId);
+
+        Message message = Message.builder()
+                .conversation(conversation)
+                .sender(sender)
+                .type(MessageType.TEXT)
+                .content(payload.content().trim())
+                .build();
+
+        message = messageRepository.save(message);
+        // log.info("[STOMP] Message saved for userId={}, convId={}, tempId={}, messageId={}",
+        //         userId, convId, tempId, message.getId());
+
+        // Update dedup value to real messageId (TTL preserved via SET with KEEPTTL not available
+        // in Spring Data Redis — use setIfPresent with same TTL as fallback; race window acceptable)
+        redisTemplate.opsForValue().set(dedupKey, message.getId().toString(), DEDUP_TTL);
+        // log.info("[STOMP] Dedup redis key updated for userId={}, tempId={}, messageId={}", userId, tempId, message.getId());
+
+        // Update conversation.lastMessageAt
+        Conversation conv = conversationRepository.findById(convId).orElseThrow();
+        conv.touchLastMessage(message.getCreatedAt());
+        conversationRepository.save(conv);
+
+        // Reload to get eager associations for mapper
+        Message saved = messageRepository.findById(message.getId()).orElseThrow();
+        MessageDto dto = messageMapper.toDto(saved);
+
+        // Step 6: Publish broadcast event (broadcaster handles AFTER_COMMIT)
+        // log.info("[STOMP] Publishing message created event for userId={}, convId={}, tempId={}", userId, convId, tempId);
+        eventPublisher.publishEvent(new MessageCreatedEvent(convId, dto));
+
+        // Step 7: Send ACK AFTER_COMMIT — avoid ACK before potential rollback
+        // log.info("[STOMP] Registering transaction synchronization for ACK, userId={}, convId={}, tempId={}",
+        //         userId, convId, tempId);
+        final String ackTempId = tempId;
+        final String ackUserId = userId.toString();
+        final MessageDto ackDto = dto;
+        // log.info("[STOMP] Checking transaction synchronization active for userId={}, tempId={}: {}",
+        //         userId, tempId, TransactionSynchronizationManager.isSynchronizationActive());
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    sendAck(ackUserId, ackTempId, ackDto);
+                }
+            });
+        } else {
+            // Fallback: no active transaction (e.g. called outside @Transactional in tests)
+            // log.warn("[STOMP] No active transaction synchronization — sending ACK immediately for tempId={}", ackTempId);
+            sendAck(ackUserId, ackTempId, ackDto);
+        }
     }
 
     // =========================================================================
@@ -161,9 +283,117 @@ public class MessageService {
                     .toString();
         }
 
-        List<MessageDto> dtos = pageItems.stream().map(this::toMessageDto).toList();
+        List<MessageDto> dtos = pageItems.stream().map(messageMapper::toDto).toList();
 
         return new MessageListResponse(dtos, hasMore, nextCursor);
+    }
+
+    // =========================================================================
+    // editViaStomp — Edit message via STOMP (W5-D2)
+    // =========================================================================
+
+    /**
+     * Handles STOMP inbound edit from /app/conv.{convId}.edit.
+     *
+     * Flow per contract SOCKET_EVENTS.md §3c.5:
+     *  1. Validate clientEditId (UUID format) and newContent (1..5000, non-blank)
+     *  2. Rate limit: 10 edit/min/user via Redis INCR on rate:msg-edit:{userId}
+     *  3. Dedup: SET NX EX 60 on key msg:edit-dedup:{userId}:{clientEditId}
+     *     - Duplicate found: if value != PENDING → re-send ACK idempotently; if PENDING → silent drop
+     *  4. Load message by messageId:
+     *     - null / wrong conv / not owner / soft-deleted → MSG_NOT_FOUND (anti-enumeration)
+     *  5. Check edit window: now() - message.createdAt > 300s → MSG_EDIT_WINDOW_EXPIRED
+     *  6. Check no-op: newContent.trim().equals(message.content.trim()) → MSG_NO_CHANGE
+     *  7. Update message in @Transactional + update dedup value to messageId
+     *  8. Publish MessageUpdatedEvent → broadcaster sends MESSAGE_UPDATED AFTER_COMMIT
+     *  9. Send ACK to /user/queue/acks {operation:"EDIT", clientId, message} AFTER_COMMIT
+     */
+    @Transactional
+    public void editViaStomp(UUID convId, UUID userId, EditMessagePayload payload) {
+        String clientEditId = payload.clientEditId();
+
+        // Step 1: Validate clientEditId and newContent
+        validateEditPayload(payload, clientEditId);
+
+        // Step 2: Rate limit for edits (fail-open when Redis down)
+        checkEditRateLimit(userId, clientEditId);
+
+        // Step 3: Dedup — SET NX EX (atomic, must run BEFORE any DB mutation)
+        String dedupKey = "msg:edit-dedup:" + userId + ":" + clientEditId;
+        Boolean isNew = redisTemplate.opsForValue()
+                .setIfAbsent(dedupKey, "PENDING", DEDUP_TTL);
+
+        if (Boolean.FALSE.equals(isNew)) {
+            handleDuplicateEditFrame(userId, clientEditId, dedupKey);
+            return;
+        }
+
+        // Step 4: Load message — anti-enumeration: merge all not-found/not-owner cases → MSG_NOT_FOUND
+        Message message = messageRepository.findById(payload.messageId()).orElse(null);
+
+        if (message == null
+                || !message.getConversation().getId().equals(convId)
+                || message.getSender() == null
+                || !message.getSender().getId().equals(userId)
+                || message.getDeletedAt() != null) {
+            // Clear the dedup key so the client can retry with same clientEditId if it was a transient issue
+            // (but really this is a permanent failure so dedup key expiry is fine too)
+            throw new AppException(HttpStatus.NOT_FOUND, "MSG_NOT_FOUND",
+                    "Tin nhắn không tồn tại hoặc không thể sửa",
+                    Map.of("clientEditId", clientEditId));
+        }
+
+        // Step 5: Check edit window (5 minutes from createdAt)
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        long secondsSinceCreated = java.time.Duration.between(
+                message.getCreatedAt().atZoneSameInstant(ZoneOffset.UTC).toOffsetDateTime(),
+                now
+        ).getSeconds();
+
+        if (secondsSinceCreated > EDIT_WINDOW_SECONDS) {
+            throw new AppException(HttpStatus.UNPROCESSABLE_ENTITY, "MSG_EDIT_WINDOW_EXPIRED",
+                    "Đã hết thời gian sửa tin nhắn (5 phút)",
+                    Map.of("clientEditId", clientEditId));
+        }
+
+        // Step 6: No-op check
+        String trimmedNew = payload.newContent().trim();
+        String trimmedOld = message.getContent() != null ? message.getContent().trim() : "";
+        if (trimmedNew.equals(trimmedOld)) {
+            throw new AppException(HttpStatus.UNPROCESSABLE_ENTITY, "MSG_NO_CHANGE",
+                    "Nội dung không thay đổi",
+                    Map.of("clientEditId", clientEditId));
+        }
+
+        // Step 7: Update message
+        message.setContent(trimmedNew);
+        message.setEditedAt(now);
+        message = messageRepository.save(message);
+
+        // Update dedup value to real messageId (so retry can re-send ACK idempotently)
+        redisTemplate.opsForValue().set(dedupKey, message.getId().toString(), DEDUP_TTL);
+
+        // Reload for mapper to get eager associations
+        Message saved = messageRepository.findById(message.getId()).orElseThrow();
+        MessageDto dto = messageMapper.toDto(saved);
+
+        // Step 8: Publish broadcast event (AFTER_COMMIT)
+        eventPublisher.publishEvent(new MessageUpdatedEvent(convId, dto));
+
+        // Step 9: Send ACK AFTER_COMMIT
+        final String ackClientEditId = clientEditId;
+        final String ackUserId = userId.toString();
+        final MessageDto ackDto = dto;
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    sendEditAck(ackUserId, ackClientEditId, ackDto);
+                }
+            });
+        } else {
+            sendEditAck(ackUserId, ackClientEditId, ackDto);
+        }
     }
 
     // =========================================================================
@@ -190,40 +420,213 @@ public class MessageService {
         }
     }
 
-    private MessageDto toMessageDto(Message message) {
-        SenderDto senderDto = null;
-        if (message.getSender() != null) {
-            User sender = message.getSender();
-            senderDto = new SenderDto(
-                    sender.getId(),
-                    sender.getUsername(),
-                    sender.getFullName(),
-                    sender.getAvatarUrl()
-            );
-        }
-
-        ReplyPreviewDto replyPreview = null;
-        if (message.getReplyToMessage() != null) {
-            Message replyMsg = message.getReplyToMessage();
-            String senderName = replyMsg.getSender() != null
-                    ? replyMsg.getSender().getFullName()
-                    : "Deleted User";
-            String contentPreview = replyMsg.getContent();
-            if (contentPreview != null && contentPreview.length() > CONTENT_PREVIEW_MAX_LENGTH) {
-                contentPreview = contentPreview.substring(0, CONTENT_PREVIEW_MAX_LENGTH) + "...";
+    /**
+     * Rate limit for STOMP path — same quota as REST but throws MSG_RATE_LIMITED
+     * (distinct from REST RATE_LIMITED so FE can show correct error message).
+     */
+    private void checkStompRateLimit(UUID userId, String tempId) {
+        String rateKey = "rate:msg:" + userId;
+        try {
+            Long count = redisTemplate.opsForValue().increment(rateKey);
+            if (count != null && count == 1) {
+                redisTemplate.expire(rateKey, 60, TimeUnit.SECONDS);
             }
-            replyPreview = new ReplyPreviewDto(replyMsg.getId(), senderName, contentPreview);
+            if (count != null && count > RATE_LIMIT_PER_MINUTE) {
+                long retryAfter = 60;
+                try {
+                    Long ttl = redisTemplate.getExpire(rateKey, TimeUnit.SECONDS);
+                    if (ttl != null && ttl > 0) retryAfter = ttl;
+                } catch (Exception ignored) { /* best-effort */ }
+                throw new AppException(HttpStatus.TOO_MANY_REQUESTS, "MSG_RATE_LIMITED",
+                        "Gửi quá nhanh, thử lại sau " + retryAfter + " giây",
+                        Map.of("tempId", tempId, "retryAfterSeconds", retryAfter));
+            }
+        } catch (AppException e) {
+            throw e;
+        } catch (DataAccessException e) {
+            log.warn("Redis unavailable for STOMP rate limit check (key={}), fail-open", rateKey);
+        }
+    }
+
+    /**
+     * Validate tempId (UUID format) and content (non-blank, 1..5000 chars).
+     * Throws AppException with details.tempId set so exception handler can echo it.
+     */
+    private void validateStompPayload(SendMessagePayload payload, String tempId) {
+        if (tempId == null || !UUID_PATTERN.matcher(tempId).matches()) {
+            String echoed = tempId != null ? tempId : "unknown";
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "tempId không hợp lệ, phải là UUID v4",
+                    Map.of("tempId", echoed, "field", "tempId", "error", "Must be UUID v4 format"));
         }
 
-        return new MessageDto(
-                message.getId(),
-                message.getConversation().getId(),
-                senderDto,
-                message.getType(),
-                message.getContent(),
-                replyPreview,
-                message.getEditedAt(),
-                message.getCreatedAt()
-        );
+        String content = payload.content();
+        if (content == null || content.isBlank()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "Nội dung tin nhắn không được để trống",
+                    Map.of("tempId", tempId, "field", "content", "error", "Must not be blank"));
+        }
+
+        if (content.trim().length() > CONTENT_MAX_LENGTH) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "MSG_CONTENT_TOO_LONG",
+                    "Tin nhắn quá dài (tối đa 5000 ký tự)",
+                    Map.of("tempId", tempId, "maxLength", CONTENT_MAX_LENGTH,
+                            "actualLength", content.trim().length()));
+        }
     }
+
+    /**
+     * Handles duplicate/retry frames when dedup key already exists in Redis.
+     *
+     * - If value == "PENDING": previous save is still in-flight → drop silently.
+     * - If value == real messageId: previous save completed → re-send ACK idempotently.
+     *   DOES NOT re-publish MessageCreatedEvent to avoid double broadcast.
+     */
+    private void handleDuplicateFrame(UUID userId, String tempId, String dedupKey) {
+        String savedValue;
+        try {
+            savedValue = redisTemplate.opsForValue().get(dedupKey);
+        } catch (DataAccessException e) {
+            log.warn("[DEDUP] Redis unavailable when reading dedup key={}, dropping frame", dedupKey);
+            return;
+        }
+
+        if ("PENDING".equals(savedValue) || savedValue == null) {
+            log.warn("[DEDUP] Concurrent/duplicate frame for tempId={}, userId={} (still PENDING) — dropping",
+                    tempId, userId);
+            return;
+        }
+
+        try {
+            UUID existingMsgId = UUID.fromString(savedValue);
+            messageRepository.findById(existingMsgId).ifPresentOrElse(
+                    existing -> sendAck(userId.toString(), tempId, messageMapper.toDto(existing)),
+                    () -> log.warn("[DEDUP] dedup key={} has messageId={} but not found in DB",
+                            dedupKey, savedValue)
+            );
+        } catch (IllegalArgumentException e) {
+            log.warn("[DEDUP] dedup key={} has invalid value={}", dedupKey, savedValue);
+        }
+    }
+
+    /**
+     * Validate clientEditId (UUID format) and newContent for editViaStomp.
+     */
+    private void validateEditPayload(EditMessagePayload payload, String clientEditId) {
+        if (clientEditId == null || !UUID_PATTERN.matcher(clientEditId).matches()) {
+            String echoed = clientEditId != null ? clientEditId : "unknown";
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "clientEditId không hợp lệ, phải là UUID v4",
+                    Map.of("clientEditId", echoed, "field", "clientEditId", "error", "Must be UUID v4 format"));
+        }
+
+        String content = payload.newContent();
+        if (content == null || content.isBlank()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "Nội dung tin nhắn không được để trống",
+                    Map.of("clientEditId", clientEditId, "field", "newContent", "error", "Must not be blank"));
+        }
+
+        if (content.trim().length() > CONTENT_MAX_LENGTH) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "MSG_CONTENT_TOO_LONG",
+                    "Tin nhắn quá dài (tối đa 5000 ký tự)",
+                    Map.of("clientEditId", clientEditId, "maxLength", CONTENT_MAX_LENGTH,
+                            "actualLength", content.trim().length()));
+        }
+    }
+
+    /**
+     * Rate limit for edit operations — 10 edits/min/user.
+     * Key: rate:msg-edit:{userId}. Fail-open when Redis unavailable.
+     */
+    private void checkEditRateLimit(UUID userId, String clientEditId) {
+        String rateKey = "rate:msg-edit:" + userId;
+        try {
+            Long count = redisTemplate.opsForValue().increment(rateKey);
+            if (count != null && count == 1) {
+                redisTemplate.expire(rateKey, 60, TimeUnit.SECONDS);
+            }
+            if (count != null && count > EDIT_RATE_LIMIT_PER_MINUTE) {
+                long retryAfter = 60;
+                try {
+                    Long ttl = redisTemplate.getExpire(rateKey, TimeUnit.SECONDS);
+                    if (ttl != null && ttl > 0) retryAfter = ttl;
+                } catch (Exception ignored) { /* best-effort */ }
+                throw new AppException(HttpStatus.TOO_MANY_REQUESTS, "MSG_RATE_LIMITED",
+                        "Sửa quá nhanh, thử lại sau " + retryAfter + " giây",
+                        Map.of("clientEditId", clientEditId, "retryAfterSeconds", retryAfter));
+            }
+        } catch (AppException e) {
+            throw e;
+        } catch (DataAccessException e) {
+            log.warn("Redis unavailable for edit rate limit check (key={}), fail-open", rateKey);
+        }
+    }
+
+    /**
+     * Handles duplicate/retry edit frames when dedup key already exists in Redis.
+     *
+     * - If value == "PENDING": previous edit is still in-flight → drop silently.
+     * - If value == real messageId: previous edit completed → re-send ACK idempotently.
+     */
+    private void handleDuplicateEditFrame(UUID userId, String clientEditId, String dedupKey) {
+        String savedValue;
+        try {
+            savedValue = redisTemplate.opsForValue().get(dedupKey);
+        } catch (DataAccessException e) {
+            log.warn("[EDIT-DEDUP] Redis unavailable when reading dedup key={}, dropping frame", dedupKey);
+            return;
+        }
+
+        if ("PENDING".equals(savedValue) || savedValue == null) {
+            log.warn("[EDIT-DEDUP] Concurrent/duplicate frame for clientEditId={}, userId={} (still PENDING) — dropping",
+                    clientEditId, userId);
+            return;
+        }
+
+        // Real messageId stored — re-send ACK (idempotent)
+        try {
+            UUID existingMsgId = UUID.fromString(savedValue);
+            messageRepository.findById(existingMsgId).ifPresentOrElse(
+                    existing -> sendEditAck(userId.toString(), clientEditId, messageMapper.toDto(existing)),
+                    () -> log.warn("[EDIT-DEDUP] dedup key={} has messageId={} but not found in DB",
+                            dedupKey, savedValue)
+            );
+        } catch (IllegalArgumentException e) {
+            log.warn("[EDIT-DEDUP] dedup key={} has invalid value={}", dedupKey, savedValue);
+        }
+    }
+
+    /**
+     * Send SEND-operation ACK to /user/queue/acks for the given sender.
+     * Called after transaction commit via TransactionSynchronization.afterCommit().
+     */
+    private void sendAck(String userId, String tempId, MessageDto message) {
+        try {
+            messagingTemplate.convertAndSendToUser(
+                    userId,
+                    "/queue/acks",
+                    new AckPayload("SEND", tempId, message)
+            );
+        } catch (Exception e) {
+            log.error("[STOMP] Failed to send SEND ACK to userId={}, tempId={}", userId, tempId, e);
+        }
+    }
+
+    /**
+     * Send EDIT-operation ACK to /user/queue/acks for the given sender.
+     * Called after transaction commit via TransactionSynchronization.afterCommit().
+     */
+    private void sendEditAck(String userId, String clientEditId, MessageDto message) {
+        try {
+            messagingTemplate.convertAndSendToUser(
+                    userId,
+                    "/queue/acks",
+                    new AckPayload("EDIT", clientEditId, message)
+            );
+        } catch (Exception e) {
+            log.error("[STOMP] Failed to send EDIT ACK to userId={}, clientEditId={}", userId, clientEditId, e);
+        }
+    }
+
 }
