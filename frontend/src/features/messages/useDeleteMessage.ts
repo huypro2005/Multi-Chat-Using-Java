@@ -16,6 +16,7 @@
 
 import { useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { getStompClient } from '@/lib/stompClient'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { patchMessageById } from './hooks'
@@ -60,12 +61,7 @@ export function useDeleteMessage(convId: string) {
         )
         deleteTimerRegistry.clear(clientDeleteId)
 
-        // Toast error (import động để tránh coupling)
-        import('@/hooks/useToast').catch(() => {
-          // useToast là React hook — không thể gọi outside component
-          // Log để debug; production nên dùng toast singleton
-          console.error('[useDeleteMessage] Timeout: server không phản hồi sau 10s')
-        })
+        toast.error('Xóa thất bại, thử lại')
         console.warn('[useDeleteMessage] Delete timeout for', messageId)
       }, DELETE_TIMEOUT_MS)
 

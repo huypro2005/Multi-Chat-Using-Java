@@ -328,19 +328,21 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
             )}
           </div>
 
-          {/* Status icon */}
-          <div
-            className="self-end mb-1 flex-shrink-0"
-            aria-label={isSending ? 'Đang gửi' : isFailed ? 'Gửi thất bại' : 'Đã gửi'}
-          >
-            {isSending ? (
-              <Loader2 size={12} className="text-indigo-400 animate-spin" />
-            ) : isFailed ? (
-              <AlertCircle size={12} className="text-red-400" />
-            ) : (
-              <span className="text-indigo-400 text-xs leading-none">✓</span>
-            )}
-          </div>
+          {/* Status icon — ẩn khi message đã bị xoá */}
+          {!isDeleted && (
+            <div
+              className="self-end mb-1 flex-shrink-0"
+              aria-label={isSending ? 'Đang gửi' : isFailed ? 'Gửi thất bại' : 'Đã gửi'}
+            >
+              {isSending ? (
+                <Loader2 size={12} className="text-indigo-400 animate-spin" />
+              ) : isFailed ? (
+                <AlertCircle size={12} className="text-red-400" />
+              ) : (
+                <span className="text-indigo-400 text-xs leading-none">✓</span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Retry row — chỉ hiện khi failed (send failure, không phải edit failure) */}

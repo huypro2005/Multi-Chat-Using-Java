@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
+import { toast } from 'sonner'
 import { messageKeys } from '../conversations/queryKeys'
 import { getMessages } from './api'
 import { timerRegistry } from './timerRegistry'
@@ -144,6 +145,8 @@ export function useSendMessage(convId: string) {
         content,
         replyToMessage: null,
         editedAt: null,
+        deletedAt: null,
+        deletedBy: null,
         createdAt: new Date().toISOString(),
         status: 'sending',
       }
@@ -175,6 +178,7 @@ export function useSendMessage(convId: string) {
             failureReason: 'Server không phản hồi sau 10 giây',
           })
         })
+        toast.error('Gửi thất bại, thử lại')
         timerRegistry.clear(tempId) // xoá entry sau khi timer fires
       }, SEND_TIMEOUT_MS)
 

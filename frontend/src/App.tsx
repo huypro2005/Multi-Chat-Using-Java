@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { Toaster } from 'sonner'
 import { authService } from '@/services/authService'
 import { useAuthStore } from '@/stores/authStore'
 import { connectStomp, disconnectStomp } from '@/lib/stompClient'
+import { useAckErrorSubscription } from '@/features/messages/useAckErrorSubscription'
 import AppLoadingScreen from '@/components/AppLoadingScreen'
 import ProtectedRoute from '@/components/ProtectedRoute'
 import ConnectionStatus from '@/components/ConnectionStatus'
@@ -12,6 +14,17 @@ import HomePage from '@/pages/HomePage'
 import ConversationsLayout from '@/pages/ConversationsLayout'
 import ConversationsIndexPage from '@/pages/ConversationsIndexPage'
 import ConversationDetailPage from '@/pages/ConversationDetailPage'
+
+// ---------------------------------------------------------------------------
+// GlobalSubscriptions — mount 1 lần khi user đã authenticated
+// Tách component để hooks chỉ chạy khi isAuthenticated=true
+// ---------------------------------------------------------------------------
+function GlobalSubscriptions() {
+  // Subscribe /user/queue/acks + /user/queue/errors (Path B, ADR-016)
+  // Hook này idempotent: tự re-subscribe khi STOMP reconnect
+  useAckErrorSubscription()
+  return null
+}
 
 export default function App() {
   // Gate: không render routes cho đến khi authService.init() hoàn tất.
@@ -48,6 +61,9 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      {/* Global ACK/ERROR subscription — mount khi authenticated, unmount khi logout */}
+      {isAuthenticated && <GlobalSubscriptions />}
+
       <Routes>
         {/* Public routes */}
         <Route path="/login" element={<LoginPage />} />
@@ -70,6 +86,9 @@ export default function App() {
 
       {/* Debug indicator — chỉ visible ở DEV hoặc khi có lỗi/disconnect */}
       <ConnectionStatus />
+
+      {/* Toast notifications */}
+      <Toaster position="bottom-right" richColors />
     </BrowserRouter>
   )
 }

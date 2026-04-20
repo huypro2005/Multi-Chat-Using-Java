@@ -170,6 +170,7 @@ public class MessageService {
 
         if (Boolean.FALSE.equals(isNew)) {
             // Key already exists → duplicate frame or retry
+            log.warn("[DEDUP] Duplicate SEND request: userId={}, tempId={}, convId={}", userId, tempId, convId);
             handleDuplicateFrame(userId, tempId, dedupKey);
             return;
         }
@@ -327,6 +328,7 @@ public class MessageService {
                 .setIfAbsent(dedupKey, "PENDING", DEDUP_TTL);
 
         if (Boolean.FALSE.equals(isNew)) {
+            log.warn("[DEDUP] Duplicate EDIT request: userId={}, clientEditId={}, convId={}", userId, clientEditId, convId);
             handleDuplicateEditFrame(userId, clientEditId, dedupKey);
             return;
         }
@@ -437,6 +439,7 @@ public class MessageService {
                 .setIfAbsent(dedupKey, "PENDING", DEDUP_TTL);
 
         if (Boolean.FALSE.equals(isNew)) {
+            log.warn("[DEDUP] Duplicate DELETE request: userId={}, clientDeleteId={}, convId={}", userId, clientDeleteId, convId);
             handleDuplicateDeleteFrame(userId, clientDeleteId, dedupKey, convId);
             return;
         }

@@ -17,6 +17,7 @@
 
 import { useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { getStompClient } from '@/lib/stompClient'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { patchMessageById } from './hooks'
@@ -75,6 +76,7 @@ export function useEditMessage(convId: string) {
                   failureReason: 'Server không phản hồi sau 10 giây',
                 }),
             )
+            toast.error('Sửa thất bại, thử lại')
           }
         }
         editTimerRegistry.clear(clientEditId)
