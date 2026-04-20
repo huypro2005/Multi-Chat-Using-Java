@@ -1,434 +1,233 @@
 # Backend Log — Nhật ký chi tiết backend-dev
 
-> File này là **lịch sử** công việc của backend-dev.
-> Quy tắc: append-only, mới nhất ở ĐẦU file (để dễ đọc 20 dòng đầu).
-> Mỗi ngày làm việc tạo 1 entry, không gộp nhiều ngày.
-> Mục đích: (1) daily standup, (2) agent session sau biết đã làm đến đâu, (3) tra cứu "bug này đã gặp chưa".
-> Giới hạn: không giới hạn độ dài — nhưng agent chỉ ĐỌC entry mới nhất trừ khi cần tra cứu cụ thể.
+> Quy tắc: append-only, mới nhất ở ĐẦU file.
+> Chỉ đọc 20 dòng đầu khi cần biết tiến độ. Tra cứu pitfall/pattern theo tên section.
 
 ---
 
 ## Template cho mỗi entry
 
 ```
-## YYYY-MM-DD (Tuần N, Ngày X) — <chủ đề ngắn>
-
-### Xong
-- <task>: <tóm tắt 1 câu> (commit <hash>)
-
-### Đang dở
-- <task>: <tình trạng>
-
-### Blocker
-- <vấn đề>: <đã xử lý gì, chờ gì>
-
-### Ghi chú kỹ thuật
-- <phát hiện đáng nhớ, nếu cần học được gì đã update vào backend-knowledge.md>
+## [W{n}] {Feature} — key decisions + pitfalls
+- Decision: ...
+- Pitfall: ...
+- Pattern: ...
 ```
 
 ---
 
-## Entries
+## [W5-D4] feat: after param + ReplyPreviewDto deletedAt + STOMP reply validation
 
-*(Entries sẽ append ở đây, MỚI NHẤT trên cùng)*
+**Files changed:**
+- `MessageRepository.java` — thêm `findByConversation_IdAndCreatedAtAfterOrderByCreatedAtAsc` (forward, no deletedAt filter).
+- `MessageService.java` — `getMessages` signature thêm `after: OffsetDateTime`, forward branch mới; `sendViaStomp` thêm reply validation (check conv membership, check existence, allow deleted source).
+- `MessageController.java` — `getMessages` thêm `after` param, mutex check cursor+after → 400, `ResponseEntity<>` wrapper.
+- `MessageMapper.java` — `toReplyPreview(Message)` method mới (public), logic: deleted source → contentPreview=null + deletedAt set.
+- `ReplyPreviewDto.java` — thêm `String deletedAt` field (4th). Breaking change — cần update tất cả `new ReplyPreviewDto(...)` calls.
+- `SendMessagePayload.java` — thêm `UUID replyToMessageId` field (4th, nullable).
+- `MessageControllerTest.java` — 5 tests mới (T17–T21): after param forward pagination, mutex 400, reply-to-deleted 201 với null preview + deletedAt, cross-conv STOMP reply 400, non-existent STOMP reply 400.
+- `MessageServiceStompTest.java` — fix 4 `SendMessagePayload` constructor calls (3→4 args).
+- `docs/API_CONTRACT.md` — v0.6.2: after param docs, ReplyPreviewDto deletedAt field, version bump.
+- `backend-knowledge.md` — thêm Forward Pagination Pattern, ReplyPreviewDto deletedAt, STOMP reply validation patterns.
 
-## 2026-04-20 (Tuần 4, Ngày 3) — WebSocket + STOMP auth layer
+**Tests:** 145 total, 0 failures, BUILD SUCCESS.
 
-### Xong
-- [BE][W4-D3][2026-04-20] feat: WebSocketConfig + AuthChannelInterceptor + STOMP auth + 6 integration tests
-  - `WebSocketConfig.java`: `@EnableWebSocketMessageBroker`, SimpleBroker `/topic` + `/queue`, AppDest `/app`, UserDest `/user`. Endpoint `/ws` có CẢ native WS + SockJS fallback. `setAllowedOriginPatterns` từ `app.websocket.allowed-origins`. Transport: `setMessageSizeLimit(64KB) / setSendTimeLimit(10s) / setSendBufferSizeLimit(512KB)`.
-  - `StompPrincipal.java`: record implements Principal, name=userId UUID string.
-  - `AuthChannelInterceptor.java`: CONNECT verify JWT qua `validateTokenDetailed` → throw `MessageDeliveryException("AUTH_REQUIRED"/"AUTH_TOKEN_EXPIRED")`. SUBSCRIBE parse `/topic/conv.{uuid}` → `existsByConversation_IdAndUser_Id` → throw "FORBIDDEN" nếu không phải member.
-  - `StompErrorHandler.java`: custom `StompSubProtocolErrorHandler` extract errorCode từ exception chain, set header `message` + body = errorCode. Register qua `@EventListener(ContextRefreshedEvent.class)` unwrap `WebSocketHandlerDecorator` đến `SubProtocolWebSocketHandler`, loop `getProtocolHandlers()` → `StompSubProtocolHandler.setErrorHandler()`.
-  - `SecurityConfig.java`: thêm `/ws/**` vào permitAll (auth qua STOMP CONNECT, không qua HTTP filter).
-  - `application.yml` + `application-test.yml`: thêm `app.websocket.allowed-origins` config.
-  - `WebSocketIntegrationTest.java`: 6 tests dùng raw WebSocket (`StandardWebSocketClient` + `AbstractWebSocketHandler`), parse STOMP frame trực tiếp. T01 connect valid JWT, T02 invalid JWT → AUTH_REQUIRED, T03 expired JWT → AUTH_TOKEN_EXPIRED, T04 no auth header → AUTH_REQUIRED, T05 member subscribe OK, T06 non-member subscribe → FORBIDDEN.
-  - `mvn test`: 89 tests total (83 cũ + 6 mới), 0 failures.
-
-### Đang dở
-- Broadcast sau `POST /messages` (`@TransactionalEventListener(AFTER_COMMIT)` + `SimpMessagingTemplate.convertAndSend`) — phase W4-D4.
-- `/app/*` handlers + typing indicator — phase Tuần 5.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- PITFALL lớn #1: `WebSocketStompClient`/`DefaultStompSession` KHÔNG expose header "message" từ ERROR frame qua callback API khi CONNECT bị reject. Thay vào đó fire `handleTransportError(ConnectionLostException("Connection closed"))`. Test PHẢI dùng raw `StandardWebSocketClient` + `AbstractWebSocketHandler.handleTextMessage` để đọc ERROR frame nguyên bản và extract header.
-- PITFALL #2: Custom `StompSubProtocolErrorHandler` phải set qua `StompSubProtocolHandler.setErrorHandler()`. `SubProtocolWebSocketHandler` KHÔNG expose setErrorHandler. Không thể autowire trực tiếp vì circular dependency với `DelegatingWebSocketMessageBrokerConfiguration`. Workaround: `@EventListener(ContextRefreshedEvent)` + `applicationContext.getBean("subProtocolWebSocketHandler", WebSocketHandler.class)` + unwrap `WebSocketHandlerDecorator`.
-- PITFALL #3: Mặc định Spring STOMP trả ERROR frame RỖNG (Connection closed) khi ChannelInterceptor throw exception — error code bị mất. Phải có custom error handler để ERROR frame mang header `message` = code.
-- PITFALL #4: `/ws/**` phải nằm trong SecurityConfig permitAll — nếu không, SockJS info GET request bị Spring Security chặn 401 trước cả khi reach STOMP layer. Auth cho WS thực tế xảy ra ở STOMP CONNECT frame qua `AuthChannelInterceptor`.
-- Đăng ký CẢ 2 endpoint cùng path `/ws` (native + SockJS) — Spring ghép đúng handler theo request headers. FE dùng SockJS fallback cho browser cũ, test dùng raw WS cho control tốt hơn.
+**Pitfall gặp:** `item.get("content").asText()` trả `"null"` string (không phải null) khi JSON node là null — phải check `item.get("deletedAt").isNull()` để identify deleted message thay vì check content value.
 
 ---
 
-## 2026-04-19 (Tuần 4, Ngày 1) — Messages schema + 2 REST endpoints
+## [W5-D5] fix: log WARN for duplicate WS requests
 
-### Xong
-- [BE][W4-D1][2026-04-19] feat: V5 messages migration, Message entity/repo/service/controller, 13 tests
-  - `V5__create_messages.sql`: bảng messages, 3 index (conv+created_at DESC, sender, reply partial), deferred FK constraint cho last_read_message_id.
-  - `MessageType.java`: enum TEXT/IMAGE/FILE/SYSTEM.
-  - `Message.java`: entity với @PrePersist (UUID + UTC createdAt), self-ref replyToMessage, soft delete via deleted_at.
-  - `MessageRepository.java`: Spring Data method naming (tránh H2 TIMESTAMPTZ @Query bug).
-  - 5 DTOs: SendMessageRequest, SenderDto, ReplyPreviewDto, MessageDto, MessageListResponse.
-  - `MessageService.java`: sendMessage (membership check, reply validate, rate limit 30/min, save + touchLastMessage), getMessages (cursor pagination, reverse DESC→ASC, nextCursor=oldest item UTC).
-  - `MessageController.java`: POST + GET, parseCursor normalize to UTC.
-  - `MessageControllerTest.java`: 13 tests, tất cả pass.
-  - `docs/API_CONTRACT.md`: thêm Messages API section v0.6.0-messages-rest.
-  - `mvn test`: 83 tests total, 0 failures.
+**Files:** `MessageService.java` — 3 one-liner additions only.
 
-### Đang dở
-- WebSocket layer (tin nhắn realtime) — chưa implement, phase tiếp theo.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- H2 TIMESTAMPTZ pitfall (QUAN TRỌNG): H2 trong `MODE=PostgreSQL` không handle TIMESTAMP WITH TIME ZONE đúng — stored values có timezone shift khi read back. Hậu quả: cursor pagination test FAIL khi send messages qua REST (sub-ms timestamps + timezone shift làm cursor comparison sai). Fix: test insert messages trực tiếp qua repository với explicit UTC timestamps cách nhau rõ ràng (plusDays). Chi tiết đã ghi vào backend-knowledge.md.
-- Spring Data method naming với OffsetDateTime parameter hoạt động đúng trong JPQL (tránh issue timezone binding của @Query với H2).
-- `OffsetDateTime.now(ZoneOffset.UTC)` trong @PrePersist — normalize về UTC ngay lúc tạo để tránh inconsistency.
+- Change: Added `log.warn("[DEDUP] Duplicate SEND/EDIT/DELETE request: userId={}, tempId/clientEditId/clientDeleteId={}, convId={}")` immediately before each `handleDuplicate*Frame` call in `sendViaStomp`, `editViaStomp`, `deleteViaStomp`.
+- Verified: `mvn test` — 140 tests, 0 failures, BUILD SUCCESS.
 
 ---
 
-## 2026-04-19 (Tuần 3, Ngày 5) — fix TD-8: MethodArgumentTypeMismatchException → 400
+## [W5-D3] Delete Message via STOMP + soft delete
 
-### Xong
-- [BE][W3-D5][2026-04-19] fix(TD-8): MethodArgumentTypeMismatchException → 400 VALIDATION_FAILED
-  - `GlobalExceptionHandler`: thêm `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` → 400 `VALIDATION_FAILED` với details `{field, error}`. Cover mọi endpoint có `@PathVariable UUID`.
-  - `ConversationControllerTest`: thêm 2 test case — `getConversation_malformedUUID_returns400` và `getConversation_validUUIDNonExistent_returns404`.
-  - `docs/WARNINGS.md`: TD-8 moved từ "Tech debt nhỏ" → "Resolved".
-  - `mvn test`: 70 tests pass (0 failures, ConversationControllerTest tăng từ 18 → 20).
+**Files:** `V6__add_message_deleted_by.sql`, `DeleteMessagePayload`, `MessageDeletedEvent`, `MessageBroadcaster.onMessageDeleted`, `MessageService.deleteViaStomp`, `AuthChannelInterceptor` (.delete → STRICT_MEMBER), `ChatDeleteMessageHandler`, 10 tests.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- `MethodArgumentTypeMismatchException` là subclass của `MethodArgumentConversionNotSupportedException` — handler đặt TRƯỚC catch-all Exception để intercept đúng. Spring dispatch theo exception hierarchy: handler specific nhất được ưu tiên.
+- Decision: DELETE ACK dùng `Map<String,Object>` thay vì `AckPayload` — DELETE trả minimal metadata (không full MessageDto), tránh overloaded constructor. `Map.of()` không chấp nhận null values → dùng `new HashMap<>()` nếu có null.
+- Decision: `MessageDeletedEvent` dùng `Instant` (không `OffsetDateTime`) — gọn hơn khi broadcast ISO8601.
+- Pattern: Content strip ở mapper (không ở DB) — DB vẫn lưu content để audit/admin. Mapper set `content = null` khi `deletedAt != null`, áp dụng TẤT CẢ path.
+- Pattern: Anti-enumeration — MSG_NOT_FOUND cho cả not-owner, wrong-conv, soft-deleted, non-existent.
+- Pattern: Rate limit key `rate:msg-delete:{userId}` max 10/min. Dedup key `msg:delete-dedup:{userId}:{clientDeleteId}` NX EX 60.
+- Status: Tests chưa chạy qua `mvn test` (cần user/CI confirm). 10 tests written.
 
 ---
 
-## 2026-04-19 (Tuần 3, Ngày 4) — GET /api/users/{id}, V4 last_seen_at migration
+## [W5-D2] Edit Message via STOMP + Unified ACK shape (ADR-017)
 
-### Xong
-- [BE][W3-D4][2026-04-19] feat: GET /api/users/{id}, V4 last_seen_at migration
-  - `V4__add_last_seen.sql`: ALTER TABLE users ADD COLUMN last_seen_at TIMESTAMPTZ NULL + index idx_users_last_seen.
-  - `User` entity: thêm field `OffsetDateTime lastSeenAt` (`@Column(name="last_seen_at")`).
-  - `ConversationService.getUserById(UUID)`: load user, filter active, trả `UserSearchDto.from(user)` — throw 404 USER_NOT_FOUND nếu không tồn tại hoặc không active.
-  - `UserController`: thêm `GET /{id}` endpoint, delegate `conversationService.getUserById(id)`.
-  - `JwtAuthFilter`: sau khi set authentication thành công, update `lastSeenAt = now()` nếu `lastSeenAt == null || duration > 30s`. Fail-open (non-critical, catch + log.warn).
-  - `mvn test`: 68 tests pass, BUILD SUCCESS (exit code 0).
+**Files:** `EditMessagePayload`, `MessageUpdatedEvent`, `AckPayload` (breaking change), `ErrorPayload`, `MessageBroadcaster.onMessageUpdated`, `MessageService.editViaStomp`, `ChatEditMessageHandler`, 12 tests. `mvn test`: 130 pass.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- Task 2 (last_seen_at) đã làm đầy đủ — không cần skip. Logic update sync trong JwtAuthFilter với throttle 30s là đủ cho V1 (scale nhỏ <1000 users). Nếu cần async sau này: @Async + Spring TaskExecutor.
-- `OffsetDateTime` (không phải `Instant`) cho TIMESTAMPTZ — consistent với User entity pattern đã chốt.
+- Decision (ADR-017): `AckPayload` unified shape `(operation, clientId, message)`. `clientId` thay cho `tempId`. Breaking change — tất cả existing `ack.tempId()` call phải đổi thành `ack.clientId()`.
+- Pattern: `editViaStomp()` dùng `TransactionSynchronizationManager.isSynchronizationActive()` fallback để unit test (không có Spring transaction) vẫn chạy — sendEditAck gọi ngay trong test context.
+- Pattern: Rate limit key `rate:msg-edit:{userId}` max 10/min. Dedup key `msg:edit-dedup:{userId}:{clientEditId}` NX EX 60.
+- Pitfall: `message.setCreatedAt()` cần gọi trong setUp để test 300s window check có thể manipulate timestamp.
+- Pattern: Anti-enumeration — MSG_NOT_FOUND dùng cho cả not-owner, wrong-conv, soft-deleted, non-existent.
 
 ---
 
-## 2026-04-19 (Tuần 3, Ngày 3 — fix) — fix: rate limit fail-open Redis, retryAfterSeconds, sync contract
+## [W5-D1-FixA] Destination-aware Auth Policy in AuthChannelInterceptor
 
-### Xong
-- [BE][W3-D3-fix][2026-04-19] fix: rate limit fail-open Redis, retryAfterSeconds in details, sync contract 10/min
-  - `ConversationService.createConversation`: wrap Redis INCR + expire trong `try/catch DataAccessException` — fail-open nếu Redis down (ADR-011 consistent).
-  - Khi vượt limit: query TTL thực từ Redis, throw `AppException(429, "RATE_LIMITED", ..., Map.of("retryAfterSeconds", ttl))`.
-  - `docs/API_CONTRACT.md`: sửa `POST /api/conversations` rate limit từ "30/giờ" → "10/phút" (2 chỗ: mục Rate limit + bảng Error responses). Thêm v0.5.1-conversations vào changelog.
-  - `mvn test`: 68 tests pass (0 failures).
+**Files:** `AuthChannelInterceptor` (inner enum `DestinationPolicy`), `AuthChannelInterceptorTest` (10 tests). `mvn test`: 118 pass.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- `DataAccessException` (spring-dao) bao phủ mọi Redis/JPA exception khi client gặp lỗi network — dùng consistent với pattern blacklist fail-open của JwtAuthFilter.
-- TTL fallback = 60 (seconds) khi Redis down để FE có giá trị hợp lý để hiển thị retry countdown.
+- Decision: `.message` → STRICT_MEMBER (throw FORBIDDEN), `.typing` + `.read` → SILENT_DROP (pass through), unknown suffix → STRICT_MEMBER default.
+- Pitfall: `.typing` phải SILENT_DROP không phải FORBIDDEN — throw FORBIDDEN tạo ERROR frame về client, UI hiện lỗi bad UX. Handler (`ChatTypingHandler`) đã có member check + silent drop riêng, interceptor KHÔNG cần DB query cho ephemeral events.
+- Pattern: `verifyNoInteractions(conversationMemberRepository)` trong SILENT_DROP tests — verify interceptor không làm DB query thừa.
 
 ---
 
-## 2026-04-19 (Tuần 3, Ngày 3) — W3-BE-6 rate limit POST /api/conversations
+## [W5-D1] Typing Indicator STOMP Handler
 
-### Xong
-- [BE][W3-D3][2026-04-19] fix(W3-BE-6): rate limit POST /api/conversations 10/min/user via Redis
-  - `ConversationService`: inject `StringRedisTemplate`, thêm INCR check đầu `createConversation()`.
-  - Key `rate:conv_create:{userId}`, TTL 60s, limit 10/window. Vượt → `AppException` 429 `RATE_LIMITED`.
-  - `GlobalExceptionHandler` đã handle `AppException` generic — không cần sửa.
-  - `docs/WARNINGS.md`: W3-BE-6 thêm vào bảng Resolved.
-  - `mvn test`: 68 tests pass (0 failures).
+**Files:** `TypingPayload`, `TypingRateLimiter`, `ChatTypingHandler`, `ChatTypingHandlerTest` (4 tests). `mvn test`: 108 pass.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
+- Pattern: Ephemeral event — handler dùng silent drop (return, không throw), rate limit 1 event/2s/key via Redis INCR+EXPIRE, fail-open khi Redis down.
+- Decision: Contract (SOCKET_EVENTS.md §3.4) không có `fullName` trong typing payload — task spec có nhưng contract thắng, không thêm field.
+- Pitfall: `@MockitoSettings(LENIENT)` cần khi `setUp()` stub quá rộng — test non-member return sớm không gọi rate limiter + userRepo, Mockito strict mode sẽ fail `UnnecessaryStubbingException`.
 
 ---
 
-## 2026-04-19 (Tuần 3, Ngày 2 — fix) — GROUP conversation validation hardening
+## [W4-D4] Realtime Broadcast on Message Created (TransactionalEventListener)
 
-### Xong
-- [BE][W3-D2-fix][2026-04-19] fix: GROUP validation — dedupe memberIds, reject caller-in-members, max 50 members
-  - `ConversationService.createGroup`: thêm 3 guard: (1) caller-in-memberIds → 400 VALIDATION_FAILED, (2) dedupe via `.distinct()`, (3) max 49 other members → 400 VALIDATION_FAILED.
-  - `ConversationControllerTest`: thêm T07b (caller in memberIds), T07c (dedup still valid), T07d (dedup too few unique). Tổng: 68 tests, BUILD SUCCESS.
+**Files:** `MessageMapper` (extracted @Component), `MessageCreatedEvent`, `MessageBroadcaster` (`@TransactionalEventListener(AFTER_COMMIT)`), updated `MessageService`. `mvn test`: 104 pass.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- Validation thứ tự: null-check → caller-check → distinct → size-check-min → size-check-max → existence-check. Thứ tự quan trọng để error message rõ ràng.
-
-## 2026-04-19 (W3-D2) — feat: 4 conversation endpoints + 15 tests, W3-BE-1 verified/fixed
-
-### Xong
-- `AppException`: thêm constructor `(status, errorCode, message, details)` + `getDetails()` field.
-- `GlobalExceptionHandler`: truyền `ex.getDetails()` vào `ErrorResponse.of()` để serialize details.
-- `Conversation` + `ConversationMember` entities: W3-BE-1 fix — xóa `@GeneratedValue`, thêm `@PrePersist if (id==null) id = UUID.randomUUID()`.
-- `ConversationRepository`: thêm `findExistingOneOnOne(String, String)` native SQL double-join, `findConversationsByUserPaginated(String, int, int)`, `countConversationsByUser(String)`. Cập nhật JOIN FETCH query để fetch `m.user`.
-- `ConversationMemberRepository`: thêm `findByConversation_IdAndUser_Id(UUID, UUID)`.
-- `UserRepository`: thêm `searchUsers(String q, UUID currentUserId, Pageable)` JPQL.
-- DTOs package `com.chatapp.conversation.dto`: `CreateConversationRequest`, `MemberDto`, `CreatedByDto`, `ConversationDto`, `ConversationSummaryDto`, `ConversationListResponse`, `UserSearchDto`.
-- `ConversationService`: createOneOnOne (check existing + 409), createGroup, listConversations (native query + batch load), getConversation (anti-enumeration 404), searchUsers.
-- `ConversationController` (`/api/conversations`): POST (201), GET (?page&size), GET /{id}.
-- `UserController` (`/api/users`): GET /search?q=&limit=.
-- `ConversationControllerTest`: 15 tests — W3-BE-1 + T01-T14, tất cả PASS.
-- `mvn test`: 65 tests, 0 failures, BUILD SUCCESS.
-
-### Đang dở
-- WebSocket / messaging (tuần 4).
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- H2 native query UUID pitfall: trả `byte[]` thay vì `UUID`/`String` → fix bằng `CAST(c.id AS VARCHAR)` trong SELECT và `CAST(:param AS UUID)` trong WHERE, dùng `String` parameter thay vì `UUID`.
-- Flush+clear EntityManager pattern: cần thiết trong @Transactional sau save khi muốn reload bằng custom JPQL — tránh stale 1st-level cache trả empty collection.
-- ConversationListResponse shape theo contract: `content/page/size/totalElements/totalPages` (không phải `items/total/pageSize`).
+- Pattern: `@TransactionalEventListener(phase = AFTER_COMMIT)` — broadcast SAU khi transaction commit. try-catch trong listener để broadcast fail không propagate lên REST controller.
+- Pitfall: `@MockBean SimpMessagingTemplate` bắt buộc trong `MessageControllerTest` — `MessageBroadcaster` inject qua constructor, thiếu MockBean → `UnsatisfiedDependencyException` khi Spring context load.
+- Decision: Khi broadcaster throw trong AFTER_COMMIT listener, Spring log ERROR nhưng KHÔNG propagate — REST 201 vẫn thành công. Behavior đúng per SOCKET_EVENTS.md.
 
 ---
 
-## 2026-04-19 (W3-BE-3 fix) — fix: thêm pgcrypto extension vào V2 migration
+## [W4-D3] WebSocket + STOMP Auth Layer
 
-### Xong
-- `V2__create_users_and_auth_providers.sql`: thêm `CREATE EXTENSION IF NOT EXISTS pgcrypto;` vào đầu file.
-- `application.yml`: thêm `repair-on-migrate: true` vào Flyway config — developer có DB cũ tự repair checksum khi start app.
-- `docs/WARNINGS.md`: thêm mục "Resolved", ghi W3-BE-3 RESOLVED với giải thích fix.
-- `mvn test`: 50/50 tests pass, BUILD SUCCESS.
+**Files:** `WebSocketConfig`, `StompPrincipal`, `AuthChannelInterceptor`, `StompErrorHandler`, `SecurityConfig` update, `WebSocketIntegrationTest` (6 tests raw WS). `mvn test`: 89 pass.
 
-### Đang dở
-- Không có.
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- `flyway:repair` Maven plugin cần `-Dflyway.url/-Dflyway.user/-Dflyway.password` riêng (không đọc application.yml). Dùng `repair-on-migrate: true` trong Spring Boot config thay thế — Spring Boot tự pass connection đến Flyway.
-- Test profile (`application-test.yml`) có `flyway.enabled: false` → test không validate Flyway checksum. Verify thực tế bằng `mvn test` pass + kiểm tra logic V2 file.
-- Developer mới fresh DB: `CREATE EXTENSION IF NOT EXISTS pgcrypto` là idempotent — an toàn dù extension đã có hoặc chưa.
+- Pitfall (CRITICAL): `WebSocketStompClient`/`DefaultStompSession` KHÔNG expose header "message" từ ERROR frame khi CONNECT bị reject — fire `handleTransportError(ConnectionLostException)`. Test phải dùng raw `StandardWebSocketClient` + `AbstractWebSocketHandler.handleTextMessage` để đọc ERROR frame nguyên bản.
+- Pitfall: Custom `StompSubProtocolErrorHandler` phải set qua `StompSubProtocolHandler.setErrorHandler()`. `SubProtocolWebSocketHandler` KHÔNG expose setErrorHandler. Workaround: `@EventListener(ContextRefreshedEvent)` → unwrap `WebSocketHandlerDecorator` → loop `getProtocolHandlers()` → `StompSubProtocolHandler.setErrorHandler()`.
+- Pitfall: Mặc định Spring STOMP trả ERROR frame RỖNG khi ChannelInterceptor throw — error code bị mất. Phải có custom error handler để ERROR frame mang header `message` = errorCode.
+- Pitfall: `/ws/**` phải nằm trong SecurityConfig permitAll — SockJS info GET request bị Spring Security chặn 401 trước cả khi reach STOMP layer. Auth thực tế xảy ra tại STOMP CONNECT frame.
+- Decision: Đăng ký CẢ 2 endpoint cùng path `/ws` (native WS + SockJS) — Spring ghép đúng handler theo request headers. FE dùng SockJS, test dùng raw WS.
+- Pattern: `StompPrincipal` là record implements Principal, `name` = userId UUID string. Inject vào handler qua `Principal` param.
 
 ---
 
-## 2026-04-19 (W3-D1) — feat: V3 migration conversations + conversation_members, entities, repositories
+## [W4-D1] Messages Schema + REST Endpoints (Cursor Pagination)
 
-### Xong
-- V3 migration: tạo `conversations` (type CHECK ONE_ON_ONE/GROUP, last_message_at, idx_conversations_last_message) và `conversation_members` (role CHECK OWNER/ADMIN/MEMBER, UNIQUE conv+user, idx_members_user, idx_members_conv). Flyway "Successfully applied 3 migrations".
-- ConversationType enum + MemberRole enum (`com.chatapp.conversation.enums`).
-- Conversation entity: `@Getter @Setter @Builder`, `@Enumerated(EnumType.STRING)`, `@OneToMany(mappedBy="conversation", fetch=LAZY)`, `@PrePersist`/`@PreUpdate`, domain methods (isGroup, touchLastMessage).
-- ConversationMember entity: `@Enumerated(EnumType.STRING)` role, `@ManyToOne LAZY` cho cả conversation và user, `@PrePersist` joinedAt, domain methods (isOwner, canManageMembers, isMuted).
-- ConversationRepository: `findByIdWithMembers` với JOIN FETCH tránh N+1.
-- ConversationMemberRepository: `findByUser_IdOrderByJoinedAtDesc`, `existsByConversation_IdAndUser_Id`.
-- DB reset: terminate sessions → DROP → CREATE → pgcrypto → Flyway.
-- `mvn test`: 50 tests, 0 failures.
+**Files:** `V5__create_messages.sql`, `Message`, `MessageRepository`, 5 DTOs, `MessageService`, `MessageController`, 13 tests. `mvn test`: 83 pass.
 
-### Đang dở
-- Service + Controller cho conversation (Ngày 2).
-
-### Blocker
-- Không có.
-
-### Ghi chú kỹ thuật
-- `@Builder.Default private List<ConversationMember> members = new ArrayList<>()` cần thiết để builder không trả null list.
-- DB_PASSWORD=123456 (từ backend/.env).
+- Decision: Cursor-based pagination — `nextCursor = oldest item UTC`. REST GET endpoint nhận `cursor` param, parse normalize to UTC.
+- Pitfall (CRITICAL): H2 `MODE=PostgreSQL` không handle `TIMESTAMP WITH TIME ZONE` đúng — timezone shift khi read back. Cursor pagination test FAIL vì sub-ms timestamps + timezone shift sai. Fix: test insert messages trực tiếp qua repository với explicit UTC timestamps cách nhau rõ ràng (`plusDays`).
+- Pattern: Spring Data method naming với `OffsetDateTime` parameter trong JPQL hoạt động đúng trong H2. Tránh `@Query` native cho TIMESTAMPTZ queries trong test.
+- Pattern: `OffsetDateTime.now(ZoneOffset.UTC)` trong `@PrePersist` — normalize về UTC ngay lúc tạo.
+- Decision: `MessageType` enum TEXT/IMAGE/FILE/SYSTEM. Soft delete via `deleted_at`. Self-ref `replyToMessage`.
 
 ---
 
-## 2026-04-19 (W2D4) — OAuth (Firebase) + Logout (blacklist jti)
+## [W3-D5] Fix TD-8: MethodArgumentTypeMismatchException → 400
 
-### Xong
-- FirebaseConfig: `@PostConstruct` init SDK, expose `FirebaseAuth` bean (null nếu chưa init). Lazy init để app start dù không có credentials.
-- UserAuthProviderRepository: thêm `existsByProviderAndProviderUidAndUser_IdNot()`.
-- DTOs: OAuthRequest, OAuthResponse (isNewUser field), LogoutRequest.
-- AuthService: thêm `oauth()` (verify Firebase → auto-link logic 3 bước), `logout()` (best-effort delete refresh + blacklist access), `generateUniqueUsername()`, `toOAuthResponse()`. Refactor constructor thủ công + setter `@Autowired(required=false)` cho FirebaseAuth (testability).
-- JwtTokenProvider: thêm `getRemainingMs(String token)`.
-- JwtAuthFilter: thêm blacklist check sau validate VALID — `redisTemplate.hasKey("jwt:blacklist:{jti}")`. Inject `StringRedisTemplate`. Fail-open nếu Redis unavailable.
-- SecurityConfig: narrow whitelist từ `/api/auth/**` thành từng path explicit; `/api/auth/logout` KHÔNG trong whitelist (cần JWT).
-- AuthController: thêm `POST /oauth` và `POST /logout`.
-- AuthControllerTest: thêm 10 tests (oauth new user, returning user, auto-link, invalid token, missing email, missing body; logout happy, invalid refresh still 200, no auth 401, blacklist test). 33/33 PASS, tổng 50/50 PASS, BUILD SUCCESS.
+- Pattern: `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` trong `GlobalExceptionHandler` → 400 `VALIDATION_FAILED` với details `{field, error}`. Cover mọi `@PathVariable UUID` endpoint.
+- Pitfall: `MethodArgumentTypeMismatchException` là subclass của `MethodArgumentConversionNotSupportedException` — handler phải đặt trước catch-all để Spring dispatch đúng.
 
-### Đang dở
-- Không có trong phase A.
+---
 
-### Blocker
-- Không có.
+## [W3-D3] Rate Limit POST /api/conversations + Fail-open Redis
 
-### Ghi chú kỹ thuật
-- KHÔNG dùng `FirebaseAuth.getInstance()` trực tiếp trong Service — không testable. Dùng injected bean qua setter `@Autowired(required=false)`. `@MockBean FirebaseAuth` trong test sẽ replace bean và được inject vào AuthService.
-- `@Bean` trả null trong Spring được bỏ qua (bean không được đăng ký). Các nơi `@Autowired(required=false)` sẽ nhận null → handle gracefully.
-- Test 33 (blacklist check): mock `redisTemplate.hasKey(eq(blacklistKey)).thenReturn(true)` sau logout → JwtAuthFilter detect và set `jwt_expired=true` → request tới protected endpoint → 401.
+- Pattern: Redis INCR rate limit key `rate:conv_create:{userId}` TTL 60s, limit 10/window. Wrap trong `try/catch DataAccessException` — fail-open nếu Redis down (consistent với JWT blacklist pattern).
+- Pattern: Khi vượt limit, query TTL thực từ Redis, throw `AppException(429, "RATE_LIMITED", ..., Map.of("retryAfterSeconds", ttl))`. TTL fallback = 60 khi Redis down.
+- Pattern: `DataAccessException` bao phủ mọi Redis/JPA network error — dùng nhất quán cho fail-open.
 
-## 2026-04-19 (W2D3.5) — POST /api/auth/refresh với token rotation + reuse detection
+---
 
-### Xong
-- RefreshRequest DTO: `record RefreshRequest(@NotBlank String refreshToken)`.
-- JwtTokenProvider: thêm `getClaimsAllowExpired()` — extract claims kể cả khi token EXPIRED (lấy từ `ExpiredJwtException.getClaims()`). Refactor `getUserIdFromToken()` và `getJtiFromToken()` dùng `getClaimsAllowExpired()` thay vì `getClaims()`.
-- AuthService: thêm `refresh()` — validate → rate limit per-userId (10 calls/60s) → hash compare constant-time → reuse detection → delete old → generate new. Thêm `revokeAllUserSessions()`, `constantTimeEquals()`.
-- AuthController: thêm `POST /refresh` delegate sang `authService.refresh()`.
-- AuthControllerTest: thêm 9 test (happy path, invalid token, expired token, revoked token, rate limit, suspended user, missing body, empty token, reuse revokes all sessions). 23/23 tests PASS, tổng 40/40 PASS, BUILD SUCCESS.
+## [W3-D2] Conversation Endpoints + Validation
 
-### Đang dở
-- POST /api/auth/oauth (Firebase), /logout — phase sau.
+**Files:** `AppException` (thêm details field), `GlobalExceptionHandler` update, `Conversation`/`ConversationMember` entities, repositories, 7 DTOs, `ConversationService`, `ConversationController`, `UserController`, 15+ tests.
 
-### Blocker
-- Không có.
+- Decision: `Conversation`/`ConversationMember` entity xóa `@GeneratedValue`, thêm `@PrePersist if (id==null) id = UUID.randomUUID()` — tránh conflict khi build manually.
+- Pitfall (CRITICAL): H2 native query UUID trả `byte[]` thay vì `UUID`/`String`. Fix: `CAST(c.id AS VARCHAR)` trong SELECT, `CAST(:param AS UUID)` trong WHERE, dùng `String` parameter.
+- Pitfall: Flush+clear EntityManager sau save trong `@Transactional` khi cần reload với custom JPQL — tránh stale 1st-level cache trả empty collection.
+- Decision: `ConversationListResponse` shape theo contract: `content/page/size/totalElements/totalPages` (không phải `items/total/pageSize`).
+- Pattern GROUP validation thứ tự: null-check → caller-in-members → distinct → size-min → size-max → existence. Thứ tự quan trọng để error rõ ràng.
 
-### Ghi chú kỹ thuật
-- Constant-time comparison bằng `MessageDigest.isEqual()` — tránh timing attack khi compare hash. String.equals() có thể short-circuit.
-- `getClaimsAllowExpired()` cần thiết vì `getClaims()` throw trên expired token, nhưng expired refresh token vẫn cần extract userId/jti để check Redis trước khi trả EXPIRED error. Thực tế flow này không dùng vì EXPIRED check xảy ra trước claims extraction — nhưng method này safety net.
-- Contract thắng task spec: error codes là `AUTH_REFRESH_TOKEN_INVALID` và `AUTH_REFRESH_TOKEN_EXPIRED` (không phải `REFRESH_TOKEN_INVALID`/`REFRESH_TOKEN_EXPIRED`). Account disabled trả `AUTH_ACCOUNT_LOCKED` (không phải `ACCOUNT_DISABLED`).
+---
 
-## 2026-04-19 (W2D2 Phase B) — POST /api/auth/register + POST /api/auth/login
+## [W3-D1] V3 Migration Conversations + Entities
 
-### Xong
-- Tạo package `com.chatapp.auth.{controller,service,dto.{request,response}}`.
-- DTOs: RegisterRequest (email, username, password, fullName + validation), LoginRequest, UserDto.from(User), AuthResponse.
-- AuthService: register (rate limit 10/15min, unique check email trước username, bcrypt hash, generate tokens), login (rate limit check fail count, same error code user-not-found vs wrong-password security, account lock check, reset counter on success). buildAuthResponse: SHA-256 hash refresh token → Redis key `refresh:{userId}:{jti}` TTL 7 ngày.
-- AuthController: POST /register + POST /login, extractClientIp (X-Forwarded-For → remoteAddr).
-- AuthControllerTest: 14 tests (register happy, dup email, dup username, invalid email, weak password 2 cases, username starts digit, missing fullName; login happy, wrong password, user not found, rate limit 429, empty username, empty password). 14/14 PASS.
-- Fix: thêm `@MockBean StringRedisTemplate` vào JwtTokenProviderTest, SecurityConfigTest, ChatAppApplicationTests — 3 test class này exclude Redis autoconfigure nhưng AuthService bây giờ inject StringRedisTemplate → context fail. @MockBean giải quyết.
-- Tổng: 31/31 tests PASS, BUILD SUCCESS.
+**Files:** `V3__create_conversations.sql`, `ConversationType`, `MemberRole`, `Conversation`, `ConversationMember`, `ConversationRepository`, `ConversationMemberRepository`.
 
-### Đang dở
-- POST /api/auth/oauth (Firebase), /refresh, /logout — phase sau.
+- Pattern: `@Builder.Default private List<ConversationMember> members = new ArrayList<>()` — builder không trả null list.
+- Pattern: `findByIdWithMembers` với `JOIN FETCH` tránh N+1.
 
-### Blocker
-- Không có.
+---
 
-### Ghi chú kỹ thuật
-- Khi thêm bean inject Redis vào context, tất cả test class exclude Redis autoconfigure sẽ fail context load. Fix: thêm `@MockBean StringRedisTemplate` vào từng class đó. Đây là pitfall quan trọng — xem backend-knowledge.md.
-- Contract thắng task spec: error codes là AUTH_EMAIL_TAKEN, AUTH_USERNAME_TAKEN, AUTH_INVALID_CREDENTIALS, AUTH_ACCOUNT_LOCKED (không phải EMAIL_TAKEN, USERNAME_TAKEN, INVALID_CREDENTIALS, ACCOUNT_DISABLED). Register response HTTP 200 (không phải 201). Password regex cần 1 chữ hoa + 1 chữ số.
+## [W2-D4] OAuth (Firebase) + Logout (JWT Blacklist)
 
-## 2026-04-19 (W2D1 — W-BE-3) — AuthMethod enum + refactor generateAccessToken
+**Files:** `FirebaseConfig`, `AuthService` (oauth + logout), `JwtAuthFilter` (blacklist check), `SecurityConfig` (narrow whitelist), `AuthController`. 10 tests, tổng 50 pass.
 
-### Xong
-- Xác nhận AuthMethod.java, JwtTokenProvider.java, JwtTokenProviderTest.java đã được implement đầy đủ từ phiên trước.
-- Grep toàn bộ: không còn call `generateAccessToken` nào với 1 argument — tất cả đều đúng `(user, AuthMethod.X)`.
-- JwtTokenProviderTest có đủ 4 test mới: generateAccessTokenWithPasswordMethod, generateAccessTokenWithOauthMethod, getAuthMethodFromTokenPassword, getAuthMethodFromTokenOauth.
-- mvn test: 17/17 PASS, BUILD SUCCESS. Test count tăng từ 13 → 17.
+- Decision: KHÔNG dùng `FirebaseAuth.getInstance()` trực tiếp — không testable. Dùng injected bean qua setter `@Autowired(required=false)`. `@MockBean FirebaseAuth` trong test replace bean.
+- Pattern: `@Bean` trả null → bean không đăng ký. `@Autowired(required=false)` nhận null → handle gracefully (dùng cho optional Firebase).
+- Pattern: JWT blacklist key `jwt:blacklist:{jti}` trong Redis. JwtAuthFilter check sau validate VALID. Fail-open nếu Redis unavailable.
+- Decision: `/api/auth/logout` KHÔNG trong Security whitelist — cần JWT auth để gọi logout.
 
-### Đang dở
-- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — tiếp tục W2.
+---
 
-### Blocker
-- Không có.
+## [W2-D3] Refresh Token Rotation + Reuse Detection
 
-### Ghi chú kỹ thuật
-- Tất cả refactor W-BE-3 đã hoàn thành trước session này — không cần viết code mới. Chỉ verify + chạy test.
+**Files:** `AuthService.refresh()`, `JwtTokenProvider.getClaimsAllowExpired()`, `AuthController`, 9 tests.
 
-## 2026-04-19 (W1 Fix — Pre-Phase 3B) — Phân biệt AUTH_TOKEN_EXPIRED vs AUTH_REQUIRED
+- Pattern: Refresh token hash — SHA-256 hash stored in Redis, constant-time compare via `MessageDigest.isEqual()` (tránh timing attack, String.equals() short-circuit).
+- Pattern: Reuse detection — nếu refresh token đã revoke nhưng vẫn dùng, gọi `revokeAllUserSessions()` (security response).
+- Decision: `getClaimsAllowExpired()` extract claims kể cả khi EXPIRED (từ `ExpiredJwtException.getClaims()`) — safety net khi cần userId/jti từ expired token.
+- Decision: Error codes theo contract: `AUTH_REFRESH_TOKEN_INVALID`, `AUTH_REFRESH_TOKEN_EXPIRED`, `AUTH_ACCOUNT_LOCKED` (không phải spec names).
 
-### Xong
-- JwtTokenProvider: thêm `TokenValidationResult` enum (VALID/EXPIRED/INVALID) và `validateTokenDetailed()`. `validateToken()` cũ delegate sang đây — backward compatible.
-- Thêm package-private `generateTokenWithExpiration(User, long)` helper cho test — không hardcode JWT string.
-- JwtAuthFilter: thay `validateToken()` → `validateTokenDetailed()`. Set `request.setAttribute("jwt_expired", true)` khi EXPIRED.
-- SecurityConfig authenticationEntryPoint: check `jwt_expired` attribute, trả `AUTH_TOKEN_EXPIRED` + message tiếng Việt khi expired, `AUTH_REQUIRED` khi không có/invalid token.
-- SecurityConfigTest: thêm 2 test mới `expiredTokenShouldReturnAuthTokenExpired` và `invalidTokenShouldReturnAuthRequired`. Tổng 13/13 tests PASS (mvn test BUILD SUCCESS).
+---
 
-### Đang dở
-- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — Phase 3B.
+## [W2-D2] Register + Login Endpoints
 
-### Blocker
-- Không có.
+**Files:** `AuthService` (register + login), DTOs, `AuthController`, 14 tests. Tổng 31 pass.
 
-### Ghi chú kỹ thuật
-- `ExpiredJwtException` là subclass của `JwtException` nên phải catch nó TRƯỚC trong multi-catch — thứ tự catch quan trọng (không phải vấn đề ở đây vì dùng separate catch blocks nhưng cần nhớ nếu refactor).
-- Test dùng package-private method: SecurityConfigTest nằm cùng package `com.chatapp.security` với JwtTokenProvider nên truy cập được method package-private mà không cần reflection.
+- Pitfall (CRITICAL): Khi thêm bean inject Redis vào Spring context, tất cả test class exclude Redis autoconfigure sẽ fail context load → phải thêm `@MockBean StringRedisTemplate` vào từng class đó (`JwtTokenProviderTest`, `SecurityConfigTest`, `ChatAppApplicationTests`).
+- Decision: Error codes theo contract thắng task spec: `AUTH_EMAIL_TAKEN`, `AUTH_USERNAME_TAKEN`, `AUTH_INVALID_CREDENTIALS`, `AUTH_ACCOUNT_LOCKED`. Register response HTTP 200 (không phải 201).
+- Pattern: Rate limit register 10/15min per IP. Login rate limit theo fail count per IP. Reset counter on success.
+- Pattern: BCrypt strength 12. Password regex: min 8 chars, 1 uppercase, 1 digit.
 
-## 2026-04-19 (Tuần 1, Ngày 3) — Spring Security 6 + JWT utility + GlobalExceptionHandler
+---
 
-### Xong
-- JwtTokenProvider: generateAccessToken/RefreshToken, validateToken, getClaims, getUserIdFromToken, getJtiFromToken. jjwt 0.12.x API. Secret dùng UTF-8 bytes trực tiếp.
-- JwtAuthFilter: OncePerRequestFilter, extract Bearer token, validate, load User từ UserRepository, set SecurityContext. Không throw exception — chỉ log.warn và skip.
-- SecurityConfig: STATELESS, JWT filter, CORS từ property, authenticationEntryPoint + accessDeniedHandler trả JSON (không phải HTML). BCrypt(12) PasswordEncoder bean.
-- ErrorResponse record: shape chuẩn { error, message, timestamp, details? } với @JsonInclude(NON_NULL).
-- AppException: business exception dùng chung (HttpStatus, errorCode, message).
-- GlobalExceptionHandler: handle AppException, MethodArgumentNotValidException (với details.fields), ConstraintViolationException, generic Exception (500).
-- application.yml: update JWT secret đủ dài cho HS256, chuẩn hóa property names.
-- application-test.yml: test profile với H2 in-memory, flyway disabled.
-- JwtTokenProviderTest: 6 tests (generate, validate, expired, tampered, random). PASS.
-- SecurityConfigTest: 4 tests (health public, 401 JSON, invalid token 401, auth endpoints not 401). PASS.
-- Tổng: 11/11 tests pass (mvn test BUILD SUCCESS).
+## [W1-Fix] JWT Token Validation: EXPIRED vs INVALID
 
-### Đang dở
-- Auth endpoints (POST /api/auth/register, /login, /oauth, /refresh, /logout) — Ngày 4+.
-- UserDetailsService chưa implement (không cần cho filter, sẽ xem xét khi làm AuthenticationManager cho login endpoint).
+**Files:** `JwtTokenProvider` (`TokenValidationResult` enum + `validateTokenDetailed()`), `JwtAuthFilter`, `SecurityConfig` (authenticationEntryPoint).
 
-### Blocker
-- Không có.
+- Pattern: `TokenValidationResult` enum (VALID/EXPIRED/INVALID). Filter set `request.setAttribute("jwt_expired", true)` khi EXPIRED. EntryPoint check attribute → trả `AUTH_TOKEN_EXPIRED` vs `AUTH_REQUIRED`.
+- Pitfall: `ExpiredJwtException` là subclass của `JwtException` — phải catch trước trong multi-catch nếu refactor sang single try-catch.
+- Pattern: Test package-private method — test class cùng package truy cập được mà không cần reflection.
 
-### Ghi chú kỹ thuật
-- `@SpringBootTest` KHÔNG có `excludeAutoConfiguration` attribute → phải dùng `properties = "spring.autoconfigure.exclude=..."`. Mất 1 lần compile fail để phát hiện. Đã ghi vào knowledge.
-- CORS: `allowedOrigins("*")` + `allowCredentials(true)` = Spring Security exception. Phải dùng origins cụ thể.
+---
 
-## 2026-04-19 (Tuần 1, Ngày 2) — V2 migration + JPA entities + repositories
+## [W1-D3] Spring Security + JWT Foundation
 
-### Xong
-- V2__create_users_and_auth_providers.sql: tạo 3 bảng users, user_auth_providers, user_blocks với đầy đủ constraint và index khớp ARCHITECTURE.md 3.1.
-- User.java entity: UUID PK (DB generate), OffsetDateTime timestamps, @PrePersist/@PreUpdate, domain methods markAsDeleted()/isActive()/isDeleted().
-- UserAuthProvider.java entity: ManyToOne(LAZY) -> User.
-- UserBlock.java entity: 2 ManyToOne(LAZY) -> User (blocker, blocked).
-- UserRepository, UserAuthProviderRepository, UserBlockRepository: Spring Data JPA interfaces.
-- Flyway V2 applied thành công: "Successfully applied 1 migration to schema public, now at version v2".
-- Hibernate validate PASS: không có schema mismatch.
-- psql verify: cả 3 bảng tồn tại đúng structure, index đúng, FK đúng.
+**Files:** `JwtTokenProvider`, `JwtAuthFilter`, `SecurityConfig`, `ErrorResponse`, `AppException`, `GlobalExceptionHandler`. 11 tests pass.
 
-### Đang dở
-- Auth service/controller (RegisterRequest, LoginRequest, JWT issuance) — để Ngày 3.
+- Pitfall: `@SpringBootTest` KHÔNG có `excludeAutoConfiguration` attribute → phải dùng `properties = "spring.autoconfigure.exclude=..."`.
+- Pitfall: `allowedOrigins("*")` + `allowCredentials(true)` = Spring Security exception. Phải dùng origins cụ thể hoặc `allowedOriginPatterns("*")`.
+- Decision: jjwt 0.12.6, firebase-admin 9.4.1, Spring Boot 3.4.4, Java 21.
+- Pattern: `application-test.yml` với H2 in-memory + `flyway.enabled: false` cho test profile.
 
-### Blocker
-- Không có.
+---
 
-### Ghi chú kỹ thuật
-- Port 8080 đã có process cũ chiếm (app Ngày 1 vẫn chạy). Khi boot test dùng port khác hoặc kill trước. Hibernate validate vẫn pass trước khi lỗi port.
-- Spring Data Redis log WARN "Could not safely identify store assignment" cho JPA repositories là bình thường khi có cả JPA + Redis module — không phải lỗi.
+## [W1-D2] V2 Migration + JPA Entities
 
-## 2026-04-19 (Tuần 1, Ngày 1) — Khởi tạo Spring Boot project
+**Files:** `V2__create_users_and_auth_providers.sql`, `User`, `UserAuthProvider`, `UserBlock`, repositories.
 
-### Xong
-- Tạo pom.xml: Spring Boot 3.4.4, Java 21, Maven. Dependencies: Web, Security, JPA, Redis, WebSocket, Validation, Flyway, PostgreSQL, Lombok, jjwt 0.12.6, firebase-admin 9.4.1, test scope.
-- Tạo application.yml: cấu hình datasource, jpa (ddl-auto: validate), flyway, redis, jwt properties. Tạm thời exclude FlywayAutoConfiguration, DataSourceAutoConfiguration, JPA, Redis autoconfigure để app start không cần DB thật.
-- Tạo ChatAppApplication.java (main class).
-- Tạo HealthController: GET /api/health trả {"status":"ok","service":"chat-app-backend"}.
-- Tạo SecurityConfig tạm thời: csrf disabled, permitAll (sẽ lock down Ngay 3).
-- Tạo V1__placeholder.sql cho Flyway.
-- Verify: mvn compile OK, mvn spring-boot:run start thành công trong 1.548s trên port 8080.
+- Decision: UUID PK (DB generate), `OffsetDateTime` timestamps, `@PrePersist`/`@PreUpdate`, soft delete via `deleted_at`.
+- Pitfall: Port 8080 có thể bị process cũ chiếm. Hibernate validate vẫn pass trước khi lỗi port.
+- Pattern: Spring Data Redis log WARN "Could not safely identify store assignment" khi có cả JPA + Redis module — bình thường, không phải lỗi.
 
-### Đang dở
-- Flyway migration thật (schema users, conversations, messages) — để Ngay 2.
-- JWT filter chain, auth endpoints — để Ngay 2-3.
+---
 
-### Blocker
-- JAVA_HOME trỏ vào jdk-25 không tồn tại. Fix: export JAVA_HOME="/c/Program Files/Java/jdk-21.0.10" trước khi chạy mvn. Cần set JAVA_HOME đúng trong môi trường hệ thống hoặc thêm vào script.
+## [W1-D1] Project Bootstrap
 
-### Ghi chú kỹ thuật
-- jjwt 0.12.6 là latest stable của 0.12.x series — dùng version này.
-- firebase-admin 9.4.1 resolve OK với Spring Boot 3.4.4.
-- Khi chưa có DB/Redis, exclude 5 autoconfigure classes trong application.yml để app start sạch.
+- Stack chốt: Spring Boot 3.4.4, Java 21, Maven, jjwt 0.12.6, firebase-admin 9.4.1.
+- Pitfall: `JAVA_HOME` trỏ vào JDK không tồn tại. Fix: `export JAVA_HOME="/c/Program Files/Java/jdk-21.0.10"` trước `mvn`.
+- Pattern: Exclude 5 autoconfigure classes trong `application.yml` khi chưa có DB/Redis để app start sạch. Remove exclusion sau khi infra sẵn sàng.
+- Pattern: V1__placeholder.sql cho Flyway migration đầu tiên.

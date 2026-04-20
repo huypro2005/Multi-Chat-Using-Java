@@ -8,6 +8,10 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  define: {
+    // Some browser libs (sockjs-client) still read `global`.
+    global: 'globalThis',
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

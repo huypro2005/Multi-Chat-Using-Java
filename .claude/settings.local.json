@@ -34,7 +34,15 @@
       "Bash(mkdir -p \"/d/CodeMonHoc/SE330/chat-app/backend/src/main/java/com/chatapp/conversation/repository\")",
       "Bash(echo \"EXIT_CODE: $?\")",
       "Bash(export DB_PASSWORD=123456 DB_HOST=localhost DB_PORT=5432 DB_NAME=chatapp DB_USER=postgres)",
-      "Bash(export DB_PASSWORD=123456 DB_HOST=localhost DB_PORT=5432 DB_NAME=chatapp DB_USER=postgres REDIS_HOST=localhost REDIS_PORT=6379 JWT_SECRET=\"test-secret-key-for-testing-purposes-only-32chars\" FIREBASE_CREDENTIALS_PATH=/dev/null)"
+      "Bash(export DB_PASSWORD=123456 DB_HOST=localhost DB_PORT=5432 DB_NAME=chatapp DB_USER=postgres REDIS_HOST=localhost REDIS_PORT=6379 JWT_SECRET=\"test-secret-key-for-testing-purposes-only-32chars\" FIREBASE_CREDENTIALS_PATH=/dev/null)",
+      "Bash(export PATH=\"$JAVA_HOME/bin:$PATH\")",
+      "Read(//tmp/**)",
+      "Bash(jar xf *)",
+      "Bash(javap -p org/springframework/web/socket/messaging/SubProtocolWebSocketHandler.class)",
+      "Bash(javap -p org/springframework/web/socket/messaging/StompSubProtocolHandler.class)",
+      "Bash(javap -p org/springframework/web/socket/config/annotation/WebSocketMessageBrokerConfigurationSupport.class)",
+      "Bash(javap -p org/springframework/messaging/simp/stomp/DefaultStompSession.class)",
+      "Bash(javap -c -p org/springframework/messaging/simp/stomp/DefaultStompSession.class)"
     ]
   }
 }

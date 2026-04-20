@@ -227,8 +227,116 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### TransactionalEventListener Broadcast Pattern (W4-D4)
+- Event record: `MessageCreatedEvent(UUID conversationId, MessageDto messageDto)` — DTO truyền trực tiếp, không cần load lại.
+- Publisher: inject `ApplicationEventPublisher`, gọi trong `@Transactional` method SAU khi entity đã save và dto đã map.
+- Listener: `@TransactionalEventListener(phase = AFTER_COMMIT)` trong separate `@Component`. Không đặt trong service.
+- Envelope: `Map.of("type", "MESSAGE_CREATED", "payload", dto)` — FE parse `event.type` + `event.payload`.
+- try-catch trong listener: broadcast fail không propagate → REST 201 không bị ảnh hưởng.
+- MessageMapper: @Component riêng, tách DTO mapping khỏi service để broadcaster reuse.
+- Test: `@MockBean SimpMessagingTemplate` trong integration test — broadcaster inject bean qua constructor, mock tự wire vào.
+- T16 pitfall: khi broadcaster throws trong AFTER_COMMIT, stack trace xuất hiện trong log là bình thường (Spring log error nhưng không propagate sau try-catch). REST vẫn trả 201.
+
+---
+
+---
+
+### Ephemeral Event Pattern (W5-D1 — Typing Indicator)
+
+- Ephemeral STOMP events (typing) KHÔNG persist DB — pure broadcast. Không cần entity/migration.
+- Package: `com.chatapp.websocket` cho handler ephemeral (không phải `message.controller`).
+- `ChatTypingHandler`: member check → rate limit → load user → broadcast. Silent drop (return) thay vì throw exception cho typing vì non-critical.
+- `TypingRateLimiter`: INCR + EXPIRE pattern, 1 event/2s/key. Fail-open khi Redis down.
+- Rate limit key pattern: `rate:typing:{userId}:{convId}` — riêng biệt với `rate:msg:{userId}`.
+- Broadcast shape theo contract SOCKET_EVENTS.md — khi contract và task spec mâu thuẫn, contract thắng. `fullName` không có trong contract 3.4, không thêm vào payload.
+- Test pattern: `@MockitoSettings(strictness = Strictness.LENIENT)` khi `setUp` stubbing quá broad mà một số test không dùng hết (vd non-member test skip rate-limit/userRepo calls).
+
+### Destination-Aware Auth Policy Pattern (W5-D1 Fix A)
+
+- `AuthChannelInterceptor.handleSend()` dùng `DestinationPolicy` enum để phân biệt cách xử lý:
+  - `STRICT_MEMBER`: throw `MessageDeliveryException("FORBIDDEN")` cho non-member → ERROR frame về client. Dùng cho `.message`.
+  - `SILENT_DROP`: interceptor pass through, handler tự silent-drop. Dùng cho `.typing`, `.read`. KHÔNG làm DB query.
+- `resolveSendPolicy(String destination)` — package-private, switch-by-suffix: `.message` → STRICT, `.typing`/`.read` → SILENT, unknown → STRICT (safe default).
+- Tại sao SILENT_DROP cho typing: throw FORBIDDEN tạo ERROR frame → FE hiện lỗi → bad UX. Handler đã có member check riêng (defense-in-depth).
+- Test pattern: `verifyNoInteractions(conversationMemberRepository)` trong SILENT_DROP tests để đảm bảo interceptor không query DB thừa.
+- Enum đặt bên trong class (inner enum) — không cần file riêng. Package-private visibility đủ vì test cùng package.
+
+---
+
+### Unified ACK/ERROR Shape Pattern (W5-D2 — ADR-017)
+
+- `AckPayload` unified shape: `{operation, clientId, message}`. `operation` = "SEND"|"EDIT"|"DELETE". `clientId` = UUID client sinh (tempId cho SEND, clientEditId cho EDIT).
+- `ErrorPayload` unified shape: `{operation, clientId, error, code}`. Cùng discriminator để FE route handler.
+- `sendAck(userId, tempId, dto)` → `AckPayload("SEND", tempId, dto)`. `sendEditAck(userId, clientEditId, dto)` → `AckPayload("EDIT", clientEditId, dto)`.
+- Exception handlers trong STOMP controller phải pass `operation` string vào `ErrorPayload` — SEND handlers dùng "SEND", EDIT handlers dùng "EDIT".
+
+### Anti-enumeration MSG_NOT_FOUND (W5-D2)
+
+- Edit message merge 4 conditions thành 1 error code `MSG_NOT_FOUND`: message null, wrong conv, not owner, soft-deleted. Không leak message existence.
+- AppException details phải chứa `clientEditId` (không phải `tempId`) để exception handler echo đúng field.
+
+### Edit Dedup Pattern (W5-D2)
+
+- Key: `msg:edit-dedup:{userId}:{clientEditId}` TTL 60s — atomic `SET NX EX` TRƯỚC mọi DB mutation.
+- Duplicate frame: GET value → "PENDING" → silent drop; real messageId → re-send EDIT ACK idempotently.
+- `editViaStomp()` sau khi save: `SET dedupKey messageId.toString() EX 60` (update value, TTL giữ 60s).
+- Edit rate limit key tách biệt: `rate:msg-edit:{userId}` max 10/min (khác `rate:msg:{userId}` cho send).
+
+### Edit Window Check (W5-D2)
+
+- Edit window: `now() - message.createdAt > 300s` → MSG_EDIT_WINDOW_EXPIRED.
+- Dùng `java.time.Duration.between(createdAt.atZoneSameInstant(UTC), now).getSeconds()` để normalize timezone.
+- No-op check: `newContent.trim().equals(message.content.trim())` → MSG_NO_CHANGE (trước khi save).
+- Order: validate → rate limit → dedup → load message → window check → no-op check → save.
+
+---
+
+### Soft Delete Pattern — Message (W5-D3)
+
+- Soft delete cho messages: set `deletedAt = now(UTC)` + `deletedBy = userId` via domain method `message.markAsDeletedBy(UUID)`. KHÔNG xóa cứng.
+- `deleted_by UUID NULL REFERENCES users(id) ON DELETE SET NULL` — thêm qua Flyway migration riêng (V6). `deleted_at` đã có từ V5.
+- **Content strip tại mapper**: `MessageMapper.toDto()` check `message.getDeletedAt() != null` → `content = null` trong DTO. Áp dụng TẤT CẢ path (REST + WS). DB column vẫn lưu content gốc (nullable=false).
+- `MessageDto` thêm 2 fields: `OffsetDateTime deletedAt`, `String deletedBy` (UUID string). Apply cho mọi DTO constructor call.
+- DELETE ACK shape khác SEND/EDIT: trả **minimal map** `{id, conversationId, deletedAt, deletedBy}` (không full MessageDto). Dùng `Map<String,Object>` thay vì `AckPayload` để match contract §3d.3 chính xác.
+- Rate limit key: `rate:msg-delete:{userId}` max 10/min — tách biệt với `rate:msg-edit:` và `rate:msg:`.
+- Dedup key: `msg:delete-dedup:{userId}:{clientDeleteId}` TTL 60s. Idempotent re-send ACK khi duplicate frame.
+- `MessageDeletedEvent(convId, messageId, Instant deletedAt, UUID deletedBy)` — dùng `Instant` (không `OffsetDateTime`) để truyền sang broadcaster tiện `.toString()` ISO8601.
+- `Map.of()` throws NPE nếu value là null — đảm bảo tất cả field trong broadcast/ACK map là non-null trước khi truyền vào.
+
+---
+
+### Forward Pagination Pattern (W5-D4 — `after` param)
+
+- `GET /messages?after=ISO8601` — forward pagination (catch-up), ORDER ASC, INCLUDE deleted messages (FE cần placeholder state).
+- `cursor` và `after` mutually exclusive: cả hai non-null → throw 400 `VALIDATION_FAILED` tại controller trước khi vào service.
+- Repository method: `findByConversation_IdAndCreatedAtAfterOrderByCreatedAtAsc` — KHÔNG filter `deletedAtIsNull` (khác backward cursor).
+- `nextCursor` cho forward page = createdAt của **item mới nhất** (last item); backward page = item cũ nhất (first item sau reverse).
+- Tách rõ 2 code path trong `getMessages(UUID, UUID, OffsetDateTime cursor, OffsetDateTime after, int limit)` — if after != null dùng forward branch; else dùng backward branch.
+- `parseCursor()` trong controller reuse cho cả cursor lẫn after (cùng ISO8601 parse logic, cùng error message — acceptable).
+
+### ReplyPreviewDto `deletedAt` field (W5-D4)
+
+- `ReplyPreviewDto` thêm 4th field `String deletedAt` (ISO8601 | null). Record upgrade là breaking change với bất kỳ code tạo instance trực tiếp — kiểm tra toàn bộ `new ReplyPreviewDto(...)` calls.
+- `MessageMapper.toReplyPreview(Message source)` — method riêng (public) để test và reuse dễ hơn. Logic: if source.deletedAt != null → contentPreview=null, deletedAt=string; else → contentPreview truncated, deletedAt=null.
+- Quoting deleted source: ALLOWED (reply vào tin nhắn đã xóa OK) — validate chỉ check conv membership, không check deletedAt của source.
+
+### STOMP sendViaStomp reply validation (W5-D4)
+
+- Reply validation đặt SAU membership check, TRƯỚC rate limit (tránh waste rate limit quota khi reply invalid).
+- `existsByIdAndConversation_Id` → false nhưng `existsById` → true: source thuộc conv khác → "Tin nhắn gốc thuộc conversation khác". Cả 2 false: "Tin nhắn gốc không tồn tại".
+- Sử dụng `messageRepository.getReferenceById(replyToMessageId)` khi set lazy reference (không load entity ngay).
+- Test pattern với T17 (after param): kiểm tra `item.get("deletedAt").isNull()` thay vì so sánh content (content bị strip thành null cho deleted messages → `asText()` trả "null" string, không phải null).
+
+---
+
 ## Changelog file này
 
+- 2026-04-20 W5D4: Thêm Forward Pagination Pattern (after param), ReplyPreviewDto deletedAt field, STOMP reply validation pattern.
+- 2026-04-20 W5D3: Thêm Soft Delete Pattern (Message), content strip tại mapper, DELETE ACK minimal map, Map.of() null pitfall.
+- 2026-04-20 W5D2: Thêm Unified ACK/ERROR Shape Pattern (ADR-017), Anti-enumeration MSG_NOT_FOUND, Edit Dedup Pattern, Edit Window Check.
+- 2026-04-20 W5D1 Fix A: Thêm Destination-Aware Auth Policy Pattern (DestinationPolicy enum, resolveSendPolicy, SILENT_DROP cho typing/read, STRICT_MEMBER cho message).
+- 2026-04-20 W5D1: Thêm Ephemeral Event Pattern (TypingRateLimiter, ChatTypingHandler, silent drop, LENIENT strictness test).
+- 2026-04-20 W4D4: Thêm TransactionalEventListener Broadcast Pattern, MessageMapper extraction.
 - 2026-04-19 W4D3: Thêm WebSocket/STOMP config pattern (AuthChannelInterceptor, StompErrorHandler, SubProtocolWebSocketHandler lookup qua ContextRefreshedEvent), raw WebSocket test pattern cho CONNECT/SUBSCRIBE error verification.
 - 2026-04-19 W4D1: Thêm Messages domain pattern, cursor pagination logic, H2 TIMESTAMPTZ pitfall cho test.
 - 2026-04-19 W3D2: Thêm W3-BE-1 fix pattern, findOrCreate 1-1 SQL, anti-enumeration 404, flush+clear pattern, H2 UUID native query workaround.

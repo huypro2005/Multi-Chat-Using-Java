@@ -5,6 +5,79 @@
 
 ---
 
+[FE] feat(w5-d4): reconnect catch-up + reply UI [2026-04-20]
+- Tạo: src/features/messages/catchUp.ts — REST catch-up sau reconnect, GET /messages?after=<ts>&limit=100, merge+dedup, fallback invalidate
+- Sửa: src/features/messages/useConvSubscription.ts — wasDisconnectedRef track disconnect, gọi catchUpMissedMessages khi reconnect (không phải connect đầu)
+- Sửa: src/types/message.ts — ReplyPreviewDto thêm deletedAt: string|null, contentPreview: string|null
+- Tạo: src/features/messages/components/ReplyQuote.tsx — quote bubble hiện trong message
+- Tạo: src/features/messages/components/ReplyPreviewBox.tsx — preview box trên MessageInput, Escape cancel
+- Sửa: src/features/messages/components/MessageItem.tsx — thêm onReply prop, import+render ReplyQuote, handleReply gọi callback thật (block khi deletedAt/clientTempId)
+- Sửa: src/features/messages/components/MessageActions.tsx — Reply button disable khi deletedAt || clientTempId
+- Sửa: src/features/messages/components/MessagesList.tsx — nhận+forward onReply prop
+- Sửa: src/features/messages/components/MessageInput.tsx — thêm replyToMessageId, onSent props; truyền replyToMessageId vào sendMessage()
+- Sửa: src/features/messages/hooks.ts — useSendMessage nhận replyToMessageId?, truyền vào publishConversationMessage
+- Sửa: src/lib/stompClient.ts — StompSendPayload thêm replyToMessageId?: string|null
+- Sửa: src/pages/ConversationDetailPage.tsx — replyState scoped pattern (không useEffect setState), wire ReplyPreviewBox+MessagesList.onReply+MessageInput.replyToMessageId+onSent
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+---
+
+[FE] fix(w5-d5): hide tick for deleted + toast timeouts
+- Cài: sonner (toast singleton, 1 package)
+- Sửa: src/App.tsx — import + render <Toaster position="bottom-right" richColors /> trong BrowserRouter
+- Sửa: src/features/messages/components/MessageItem.tsx — wrap status icon block trong {!isDeleted && (...)} — không render spinner/✓/AlertCircle khi message.deletedAt != null
+- Sửa: src/features/messages/hooks.ts — import toast from sonner; gọi toast.error('Gửi thất bại, thử lại') trong SEND timeout callback
+- Sửa: src/features/messages/useEditMessage.ts — import toast from sonner; gọi toast.error('Sửa thất bại, thử lại') trong EDIT timeout callback
+- Sửa: src/features/messages/useDeleteMessage.ts — import toast from sonner; replace broken dynamic import workaround bằng toast.error('Xóa thất bại, thử lại') trong DELETE timeout callback; xóa console.error cũ
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+[FE][W5-D3][2026-04-20] feat: delete message + Facebook-style hover actions
+- Sửa: src/types/message.ts — thêm deletedAt/deletedBy/deleteStatus vào MessageDto; content đổi sang string|null; thêm DeleteAckMessage interface (minimal ACK payload cho DELETE)
+- Tạo: src/features/messages/deleteTimerRegistry.ts — singleton Map<clientDeleteId, {timerId, messageId, convId}>, pattern giống editTimerRegistry
+- Tạo: src/features/messages/useDeleteMessage.ts — window.confirm → publish /app/conv.{id}.delete → mark deleteStatus='deleting' → 10s timeout → revert + log; patchMessageById pattern
+- Sửa: src/features/messages/useAckErrorSubscription.ts — thêm DELETE ACK case (patch deletedAt+deletedBy+content=null) + DELETE ERROR case (revert deleteStatus + log error code); import deleteTimerRegistry
+- Sửa: src/features/messages/useConvSubscription.ts — thêm MESSAGE_DELETED handler (soft patch: content=null, deletedAt, deletedBy, idempotent)
+- Tạo: src/features/messages/components/MessageActions.tsx — Facebook Messenger style hover bar; Reply stub, More menu (Copy/Edit/Delete); click-outside + Escape close; isOwn gate cho Edit/Delete
+- Tạo: src/features/messages/components/DeletedMessagePlaceholder.tsx — gray italic bubble "Tin nhắn đã bị xóa", bg-gray-100/dark:bg-gray-800, opacity-70
+- Sửa: src/features/messages/components/MessageItem.tsx — integrate MessageActions + DeletedMessagePlaceholder; isDeleted gate; isDeleting opacity; remove old standalone "Sửa" button; wire onDelete/onCopy/onEdit/onReply; "(đã chỉnh sửa)" badge guard deletedAt
+- Sửa: src/stores/authStore.ts — clearAuth() gọi deleteTimerRegistry.clearAll()
+- Sửa: src/features/messages/hooks.ts — thêm deletedAt:null/deletedBy:null vào optimisticMsg (required fields mới)
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+[FE][W5-D2][2026-04-20] feat: edit message inline + wire STOMP (ADR-017)
+- Sửa: src/types/message.ts — thêm AckEnvelope, ErrorEnvelope (unified ADR-017), EditStatus type. Giữ AckPayload/ErrorPayload deprecated.
+- Tạo: src/features/messages/editTimerRegistry.ts — singleton Map<clientEditId, {timerId, messageId, convId}>, pattern giống timerRegistry
+- Sửa: src/features/messages/hooks.ts — thêm patchMessageById (patch theo real id, khác patchMessageByTempId theo clientTempId)
+- Tạo: src/features/messages/useEditMessage.ts — optimistic update + publish /app/conv.{id}.edit + 10s timeout timer
+- Sửa: src/features/messages/useAckErrorSubscription.ts — unified ACK/ERROR handler với switch(operation): SEND giữ logic cũ, EDIT route sang editTimerRegistry + patchMessageById, MSG_NO_CHANGE silent revert
+- Sửa: src/features/messages/useConvSubscription.ts — thêm MESSAGE_UPDATED handler với dedup theo editedAt (lexicographic ISO8601 compare)
+- Sửa: src/features/messages/components/MessageItem.tsx — inline edit UI: canEdit (isOwn + no clientTempId + messageAgeMs < 290s), InlineEditArea (textarea autoFocus, Enter save, Escape cancel, error display), "(đã chỉnh sửa)" badge, hover Edit button
+- Sửa: src/stores/authStore.ts — clearAuth() gọi editTimerRegistry.clearAll() thêm vào cạnh timerRegistry.clearAll()
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+[FE] fix(w5-d1-race): stopTyping trước sendMessage trong MessageInput
+- Sửa: src/features/messages/components/MessageInput.tsx — đổi thứ tự trong handleSend: onTypingStop?.() gọi trước sendMessage(trimmed) để tránh race condition ~200ms typing indicator còn hiển thị sau khi message đã gửi
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+[FE][W5-D1][2026-04-20] feat: typing indicator — publish khi gõ, hiển thị khi người khác gõ
+- Tạo: src/features/messages/useTypingIndicator.ts — subscribe /topic/conv.{id} filter TYPING_STARTED/STOPPED, skip self, auto-remove 5s, startTyping() debounce 2s + autoStop 3s, stopTyping() explicit, clear typingUsers khi DISCONNECTED/ERROR, cleanup timers khi unmount
+- Tạo: src/features/messages/components/TypingIndicator.tsx — render null khi rỗng, "X đang gõ..." / "X, Y đang gõ..." / "N người đang gõ...", aria-live polite
+- Sửa: src/features/messages/components/MessageInput.tsx — thêm onTypingStart/onTypingStop props, gọi startTyping trong onChange, stopTyping sau send + onBlur
+- Sửa: src/pages/ConversationDetailPage.tsx — import useTypingIndicator + TypingIndicator, render <TypingIndicator> trên <MessageInput>, pass startTyping/stopTyping
+- tsc -b --noEmit: 0 error | lint: 0 error (2 warnings đã fix — exhaustive-deps)
+
+[FE][W4-D4-hotfix][2026-04-20] fix: useConvSubscription heuristic match never triggered (ADR-016)
+- Sửa: src/features/messages/useConvSubscription.ts:30 — isLikelyMatchOptimistic: thay `!tempMsg.id.startsWith('temp-')` bằng `!tempMsg.clientTempId`
+- Root cause: hooks.ts (Path B ADR-016) tạo optimistic msg với id=crypto.randomUUID() (UUID thuần), không có prefix "temp-". Check cũ không bao giờ pass → broadcast về trước ACK bị append thêm mới thay vì replace → ACK cũng replace → 2 bản real message trong cache.
+- Fix: dùng clientTempId (optional field trong MessageDto) làm discriminator cho optimistic messages — đúng semantic hơn.
+- tsc -b --noEmit: 0 error | lint: 0 error
+
+[FE][W4-D4][2026-04-20] feat: useConvSubscription hook with dedupe + wire in ConversationDetailPage
+- Tạo: src/features/messages/useConvSubscription.ts — subscribe /topic/conv.{id}, appendToCache với dedupe (pages.some m.id check), invalidate ['conversations'], re-subscribe qua onConnectionStateChange
+- Sửa: src/pages/ConversationDetailPage.tsx — import + call useConvSubscription(id)
+- Fix: frontend/tsconfig.json root — thêm "ignoreDeprecations": "6.0" (baseUrl deprecated TS6.0)
+- build: 0 TS error | lint: 0 ESLint error
+
 [FE][W4-D3][2026-04-20] feat: STOMP client singleton, connect/disconnect lifecycle, ConnectionStatus debug UI
 - Tạo: src/lib/stompClient.ts — Client singleton, ConnectionState type, connectStomp/disconnectStomp/getStompClient, onConnectionStateChange listener set, exponential backoff MAX_RECONNECT=10, AUTH_TOKEN_EXPIRED→refresh, AUTH_REQUIRED→logout
 - Sửa: src/services/authService.ts — thêm refresh() method (dùng bởi stompClient khi token expired)
