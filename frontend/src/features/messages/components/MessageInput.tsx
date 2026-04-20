@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Paperclip, Send } from 'lucide-react'
+import { Paperclip, Send, WifiOff } from 'lucide-react'
 import { useSendMessage } from '../hooks'
+import { getConnectionState } from '@/lib/stompClient'
+import { onConnectionStateChange } from '@/lib/stompClient'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -9,24 +11,43 @@ interface Props {
   conversationId: string
   /** false (default) = enabled; true = disabled (e.g. no permission) */
   disabled?: boolean
+  /** Called on every keystroke (for typing indicator publish) */
+  onTypingStart?: () => void
+  /** Called after send or on textarea blur (for typing indicator stop) */
+  onTypingStop?: () => void
 }
 
 const MAX_CHARS = 5000
 const WARN_CHARS = 4500
 
 /**
- * MessageInput — thanh nhập và gửi tin nhắn.
- * Gửi qua REST POST (Tuần 4). WebSocket sẽ wire ở Tuần 4+.
+ * MessageInput — thanh nhập và gửi tin nhắn qua STOMP (Path B, ADR-016).
  * Enter = gửi, Shift+Enter = xuống dòng.
  * Auto-resize textarea tối đa 5 dòng.
+ * Disable send khi STOMP chưa connect.
  */
-export function MessageInput({ conversationId, disabled = false }: Props) {
+export function MessageInput({
+  conversationId,
+  disabled = false,
+  onTypingStart,
+  onTypingStop,
+}: Props) {
   const [content, setContent] = useState('')
   const [charError, setCharError] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const shouldRefocusAfterSendRef = useRef(false)
 
-  const { mutate: sendMessage, isPending } = useSendMessage(conversationId)
+  // Track STOMP connection state để disable input khi mất kết nối
+  const [isConnected, setIsConnected] = useState(() => getConnectionState() === 'CONNECTED')
+
+  useEffect(() => {
+    const unsub = onConnectionStateChange((state) => {
+      setIsConnected(state === 'CONNECTED')
+    })
+    return unsub
+  }, [])
+
+  const sendMessage = useSendMessage(conversationId)
 
   // Auto-resize textarea height
   const autoResize = useCallback(() => {
@@ -40,32 +61,34 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setContent(e.target.value)
     setCharError(false)
+    setSendError(null)
     autoResize()
+    onTypingStart?.()
   }
 
   const handleSend = useCallback(() => {
     const trimmed = content.trim()
-    if (!trimmed || isPending || disabled) return
+    if (!trimmed || disabled || !isConnected) return
     if (trimmed.length > MAX_CHARS) {
       setCharError(true)
       return
     }
-    sendMessage({ content: trimmed })
-    shouldRefocusAfterSendRef.current = true
-    setContent('')
-    setCharError(false)
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
-  }, [content, disabled, isPending, sendMessage])
-
-  useEffect(() => {
-    if (!isPending && !disabled && shouldRefocusAfterSendRef.current) {
+    try {
+      onTypingStop?.()
+      sendMessage(trimmed)
+      setContent('')
+      setCharError(false)
+      setSendError(null)
+      // Reset textarea height
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+      }
       textareaRef.current?.focus()
-      shouldRefocusAfterSendRef.current = false
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Không thể gửi tin nhắn'
+      setSendError(message === 'STOMP_NOT_CONNECTED' ? 'Mất kết nối, thử lại sau' : message)
     }
-  }, [disabled, isPending])
+  }, [content, disabled, isConnected, sendMessage, onTypingStop])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !disabled) {
@@ -76,9 +99,18 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
 
   const showCounter = content.length > WARN_CHARS
   const isOverLimit = content.length > MAX_CHARS
+  const isInputDisabled = disabled || !isConnected
 
   return (
     <div className="px-4 py-3 border-t bg-white flex flex-col gap-1 flex-shrink-0">
+      {/* Mất kết nối banner */}
+      {!isConnected && (
+        <div className="flex items-center gap-1.5 px-1 py-0.5">
+          <WifiOff size={12} className="text-amber-500" />
+          <span className="text-xs text-amber-600">Mất kết nối, đang thử lại…</span>
+        </div>
+      )}
+
       {/* Character counter */}
       {showCounter && (
         <div className="flex justify-end px-1">
@@ -95,6 +127,13 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
       {charError && (
         <p className="text-red-500 text-xs px-1" role="alert">
           Tin nhắn không được vượt quá {MAX_CHARS.toLocaleString()} ký tự.
+        </p>
+      )}
+
+      {/* Send error */}
+      {sendError && (
+        <p className="text-red-500 text-xs px-1" role="alert">
+          {sendError}
         </p>
       )}
 
@@ -115,8 +154,9 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
           value={content}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          disabled={disabled || isPending}
-          placeholder="Nhập tin nhắn..."
+          onBlur={() => onTypingStop?.()}
+          disabled={isInputDisabled}
+          placeholder={isConnected ? 'Nhập tin nhắn...' : 'Đang kết nối…'}
           rows={1}
           aria-label="Nội dung tin nhắn"
           className="flex-1 resize-none rounded-2xl border border-gray-200 px-4 py-2 text-sm
@@ -128,7 +168,7 @@ export function MessageInput({ conversationId, disabled = false }: Props) {
         <button
           type="button"
           onClick={handleSend}
-          disabled={disabled || isPending || !content.trim() || isOverLimit}
+          disabled={isInputDisabled || !content.trim() || isOverLimit}
           aria-label="Gửi tin nhắn"
           className="bg-indigo-600 text-white rounded-full p-2 disabled:opacity-40
             hover:bg-indigo-700 transition-colors flex-shrink-0"

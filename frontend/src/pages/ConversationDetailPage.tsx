@@ -6,6 +6,9 @@ import ConversationHeader from '@/features/conversations/components/Conversation
 import { ConversationInfoPanel } from '@/features/conversations/components/ConversationInfoPanel'
 import { MessagesList } from '@/features/messages/components/MessagesList'
 import { MessageInput } from '@/features/messages/components/MessageInput'
+import { useConvSubscription } from '@/features/messages/useConvSubscription'
+import { useTypingIndicator } from '@/features/messages/useTypingIndicator'
+import { TypingIndicator } from '@/features/messages/components/TypingIndicator'
 
 // ---------------------------------------------------------------------------
 // Skeleton — hiển thị khi conversation đang load
@@ -32,6 +35,12 @@ export default function ConversationDetailPage() {
 
   const { data: conversation, isLoading, isError, error } = useConversation(id ?? '')
   const [showInfo, setShowInfo] = useState(false)
+
+  // Subscribe /topic/conv.{id} — nhận message realtime, merge vào cache với dedupe
+  useConvSubscription(id)
+
+  // Typing indicator — publish khi gõ, nhận khi người khác gõ
+  const { typingUsers, startTyping, stopTyping } = useTypingIndicator(id ?? '')
 
   // -- Loading --
   if (isLoading) return <DetailPageSkeleton />
@@ -76,7 +85,12 @@ export default function ConversationDetailPage() {
         {/* Messages column */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <MessagesList conversationId={id!} />
-          <MessageInput conversationId={id!} />
+          <TypingIndicator typingUsers={typingUsers} />
+          <MessageInput
+            conversationId={id!}
+            onTypingStart={startTyping}
+            onTypingStop={stopTyping}
+          />
         </div>
 
         {/* Info panel — slide-in từ phải */}
