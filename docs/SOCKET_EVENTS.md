@@ -223,7 +223,8 @@ TYPING_STOPPED shape giống hệt.
 {
   "tempId": "uuid v4 (client-generated)",
   "content": "string (1-5000 chars, required)",
-  "type": "TEXT"
+  "type": "TEXT",
+  "replyToMessageId": "uuid | null (W5-D4+, nullable)"
 }
 ```
 
@@ -231,8 +232,9 @@ TYPING_STOPPED shape giống hệt.
 - `tempId`: bắt buộc, UUID v4 format. Server dùng để dedup + route ACK.
 - `content`: bắt buộc, trim sau đó 1–5000 chars. Content toàn whitespace → validation fail.
 - `type`: chỉ `"TEXT"` ở Path B. `IMAGE` / `FILE` vẫn đi qua REST (kèm file upload). `SYSTEM` chỉ server phát, client không gửi.
+- `replyToMessageId` (W5-D4): nullable UUID. Nếu non-null → PHẢI thuộc cùng `convId`; cross-conv → `VALIDATION_FAILED`. Cho phép reply vào tin nhắn đã bị soft-delete (quoting deleted source OK — AD-16). ACK trả về `replyToMessage.contentPreview = null` + `replyToMessage.deletedAt` set nếu source đã xóa.
 
-> **Path B scope**: Chỉ `TEXT` qua STOMP. Reply-to-message (`replyToMessageId`) sẽ add vào payload ở Tuần 5 khi FE wire UI trả lời tin. V1 Path B chưa hỗ trợ reply inline.
+> **Path B scope**: Chỉ `TEXT` qua STOMP. Reply-to-message qua `replyToMessageId` đã hỗ trợ từ W5-D4 (post-W5-D3 hotfix reconnect). Upload media (`IMAGE` / `FILE`) vẫn đi qua REST.
 
 ### 3b.2 Server → Client (sender-only): ACK
 

@@ -160,6 +160,28 @@ public class MessageService {
                     Map.of("tempId", tempId));
         }
 
+        // Step 2b: Validate replyToMessageId if present
+        // Cho phép reply vào tin nhắn đã bị soft delete (quoting deleted source OK per ADR)
+        if (payload.replyToMessageId() != null) {
+            boolean replyExists = messageRepository.existsByIdAndConversation_Id(
+                    payload.replyToMessageId(), convId);
+            if (!replyExists) {
+                // Check if message exists but belongs to a different conv (different error semantics)
+                boolean existsAtAll = messageRepository.existsById(payload.replyToMessageId());
+                if (existsAtAll) {
+                    throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                            "Tin nhắn gốc thuộc conversation khác",
+                            Map.of("tempId", tempId, "field", "replyToMessageId",
+                                    "error", "Reply source belongs to a different conversation"));
+                } else {
+                    throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                            "Tin nhắn gốc không tồn tại",
+                            Map.of("tempId", tempId, "field", "replyToMessageId",
+                                    "error", "Reply source message not found"));
+                }
+            }
+        }
+
         // Step 3: Rate limit (fail-open when Redis down)
         checkStompRateLimit(userId, tempId);
 
@@ -185,6 +207,12 @@ public class MessageService {
                 .type(MessageType.TEXT)
                 .content(payload.content().trim())
                 .build();
+
+        // Set replyToMessage if provided
+        if (payload.replyToMessageId() != null) {
+            Message replySource = messageRepository.getReferenceById(payload.replyToMessageId());
+            message.setReplyToMessage(replySource);
+        }
 
         message = messageRepository.save(message);
         // log.info("[STOMP] Message saved for userId={}, convId={}, tempId={}, messageId={}",
@@ -237,13 +265,19 @@ public class MessageService {
     /**
      * Lấy lịch sử tin nhắn với cursor-based pagination.
      *
-     * - Nếu cursor != null: lấy messages có createdAt < cursor.
-     * - Query trả mới → cũ (DESC), sau đó reverse để trả FE cũ → mới (ASC).
-     * - nextCursor = createdAt của item cũ nhất trong page (item đầu sau reverse).
+     * - Nếu cursor != null: backward pagination — lấy messages có createdAt < cursor, ORDER DESC, reverse về ASC.
+     * - Nếu after != null: forward pagination (catch-up) — lấy messages có createdAt > after, ORDER ASC trực tiếp.
+     *   Include cả deleted messages (FE cần biết placeholder state khi reconnect).
+     * - Nếu cả hai null: fetch newest như cũ (DESC, reverse).
+     * - cursor và after không được dùng cùng nhau (caller đã validate trước khi gọi method này).
+     *
+     * nextCursor logic:
+     * - backward (cursor / null): nextCursor = createdAt item cũ nhất (index 0 sau reverse). Null khi hasMore=false.
+     * - forward (after): nextCursor = createdAt item mới nhất (last item). Null khi hasMore=false.
      */
     @Transactional(readOnly = true)
     public MessageListResponse getMessages(UUID currentUserId, UUID convId,
-                                           OffsetDateTime cursor, int limit) {
+                                           OffsetDateTime cursor, OffsetDateTime after, int limit) {
         // Validate limit
         if (limit < 1 || limit > 100) {
             throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
@@ -261,6 +295,30 @@ public class MessageService {
         int fetchSize = limit + 1;
         Pageable pageable = Pageable.ofSize(fetchSize);
 
+        if (after != null) {
+            // Forward pagination: ASC, include deleted messages for catch-up
+            List<Message> results = messageRepository
+                    .findByConversation_IdAndCreatedAtAfterOrderByCreatedAtAsc(
+                            convId, after, pageable);
+
+            boolean hasMore = results.size() > limit;
+            List<Message> pageItems = new ArrayList<>(results.subList(0, Math.min(results.size(), limit)));
+
+            // Items already ASC — no reverse needed
+            // nextCursor = createdAt of newest item (last) for FE to continue paginating forward
+            String nextCursor = null;
+            if (hasMore && !pageItems.isEmpty()) {
+                nextCursor = pageItems.get(pageItems.size() - 1).getCreatedAt()
+                        .atZoneSameInstant(ZoneOffset.UTC)
+                        .toOffsetDateTime()
+                        .toString();
+            }
+
+            List<MessageDto> dtos = pageItems.stream().map(messageMapper::toDto).toList();
+            return new MessageListResponse(dtos, hasMore, nextCursor);
+        }
+
+        // Backward pagination (cursor) or first page (null cursor)
         List<Message> results;
         if (cursor != null) {
             results = messageRepository

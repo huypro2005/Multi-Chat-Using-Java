@@ -117,7 +117,8 @@ class MessageServiceStompTest {
         SenderDto senderDto = new SenderDto(userId, "testuser", "Test User", null);
         mockDto = new MessageDto(
                 savedMsgId, convId, senderDto, MessageType.TEXT,
-                "Hello", null, null, OffsetDateTime.now(ZoneOffset.UTC)
+                "Hello", null, null, OffsetDateTime.now(ZoneOffset.UTC),
+                null, null
         );
 
         // Default: valueOps is returned by redisTemplate.opsForValue()
@@ -129,7 +130,7 @@ class MessageServiceStompTest {
     // =========================================================================
 
     private SendMessagePayload validPayload(String tempId) {
-        return new SendMessagePayload(tempId, "Hello", "TEXT");
+        return new SendMessagePayload(tempId, "Hello", "TEXT", null);
     }
 
     // =========================================================================
@@ -194,7 +195,7 @@ class MessageServiceStompTest {
     void sendViaStomp_contentTooLong_throwsMsgContentTooLong() {
         String tempId = UUID.randomUUID().toString();
         String longContent = "A".repeat(5001);
-        SendMessagePayload payload = new SendMessagePayload(tempId, longContent, "TEXT");
+        SendMessagePayload payload = new SendMessagePayload(tempId, longContent, "TEXT", null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -212,7 +213,7 @@ class MessageServiceStompTest {
     @Test
     void sendViaStomp_blankContent_throwsValidationFailed() {
         String tempId = UUID.randomUUID().toString();
-        SendMessagePayload payload = new SendMessagePayload(tempId, "   ", "TEXT");
+        SendMessagePayload payload = new SendMessagePayload(tempId, "   ", "TEXT", null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -228,7 +229,7 @@ class MessageServiceStompTest {
 
     @Test
     void sendViaStomp_invalidTempId_throwsValidationFailed() {
-        SendMessagePayload payload = new SendMessagePayload("not-a-uuid", "Hello", "TEXT");
+        SendMessagePayload payload = new SendMessagePayload("not-a-uuid", "Hello", "TEXT", null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -357,7 +358,7 @@ class MessageServiceStompTest {
 
     @Test
     void sendViaStomp_nullTempId_throwsValidationFailedWithUnknown() {
-        SendMessagePayload payload = new SendMessagePayload(null, "Hello", "TEXT");
+        SendMessagePayload payload = new SendMessagePayload(null, "Hello", "TEXT", null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));

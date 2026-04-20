@@ -11,10 +11,14 @@ interface Props {
   conversationId: string
   /** false (default) = enabled; true = disabled (e.g. no permission) */
   disabled?: boolean
+  /** UUID của message đang được reply, null nếu không reply */
+  replyToMessageId?: string | null
   /** Called on every keystroke (for typing indicator publish) */
   onTypingStart?: () => void
   /** Called after send or on textarea blur (for typing indicator stop) */
   onTypingStop?: () => void
+  /** Called sau khi message được gửi thành công — dùng để clear replyingTo state */
+  onSent?: () => void
 }
 
 const MAX_CHARS = 5000
@@ -29,8 +33,10 @@ const WARN_CHARS = 4500
 export function MessageInput({
   conversationId,
   disabled = false,
+  replyToMessageId,
   onTypingStart,
   onTypingStop,
+  onSent,
 }: Props) {
   const [content, setContent] = useState('')
   const [charError, setCharError] = useState(false)
@@ -75,7 +81,8 @@ export function MessageInput({
     }
     try {
       onTypingStop?.()
-      sendMessage(trimmed)
+      sendMessage(trimmed, replyToMessageId ?? undefined)
+      onSent?.()
       setContent('')
       setCharError(false)
       setSendError(null)
@@ -88,7 +95,7 @@ export function MessageInput({
       const message = err instanceof Error ? err.message : 'Không thể gửi tin nhắn'
       setSendError(message === 'STOMP_NOT_CONNECTED' ? 'Mất kết nối, thử lại sau' : message)
     }
-  }, [content, disabled, isConnected, sendMessage, onTypingStop])
+  }, [content, disabled, isConnected, sendMessage, onTypingStop, replyToMessageId, onSent])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !disabled) {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { MessageCircle } from 'lucide-react'
 import { useConversation } from '@/features/conversations/hooks'
@@ -6,9 +6,11 @@ import ConversationHeader from '@/features/conversations/components/Conversation
 import { ConversationInfoPanel } from '@/features/conversations/components/ConversationInfoPanel'
 import { MessagesList } from '@/features/messages/components/MessagesList'
 import { MessageInput } from '@/features/messages/components/MessageInput'
+import { ReplyPreviewBox } from '@/features/messages/components/ReplyPreviewBox'
 import { useConvSubscription } from '@/features/messages/useConvSubscription'
 import { useTypingIndicator } from '@/features/messages/useTypingIndicator'
 import { TypingIndicator } from '@/features/messages/components/TypingIndicator'
+import type { MessageDto } from '@/types/message'
 
 // ---------------------------------------------------------------------------
 // Skeleton — hiển thị khi conversation đang load
@@ -35,6 +37,18 @@ export default function ConversationDetailPage() {
 
   const { data: conversation, isLoading, isError, error } = useConversation(id ?? '')
   const [showInfo, setShowInfo] = useState(false)
+  // replyingTo lưu kèm conversationId để auto-clear khi đổi conversation
+  const [replyState, setReplyState] = useState<{ msg: MessageDto; convId: string } | null>(null)
+  // Chỉ hiển thị reply nếu convId khớp với id hiện tại (auto-clear khi điều hướng)
+  const replyingTo = replyState !== null && replyState.convId === id ? replyState.msg : null
+
+  const handleReply = useCallback((msg: MessageDto) => {
+    setReplyState({ msg, convId: id! })
+  }, [id])
+
+  const handleCancelReply = useCallback(() => {
+    setReplyState(null)
+  }, [])
 
   // Subscribe /topic/conv.{id} — nhận message realtime, merge vào cache với dedupe
   useConvSubscription(id)
@@ -84,12 +98,15 @@ export default function ConversationDetailPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Messages column */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <MessagesList conversationId={id!} />
+          <MessagesList conversationId={id!} onReply={handleReply} />
           <TypingIndicator typingUsers={typingUsers} />
+          <ReplyPreviewBox replyingTo={replyingTo} onCancel={handleCancelReply} />
           <MessageInput
             conversationId={id!}
+            replyToMessageId={replyingTo?.id ?? null}
             onTypingStart={startTyping}
             onTypingStop={stopTyping}
+            onSent={handleCancelReply}
           />
         </div>
 

@@ -13,13 +13,14 @@
 // - Invalidate ['conversations'] để sidebar refresh lastMessageAt.
 // ---------------------------------------------------------------------------
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { getStompClient, onConnectionStateChange } from '@/lib/stompClient'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { useAuthStore } from '@/stores/authStore'
 import type { MessageDto, MessageListResponse } from '@/types/message'
+import { catchUpMissedMessages } from './catchUp'
 
 interface WsEvent {
   type: string
@@ -58,6 +59,9 @@ function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boo
 export function useConvSubscription(conversationId: string | undefined): void {
   const queryClient = useQueryClient()
   const currentUserId = useAuthStore((s) => s.user?.id ?? null)
+
+  // Track xem đã từng disconnect chưa — chỉ catch-up khi reconnect, không phải connect lần đầu
+  const wasDisconnectedRef = useRef(false)
 
   useEffect(() => {
     if (!conversationId) return
@@ -100,14 +104,20 @@ export function useConvSubscription(conversationId: string | undefined): void {
 
     // Re-subscribe khi connection state thay đổi
     const unsubState = onConnectionStateChange((state) => {
-      if (state === 'CONNECTED') {
-        // Unsubscribe cũ trước để tránh duplicate handlers
+      if (state === 'DISCONNECTED' || state === 'ERROR') {
+        wasDisconnectedRef.current = true
+        cleanup?.()
+        cleanup = null
+      } else if (state === 'CONNECTED') {
         cleanup?.()
         cleanup = null
         subscribe()
-      } else if (state === 'DISCONNECTED' || state === 'ERROR') {
-        cleanup?.()
-        cleanup = null
+
+        // Chỉ catch-up nếu đã từng disconnect (không phải lần đầu connect)
+        if (wasDisconnectedRef.current) {
+          void catchUpMissedMessages(queryClient, conversationId!)
+          wasDisconnectedRef.current = false
+        }
       }
     })
 

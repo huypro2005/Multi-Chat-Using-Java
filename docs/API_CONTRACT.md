@@ -710,7 +710,8 @@ Auth: Bearer JWT bắt buộc cho tất cả endpoints.
   "replyToMessage": {
     "id": "uuid",
     "senderName": "string",
-    "contentPreview": "string (max 100 chars + '...' nếu truncated)"
+    "contentPreview": "string (max 100 chars + '...' nếu truncated) | null nếu source đã bị xóa",
+    "deletedAt": "ISO8601 | null — non-null nếu source message đã bị soft delete"
   } | null,
   "editedAt": "ISO8601|null",
   "createdAt": "ISO8601 UTC"
@@ -720,6 +721,14 @@ Auth: Bearer JWT bắt buộc cho tất cả endpoints.
 ### POST /api/conversations/{convId}/messages
 
 Gửi tin nhắn vào conversation.
+
+> **Deprecated (ADR-016, Post-W4)**: Endpoint này vẫn hoạt động nhưng FE **không còn dùng để gửi tin nhắn real-time**. Dùng STOMP `/app/conv.{id}.message` thay thế (xem `SOCKET_EVENTS.md` mục 3b). Endpoint giữ lại cho:
+> - Batch import (migration tool, CSV uploader).
+> - Bot API / 3rd-party integration (HTTP token-based auth dễ hơn STOMP).
+> - Testing (integration test viết với HTTP dễ hơn STOMP frame mocking).
+> - Fallback khi STOMP bất khả dụng dài hạn (infra outage) — hiện chưa wire FE fallback logic V1.
+>
+> Shape response không đổi — reviewer sẽ không breaking change endpoint này.
 
 **Request:**
 ```json
@@ -747,8 +756,16 @@ Lấy lịch sử tin nhắn với cursor-based pagination.
 **Query params:**
 | Param | Type | Default | Mô tả |
 |-------|------|---------|-------|
-| cursor | string (ISO8601) | null | Lấy messages có createdAt < cursor. Null = trang đầu |
+| cursor | string (ISO8601) | null | Lấy messages có createdAt **<** cursor, ORDER DESC reversed to ASC. Null = trang đầu (newest) |
+| after | string (ISO8601) | null | Lấy messages có createdAt **>** after, ORDER ASC. Dùng cho reconnect catch-up |
 | limit | int | 50 | Số messages per page (1-100) |
+
+**`after` param — forward pagination (W5-D4):**
+- Lấy messages SAU timestamp này, ORDER **ASC** (cũ → mới).
+- **Mutex với `cursor`**: không thể dùng cùng nhau → `400 VALIDATION_FAILED`.
+- Dùng cho **reconnect catch-up**: client truyền `createdAt` của message mới nhất trong cache để lấy về tất cả messages đã bị miss trong khi offline.
+- **Include cả deleted messages** (content=null, deletedAt set) — FE cần biết placeholder state của message đã xóa khi catch-up.
+- `nextCursor` trong response = `createdAt` của item **mới nhất** (last item) — dùng để tiếp tục paginate forward nếu missed nhiều messages.
 
 **Response 200:**
 ```json
@@ -760,14 +777,15 @@ Lấy lịch sử tin nhắn với cursor-based pagination.
 ```
 
 Note:
-- `items` sorted **ASC** (cũ nhất đến mới nhất).
-- `nextCursor` = `createdAt` của item **cũ nhất** trong page (dùng để lấy page tiếp theo với messages cũ hơn).
+- `items` sorted **ASC** (cũ nhất đến mới nhất) — dù dùng `cursor` hay `after` hay không có tham số.
+- `nextCursor` khi dùng `cursor` (backward) = `createdAt` của item **cũ nhất** trong page (index 0 sau reverse).
+- `nextCursor` khi dùng `after` (forward) = `createdAt` của item **mới nhất** trong page (last item).
 - `nextCursor` null khi `hasMore=false`.
 
 **Errors:**
 | Code | HTTP | Mô tả |
 |------|------|-------|
-| VALIDATION_FAILED | 400 | limit ngoài range 1-100, cursor không đúng ISO8601 |
+| VALIDATION_FAILED | 400 | limit ngoài range 1-100, cursor/after không đúng ISO8601, hoặc cursor và after dùng cùng nhau |
 | AUTH_REQUIRED | 401 | Không có JWT |
 | CONV_NOT_FOUND | 404 | Conversation không tồn tại hoặc user không phải thành viên |
 
@@ -783,6 +801,8 @@ Note:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-20 | v0.6.2-messages-after-param | **W5-D4**: GET /api/conversations/{convId}/messages thêm `after` param (forward pagination, ORDER ASC, include deleted). `cursor` và `after` mutually exclusive (400 nếu dùng cùng nhau). `ReplyPreviewDto` thêm field `deletedAt` (null nếu source chưa bị xóa, ISO8601 nếu đã bị xóa) và `contentPreview` = null khi source deleted. STOMP `SendMessagePayload` thêm `replyToMessageId` (nullable UUID) với validation: source phải thuộc cùng conversation, quoting deleted source allowed. |
+| 2026-04-20 | v0.6.1-messages-stomp-shift | **ADR-016**: POST /api/conversations/{convId}/messages được **deprecated** cho FE hot path. FE chuyển sang STOMP `/app/conv.{id}.message` với tempId (xem SOCKET_EVENTS.md v1.1-w4). Endpoint REST KHÔNG bị xoá — giữ cho batch import, bot API, integration testing, và fallback. Shape response không đổi. |
 | 2026-04-19 | v0.6.0-messages-rest | Thêm Messages API: POST /api/conversations/{convId}/messages (gửi tin nhắn), GET /api/conversations/{convId}/messages (lịch sử, cursor-based). Rate limit 30/min. Anti-enumeration 404 cho non-member. ReplyPreviewDto shallow 1-level. nextCursor = createdAt của item cũ nhất. |
 | 2026-04-19 | v0.5.2-conversations | Thêm `GET /api/users/{id}` vào mục Users (W3D4). Response dùng lại `UserSearchDto` shape (không expose email/status/lastSeenAt). Merge 404 `USER_NOT_FOUND` cho cả not-exist + inactive để chống enumeration. Documented `last_seen_at` column đã add ở V4 migration nhưng KHÔNG expose ở V1 (xem WARNINGS.md). |
 | 2026-04-19 | v0.5.1-conversations | POST /api/conversations: đổi rate limit từ "30/giờ" → "10/phút" để khớp implementation; rate limit block giờ trả `details.retryAfterSeconds` với TTL thực từ Redis. |

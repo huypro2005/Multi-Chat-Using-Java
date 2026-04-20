@@ -121,7 +121,7 @@ export function useSendMessage(convId: string) {
   const user = useAuthStore((s) => s.user)
 
   const sendMessage = useCallback(
-    (content: string): { tempId: string } => {
+    (content: string, replyToMessageId?: string): { tempId: string } => {
       const client = getStompClient()
       if (!client?.connected) {
         throw new Error('STOMP_NOT_CONNECTED')
@@ -143,7 +143,7 @@ export function useSendMessage(convId: string) {
         },
         type: 'TEXT',
         content,
-        replyToMessage: null,
+        replyToMessage: null, // optimistic không có preview, server ACK sẽ có
         editedAt: null,
         deletedAt: null,
         deletedBy: null,
@@ -160,7 +160,12 @@ export function useSendMessage(convId: string) {
       )
 
       // 5. Publish STOMP frame
-      publishConversationMessage(convId, { tempId, content, type: 'TEXT' })
+      publishConversationMessage(convId, {
+        tempId,
+        content,
+        type: 'TEXT',
+        replyToMessageId: replyToMessageId ?? null,
+      })
 
       // 6. Start 10s timeout timer
       const timerId = window.setTimeout(() => {

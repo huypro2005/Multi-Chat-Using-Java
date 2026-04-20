@@ -15,6 +15,9 @@ import org.springframework.stereotype.Component;
  * Content strip (W5-D3): nếu message đã bị soft delete (deletedAt != null),
  * content sẽ bị set = null trong DTO để tránh leak nội dung đã xóa.
  * Rule này áp dụng TẤT CẢ path: REST list, REST create response, WS broadcast, WS ACK.
+ *
+ * ReplyPreviewDto (W5-D4): thêm field deletedAt — null nếu source chưa bị xóa,
+ * ISO8601 string nếu source đã soft-delete. contentPreview = null khi source deleted.
  */
 @Component
 public class MessageMapper {
@@ -35,17 +38,7 @@ public class MessageMapper {
 
         ReplyPreviewDto replyPreview = null;
         if (message.getReplyToMessage() != null) {
-            Message replyMsg = message.getReplyToMessage();
-            String senderName = replyMsg.getSender() != null
-                    ? replyMsg.getSender().getFullName()
-                    : "Deleted User";
-            // Snapshot: do NOT strip replyToMessage contentPreview even if original is deleted.
-            // V1 acceptable — V2 may add deleted: boolean flag.
-            String contentPreview = replyMsg.getContent();
-            if (contentPreview != null && contentPreview.length() > CONTENT_PREVIEW_MAX_LENGTH) {
-                contentPreview = contentPreview.substring(0, CONTENT_PREVIEW_MAX_LENGTH) + "...";
-            }
-            replyPreview = new ReplyPreviewDto(replyMsg.getId(), senderName, contentPreview);
+            replyPreview = toReplyPreview(message.getReplyToMessage());
         }
 
         // Strip content when soft-deleted — tránh leak nội dung đã bị xóa
@@ -65,5 +58,33 @@ public class MessageMapper {
                 message.getDeletedAt(),
                 deletedBy
         );
+    }
+
+    /**
+     * Map a source Message into a ReplyPreviewDto (1-level shallow).
+     *
+     * - If source is soft-deleted: contentPreview = null, deletedAt = ISO8601 string.
+     * - If source is not deleted: contentPreview = trimmed to 100 chars, deletedAt = null.
+     * - Quoting a deleted source is allowed (per W5-D4 spec).
+     */
+    public ReplyPreviewDto toReplyPreview(Message source) {
+        String senderName = source.getSender() != null
+                ? source.getSender().getFullName()
+                : "Deleted User";
+
+        if (source.getDeletedAt() != null) {
+            return new ReplyPreviewDto(
+                    source.getId(),
+                    senderName,
+                    null,
+                    source.getDeletedAt().toString()
+            );
+        }
+
+        String preview = source.getContent();
+        if (preview != null && preview.length() > CONTENT_PREVIEW_MAX_LENGTH) {
+            preview = preview.substring(0, CONTENT_PREVIEW_MAX_LENGTH) + "...";
+        }
+        return new ReplyPreviewDto(source.getId(), senderName, preview, null);
     }
 }

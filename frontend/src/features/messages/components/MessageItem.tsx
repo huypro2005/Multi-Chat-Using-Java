@@ -10,6 +10,7 @@ import { useEditMessage } from '../useEditMessage'
 import { useDeleteMessage } from '../useDeleteMessage'
 import { MessageActions } from './MessageActions'
 import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
+import { ReplyQuote } from './ReplyQuote'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -25,6 +26,8 @@ interface Props {
   isOwn: boolean
   /** false khi cùng sender và gap < 1 phút với message trước */
   showAvatar: boolean
+  /** Callback khi user bấm Reply button */
+  onReply?: (message: MessageDto) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +213,7 @@ function InlineEditArea({
 // ---------------------------------------------------------------------------
 // MessageItem — bọc React.memo vì list có thể 100+ items
 // ---------------------------------------------------------------------------
-const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Props) {
+const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply }: Props) {
   const [isEditing, setIsEditing] = useState(false)
 
   // Dùng clientTempId để detect optimistic; nếu không có → dùng heuristic id
@@ -248,8 +251,11 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
   }, [deleteMessage, message.id])
 
   const handleReply = useCallback(() => {
-    console.log('TODO D4 — reply to', message.id)
-  }, [message.id])
+    // Chỉ reply khi message đã confirmed (không optimistic) và chưa xoá
+    if (!message.deletedAt && !message.clientTempId) {
+      onReply?.(message)
+    }
+  }, [message, onReply])
 
   const handleCopy = useCallback(() => {
     if (message.content) {
@@ -289,15 +295,9 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
           <div
             className={`max-w-xs sm:max-w-sm md:max-w-md ${isFailed ? 'opacity-60' : ''} ${isDeleting ? 'opacity-50' : ''}`}
           >
-            {/* Reply preview */}
+            {/* Reply quote */}
             {message.replyToMessage && !isDeleted && (
-              <div
-                className="mb-1 ml-auto max-w-full border-l-2 border-indigo-300 bg-indigo-50
-                  pl-2 pr-3 py-1 rounded text-xs text-gray-500 italic truncate opacity-80"
-              >
-                <span className="font-medium not-italic">{message.replyToMessage.senderName}: </span>
-                {message.replyToMessage.contentPreview}
-              </div>
+              <ReplyQuote replyTo={message.replyToMessage} />
             )}
 
             {/* Deleted placeholder */}
@@ -369,15 +369,9 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
           <p className="text-xs text-gray-500 mb-0.5 ml-1">{message.sender.fullName}</p>
         )}
 
-        {/* Reply preview */}
+        {/* Reply quote */}
         {message.replyToMessage && !isDeleted && (
-          <div
-            className="mb-1 max-w-full border-l-2 border-indigo-400 bg-gray-100
-              pl-2 pr-3 py-1 rounded text-xs text-gray-500 italic truncate opacity-80"
-          >
-            <span className="font-medium not-italic">{message.replyToMessage.senderName}: </span>
-            {message.replyToMessage.contentPreview}
-          </div>
+          <ReplyQuote replyTo={message.replyToMessage} />
         )}
 
         {/* Deleted placeholder or normal bubble */}

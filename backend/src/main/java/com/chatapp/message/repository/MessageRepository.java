@@ -42,6 +42,19 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
     /**
      * Kiểm tra message có tồn tại trong conversation không.
      * Dùng để validate reply_to_message_id thuộc đúng conversation.
+     * NOTE: Không filter deleted_at — cho phép reply vào tin nhắn đã xóa.
      */
     boolean existsByIdAndConversation_Id(UUID messageId, UUID conversationId);
+
+    /**
+     * Forward pagination (catch-up after reconnect).
+     * Lấy messages có createdAt > after, ORDER ASC (cũ → mới).
+     *
+     * IMPORTANT: KHÔNG filter deletedAt — FE cần biết placeholder state của messages đã xóa
+     * khi catch-up sau reconnect. Content sẽ bị strip ở mapper tầng service.
+     */
+    List<Message> findByConversation_IdAndCreatedAtAfterOrderByCreatedAtAsc(
+            UUID conversationId,
+            OffsetDateTime after,
+            Pageable pageable);
 }

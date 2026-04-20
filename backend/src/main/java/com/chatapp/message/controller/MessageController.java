@@ -9,6 +9,7 @@ import com.chatapp.user.entity.User;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -53,24 +54,41 @@ public class MessageController {
     }
 
     /**
-     * GET /api/conversations/{convId}/messages?cursor=&limit=
+     * GET /api/conversations/{convId}/messages?cursor=&after=&limit=
      * Lấy lịch sử tin nhắn với cursor-based pagination.
      *
+     * Pagination modes:
+     * - cursor only: backward pagination (load older messages). createdAt < cursor, DESC → reversed ASC.
+     * - after only: forward pagination (catch-up after reconnect). createdAt > after, ASC.
+     *   Include cả deleted messages (FE cần placeholder state).
+     * - both null: first page (newest messages), DESC → reversed ASC.
+     * - both non-null: 400 VALIDATION_FAILED — mutually exclusive.
+     *
      * @param convId  UUID của conversation
-     * @param cursor  ISO8601 OffsetDateTime string (optional — null = trang đầu tiên)
+     * @param cursor  ISO8601 backward cursor (optional — null = trang đầu tiên)
+     * @param after   ISO8601 forward cursor for catch-up (optional, mutex with cursor)
      * @param limit   số messages per page (1-100, default 50)
      * @param user    authenticated user
      * @return 200 OK + MessageListResponse { items, hasMore, nextCursor }
      */
     @GetMapping
-    public MessageListResponse getMessages(
+    public ResponseEntity<MessageListResponse> getMessages(
             @PathVariable UUID convId,
             @RequestParam(required = false) String cursor,
+            @RequestParam(required = false) String after,
             @RequestParam(defaultValue = "50") int limit,
             @AuthenticationPrincipal User user) {
 
+        // cursor và after are mutually exclusive
+        if (cursor != null && after != null) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "cursor và after không thể dùng cùng nhau",
+                    Map.of("error", "cursor and after are mutually exclusive params"));
+        }
+
         OffsetDateTime cursorTime = parseCursor(cursor);
-        return messageService.getMessages(user.getId(), convId, cursorTime, limit);
+        OffsetDateTime afterTime = parseCursor(after);   // same ISO8601 parse logic
+        return ResponseEntity.ok(messageService.getMessages(user.getId(), convId, cursorTime, afterTime, limit));
     }
 
     // -------------------------------------------------------------------------

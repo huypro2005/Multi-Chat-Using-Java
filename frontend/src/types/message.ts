@@ -15,7 +15,8 @@ export type MessageType = (typeof MessageType)[keyof typeof MessageType]
 export interface ReplyPreviewDto {
   id: string
   senderName: string
-  contentPreview: string
+  contentPreview: string | null   // null nếu source message đã bị xoá
+  deletedAt: string | null        // ISO8601 | null
 }
 
 export interface MessageSenderDto {

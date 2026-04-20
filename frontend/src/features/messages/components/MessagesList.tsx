@@ -10,6 +10,7 @@ import type { MessageDto } from '@/types/message'
 // ---------------------------------------------------------------------------
 interface Props {
   conversationId: string
+  onReply?: (message: MessageDto) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,7 @@ function SmallSpinner() {
 // ---------------------------------------------------------------------------
 // MessagesList
 // ---------------------------------------------------------------------------
-export function MessagesList({ conversationId }: Props) {
+export function MessagesList({ conversationId, onReply }: Props) {
   const user = useAuthStore((s) => s.user)
 
   const {
@@ -101,10 +102,13 @@ export function MessagesList({ conversationId }: Props) {
     isFetchingNextPage,
   } = useMessages(conversationId)
 
-  // Flatten pages → flat array (oldest first)
+  // Infinite query cache stores pages as:
+  // - pages[0]   = newest window
+  // - pages[1..] = older windows loaded by fetchNextPage()
+  // UI cần render theo thời gian cũ -> mới, nên đảo page trước khi flatten.
   const messages = useMemo(() => {
     if (!data) return []
-    return data.pages.flatMap((page) => page.items)
+    return [...data.pages].reverse().flatMap((page) => page.items)
   }, [data])
 
   // --- Scroll refs ---
@@ -112,6 +116,20 @@ export function MessagesList({ conversationId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const [isAtBottom, setIsAtBottom] = useState(true)
+  const didInitialScrollRef = useRef(false)
+
+  // Mỗi khi đổi conversation, cho phép auto-scroll lần đầu về đáy.
+  useEffect(() => {
+    didInitialScrollRef.current = false
+  }, [conversationId])
+
+  // Lần đầu vào chat: luôn nhảy xuống tin nhắn mới nhất.
+  useEffect(() => {
+    if (!didInitialScrollRef.current && messages.length > 0 && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'auto' })
+      didInitialScrollRef.current = true
+    }
+  }, [messages.length])
 
   // Scroll to bottom khi có message mới VÀ đang ở gần bottom
   useEffect(() => {
@@ -179,6 +197,7 @@ export function MessagesList({ conversationId }: Props) {
             message={msg}
             isOwn={isOwn}
             showAvatar={shouldShowAvatar(messages, idx)}
+            onReply={onReply}
           />
         )
       })}

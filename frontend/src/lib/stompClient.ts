@@ -14,6 +14,13 @@ import { Client } from '@stomp/stompjs'
 import type { Frame } from '@stomp/stompjs' // Frame used in onStompError
 import SockJS from 'sockjs-client'
 import { tokenStorage } from './tokenStorage'
+// StompSendPayload: payload gửi qua STOMP inbound (Path B, ADR-016)
+export interface StompSendPayload {
+  tempId: string
+  content: string
+  type: 'TEXT'
+  replyToMessageId?: string | null
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -218,4 +225,20 @@ export function disconnectStomp(): void {
  */
 export function getStompClient(): Client | null {
   return _client
+}
+
+/**
+ * Send chat message over STOMP inbound destination (Path B, ADR-016).
+ * Payload MUST include tempId (UUID v4) for server ACK/dedup routing.
+ * Throws when client is not connected so caller can rollback optimistic UI.
+ */
+export function publishConversationMessage(convId: string, payload: StompSendPayload): void {
+  if (!_client || !_client.connected) {
+    throw new Error('STOMP_NOT_CONNECTED')
+  }
+
+  _client.publish({
+    destination: `/app/conv.${convId}.message`,
+    body: JSON.stringify(payload),
+  })
 }

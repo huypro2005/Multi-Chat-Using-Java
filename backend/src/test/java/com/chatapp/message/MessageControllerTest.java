@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.firebase.auth.FirebaseAuth;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -22,11 +23,16 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.MediaType;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -52,6 +58,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *  T11: getMessages_nonMember               → 404 CONV_NOT_FOUND
  *  T12: getMessages_invalidLimit            → 400 VALIDATION_FAILED
  *  T13: sendMessage_withReply               → 201, replyToMessage preview in response
+ *
+ * W5-D4 additions:
+ *  T17: getMessages_afterParam              → 200, items ASC, only newer than after, includes deleted
+ *  T18: getMessages_afterAndCursorMutex     → 400 VALIDATION_FAILED
+ *  T19: replyToDeletedSource               → 201 ACK with replyToMessage.contentPreview=null and deletedAt set
+ *  T20: stompSend_replyToDifferentConv     → 400 VALIDATION_FAILED (via REST endpoint as proxy)
+ *  T21: stompSend_replyToNonExistent       → 400 VALIDATION_FAILED (via REST endpoint as proxy)
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -91,6 +104,9 @@ class MessageControllerTest {
 
     @MockBean
     private FirebaseAuth firebaseAuth;
+
+    @MockBean
+    private SimpMessagingTemplate simpMessagingTemplate;
 
     @SuppressWarnings("unchecked")
     private ValueOperations<String, String> valueOps;
@@ -585,5 +601,337 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.replyToMessage.senderName").isNotEmpty())
                 .andExpect(jsonPath("$.replyToMessage.contentPreview")
                         .value("Original message to reply to"));
+    }
+
+    // =========================================================================
+    // T14: sendMessage success → SimpMessagingTemplate called with correct
+    //      destination (/topic/conv.{id}) and MESSAGE_CREATED envelope
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sendMessage_success_broadcastsToCorrectTopicWithEnvelope() throws Exception {
+        String tokenA = registerAndGetToken("t14_msg_a@test.com", "t14msg_a");
+        String userBId = registerAndGetUserId("t14_msg_b@test.com", "t14msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        // Reset mock call count from setup phase
+        clearInvocations(simpMessagingTemplate);
+
+        MvcResult result = mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                { "content": "Broadcast test message" }
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String messageId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .get("id").asText();
+
+        // Verify broadcaster was invoked once
+        ArgumentCaptor<String> destCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(simpMessagingTemplate, times(1))
+                .convertAndSend(destCaptor.capture(), payloadCaptor.capture());
+
+        // Destination must be /topic/conv.{convId}
+        assertEquals("/topic/conv." + convId, destCaptor.getValue());
+
+        // Envelope must have type=MESSAGE_CREATED and payload.id == messageId
+        Map<String, Object> envelope = (Map<String, Object>) payloadCaptor.getValue();
+        assertEquals("MESSAGE_CREATED", envelope.get("type"));
+        assertNotNull(envelope.get("payload"));
+
+        // Verify payload contains the message id
+        com.fasterxml.jackson.databind.JsonNode payloadNode = objectMapper.valueToTree(envelope.get("payload"));
+        assertEquals(messageId, payloadNode.get("id").asText());
+        assertEquals("Broadcast test message", payloadNode.get("content").asText());
+    }
+
+    // =========================================================================
+    // T15: sendMessage fails (reply to non-existent message) → broadcaster
+    //      NOT called (transaction rolled back before AFTER_COMMIT)
+    // =========================================================================
+
+    @Test
+    void sendMessage_failsValidation_broadcasterNotCalled() throws Exception {
+        String tokenA = registerAndGetToken("t15_msg_a@test.com", "t15msg_a");
+        String userBId = registerAndGetUserId("t15_msg_b@test.com", "t15msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        clearInvocations(simpMessagingTemplate);
+        String fakeMessageId = java.util.UUID.randomUUID().toString();
+
+        mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "content": "Invalid reply",
+                                  "replyToMessageId": "%s"
+                                }
+                                """.formatted(fakeMessageId)))
+                .andExpect(status().isBadRequest());
+
+        // Broadcaster must NOT be called when message save fails
+        verify(simpMessagingTemplate, never())
+                .convertAndSend(anyString(), any(Object.class));
+    }
+
+    // =========================================================================
+    // T16: Broadcaster throws RuntimeException → REST still returns 201,
+    //      message persisted in DB
+    // =========================================================================
+
+    @Test
+    void sendMessage_broadcasterThrows_restStillReturns201AndMessagePersisted() throws Exception {
+        String tokenA = registerAndGetToken("t16_msg_a@test.com", "t16msg_a");
+        String userBId = registerAndGetUserId("t16_msg_b@test.com", "t16msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        // Simulate broker failure
+        doThrow(new RuntimeException("Broker down"))
+                .when(simpMessagingTemplate)
+                .convertAndSend(anyString(), any(Object.class));
+
+        // REST must still return 201 despite broadcast failure
+        mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                { "content": "Message despite broker down" }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.content").value("Message despite broker down"));
+
+        // Message must be persisted in DB
+        assertTrue(messageRepository.count() > 0, "Message should be saved even if broadcast fails");
+    }
+
+    // =========================================================================
+    // T17: GET ?after=T → returns messages ASC, only newer than T, includes deleted
+    // =========================================================================
+
+    @Test
+    void getMessages_afterParam_returnsNewerMessagesAscIncludesDeleted() throws Exception {
+        String tokenA = registerAndGetToken("t17_msg_a@test.com", "t17msg_a");
+        String userBId = registerAndGetUserId("t17_msg_b@test.com", "t17msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        UUID convUuid = UUID.fromString(convId);
+        UUID userAUuid = userRepository.findByEmail("t17_msg_a@test.com").orElseThrow().getId();
+
+        OffsetDateTime base = OffsetDateTime.of(2021, 6, 1, 10, 0, 0, 0, ZoneOffset.UTC);
+
+        com.chatapp.conversation.entity.Conversation conv = conversationRepository.findById(convUuid).orElseThrow();
+        com.chatapp.user.entity.User sender = userRepository.findById(userAUuid).orElseThrow();
+
+        // Insert 5 messages with explicit timestamps
+        for (int i = 1; i <= 5; i++) {
+            Message msg = Message.builder()
+                    .conversation(conv)
+                    .sender(sender)
+                    .type(MessageType.TEXT)
+                    .content("Msg " + i)
+                    .build();
+            msg.setCreatedAt(base.plusDays(i));
+            messageRepository.save(msg);
+        }
+
+        // Soft-delete message 3
+        Message msg3 = messageRepository.findAll().stream()
+                .filter(m -> "Msg 3".equals(m.getContent()))
+                .findFirst().orElseThrow();
+        msg3.markAsDeletedBy(userAUuid);
+        messageRepository.save(msg3);
+
+        // after = base + 2 days → should return messages 3, 4, 5 (ASC)
+        String afterParam = base.plusDays(2).toString();
+
+        MvcResult result = mockMvc.perform(get("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .param("after", afterParam)
+                        .param("limit", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items").isArray())
+                .andReturn();
+
+        var responseTree = objectMapper.readTree(result.getResponse().getContentAsString());
+        var items = responseTree.get("items");
+
+        // Must contain at least 3 items (3, 4, 5)
+        assertTrue(items.size() >= 3, "Should have at least 3 items after the cursor");
+
+        // ASC order: verify we have at least 3 items (messages 3, 4, 5)
+        assertTrue(items.size() >= 3, "Should have messages 3, 4, and 5 after cursor");
+
+        // Deleted message (Msg 3) should be included but content should be null
+        boolean foundDeletedMsg = false;
+        for (var item : items) {
+            if (item.get("deletedAt") != null && !item.get("deletedAt").isNull()) {
+                // content should be null (stripped by mapper)
+                assertTrue(item.get("content").isNull(),
+                        "Deleted message content should be null in DTO");
+                foundDeletedMsg = true;
+            }
+        }
+        assertTrue(foundDeletedMsg, "Deleted message should be included in 'after' query results");
+
+        // Verify items are sorted ASC (each item's createdAt >= previous)
+        String prevCreatedAt = null;
+        for (var item : items) {
+            String createdAt = item.get("createdAt").asText();
+            if (prevCreatedAt != null) {
+                assertTrue(createdAt.compareTo(prevCreatedAt) >= 0,
+                        "Items should be sorted ASC by createdAt");
+            }
+            prevCreatedAt = createdAt;
+        }
+    }
+
+    // =========================================================================
+    // T18: GET ?after=T&cursor=T2 → 400 VALIDATION_FAILED (mutually exclusive)
+    // =========================================================================
+
+    @Test
+    void getMessages_afterAndCursorBothPresent_returns400() throws Exception {
+        String tokenA = registerAndGetToken("t18_msg_a@test.com", "t18msg_a");
+        String userBId = registerAndGetUserId("t18_msg_b@test.com", "t18msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        String someTime = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1).toString();
+
+        mockMvc.perform(get("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .param("cursor", someTime)
+                        .param("after", someTime))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+    }
+
+    // =========================================================================
+    // T19: Reply to deleted source → 201, replyToMessage.contentPreview=null, deletedAt set
+    // =========================================================================
+
+    @Test
+    void sendMessage_replyToDeletedSource_returns201WithNullPreviewAndDeletedAt() throws Exception {
+        String tokenA = registerAndGetToken("t19_msg_a@test.com", "t19msg_a");
+        String userBId = registerAndGetUserId("t19_msg_b@test.com", "t19msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        // Send original message
+        MvcResult originalResult = mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                { "content": "Original that will be deleted" }
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String originalMsgId = objectMapper.readTree(
+                originalResult.getResponse().getContentAsString()).get("id").asText();
+
+        // Soft-delete the original message directly in DB
+        UUID originalUuid = UUID.fromString(originalMsgId);
+        Message original = messageRepository.findById(originalUuid).orElseThrow();
+        UUID userAUuid = userRepository.findByEmail("t19_msg_a@test.com").orElseThrow().getId();
+        original.markAsDeletedBy(userAUuid);
+        messageRepository.save(original);
+
+        // Reply to the deleted source — should succeed (quoting deleted message OK)
+        MvcResult replyResult = mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "content": "Replying to deleted message",
+                                  "replyToMessageId": "%s"
+                                }
+                                """.formatted(originalMsgId)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.content").value("Replying to deleted message"))
+                .andExpect(jsonPath("$.replyToMessage").isNotEmpty())
+                .andExpect(jsonPath("$.replyToMessage.id").value(originalMsgId))
+                .andReturn();
+
+        // Verify replyToMessage.contentPreview is null and deletedAt is set
+        var responseTree = objectMapper.readTree(replyResult.getResponse().getContentAsString());
+        var replyToMessage = responseTree.get("replyToMessage");
+        assertNotNull(replyToMessage, "replyToMessage should be present");
+        assertTrue(replyToMessage.get("contentPreview").isNull(),
+                "contentPreview should be null when source is deleted");
+        assertFalse(replyToMessage.get("deletedAt").isNull(),
+                "deletedAt should be set when source is deleted");
+    }
+
+    // =========================================================================
+    // T20: sendMessage replyTo from different conversation → 400 VALIDATION_FAILED
+    // (tests REST path; STOMP path tests in MessageServiceStompTest)
+    // =========================================================================
+
+    @Test
+    void sendMessage_replyToCrossConv_alreadyCoveredByT05_confirmedWorking() throws Exception {
+        // T05 already covers this — this test is a lightweight sanity check
+        // to confirm the existing behavior still works after W5-D4 refactor.
+        String tokenA = registerAndGetToken("t20_msg_a@test.com", "t20msg_a");
+        String userBId = registerAndGetUserId("t20_msg_b@test.com", "t20msg_b");
+        String userCId = registerAndGetUserId("t20_msg_c@test.com", "t20msg_c");
+
+        String convABId = createOneOnOneConversation(tokenA, userBId);
+        String convACId = createOneOnOneConversation(tokenA, userCId);
+
+        // Send a message in convAC
+        MvcResult msgResult = mockMvc.perform(post("/api/conversations/{convId}/messages", convACId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                { "content": "Source in AC conv" }
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String crossConvMsgId = objectMapper.readTree(
+                msgResult.getResponse().getContentAsString()).get("id").asText();
+
+        // Reply in convAB using message from convAC → should fail
+        mockMvc.perform(post("/api/conversations/{convId}/messages", convABId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "content": "Cross-conv reply attempt",
+                                  "replyToMessageId": "%s"
+                                }
+                                """.formatted(crossConvMsgId)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+    }
+
+    // =========================================================================
+    // T21: sendMessage replyTo non-existent → 400 VALIDATION_FAILED
+    // (STOMP reply-to-non-existent test via unit tests in MessageServiceStompTest)
+    // =========================================================================
+
+    @Test
+    void sendMessage_replyToNonExistentViaRest_returns400() throws Exception {
+        String tokenA = registerAndGetToken("t21_msg_a@test.com", "t21msg_a");
+        String userBId = registerAndGetUserId("t21_msg_b@test.com", "t21msg_b");
+        String convId = createOneOnOneConversation(tokenA, userBId);
+
+        // Random UUID that doesn't exist in DB
+        String ghostId = UUID.randomUUID().toString();
+
+        mockMvc.perform(post("/api/conversations/{convId}/messages", convId)
+                        .header("Authorization", "Bearer " + tokenA)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "content": "Replying to ghost",
+                                  "replyToMessageId": "%s"
+                                }
+                                """.formatted(ghostId)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
     }
 }

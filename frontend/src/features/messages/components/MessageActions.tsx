@@ -21,7 +21,7 @@ interface Props {
   onCopy: () => void
 }
 
-export function MessageActions({ isOwn, canEdit, onEdit, onDelete, onReply, onCopy }: Props) {
+export function MessageActions({ message, isOwn, canEdit, onEdit, onDelete, onReply, onCopy }: Props) {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -49,13 +49,14 @@ export function MessageActions({ isOwn, canEdit, onEdit, onDelete, onReply, onCo
 
   return (
     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-      {/* Reply button — stub cho D4 */}
+      {/* Reply button — disable khi message đã bị xoá hoặc còn optimistic */}
       <button
         type="button"
         onClick={onReply}
+        disabled={!!message.deletedAt || !!message.clientTempId}
         aria-label="Trả lời tin nhắn"
         className="p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-200
-          transition-colors text-base leading-none"
+          transition-colors text-base leading-none disabled:opacity-40 disabled:cursor-not-allowed"
         title="Trả lời"
       >
         ↺
