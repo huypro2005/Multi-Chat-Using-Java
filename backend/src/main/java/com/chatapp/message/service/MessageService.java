@@ -8,6 +8,7 @@ import com.chatapp.message.dto.*;
 import com.chatapp.message.entity.Message;
 import com.chatapp.message.enums.MessageType;
 import com.chatapp.message.event.MessageCreatedEvent;
+import com.chatapp.message.event.MessageDeletedEvent;
 import com.chatapp.message.event.MessageUpdatedEvent;
 import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.user.entity.User;
@@ -26,6 +27,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -43,6 +45,7 @@ public class MessageService {
 
     private static final int RATE_LIMIT_PER_MINUTE = 30;
     private static final int EDIT_RATE_LIMIT_PER_MINUTE = 10;
+    private static final int DELETE_RATE_LIMIT_PER_MINUTE = 10;
     private static final int CONTENT_MAX_LENGTH = 5000;
     private static final long EDIT_WINDOW_SECONDS = 300; // 5 minutes
     private static final Duration DEDUP_TTL = Duration.ofSeconds(60);
@@ -397,6 +400,92 @@ public class MessageService {
     }
 
     // =========================================================================
+    // deleteViaStomp — Delete message via STOMP (W5-D3)
+    // =========================================================================
+
+    /**
+     * Handles STOMP inbound delete from /app/conv.{convId}.delete.
+     *
+     * Flow per contract SOCKET_EVENTS.md §3d.5:
+     *  1. Validate clientDeleteId (UUID format) and messageId presence
+     *  2. Rate limit: 10 delete/min/user via Redis INCR on rate:msg-delete:{userId}
+     *  3. Dedup: SET NX EX 60 on key msg:delete-dedup:{userId}:{clientDeleteId}
+     *     - Duplicate found: if value != PENDING → re-send minimal ACK idempotently; if PENDING → silent drop
+     *  4. Load message by messageId:
+     *     - null / wrong conv / not owner / soft-deleted → MSG_NOT_FOUND (anti-enumeration)
+     *  5. Soft delete in @Transactional: set deletedAt + deletedBy, save
+     *  6. Update dedup value to messageId (so retry can re-send ACK)
+     *  7. Publish MessageDeletedEvent → broadcaster sends MESSAGE_DELETED broadcast AFTER_COMMIT
+     *  8. Send minimal DELETE ACK to /user/queue/acks AFTER_COMMIT
+     *     {operation:"DELETE", clientId, message:{id, conversationId, deletedAt, deletedBy}}
+     *
+     * NOTE: No edit-window check — unlike EDIT (5 min), DELETE has no time limit (ADR-018).
+     */
+    @Transactional
+    public void deleteViaStomp(UUID convId, UUID userId, DeleteMessagePayload payload) {
+        String clientDeleteId = payload.clientDeleteId();
+
+        // Step 1: Validate clientDeleteId and messageId
+        validateDeletePayload(payload, clientDeleteId);
+
+        // Step 2: Rate limit for deletes (fail-open when Redis down)
+        checkDeleteRateLimit(userId, clientDeleteId);
+
+        // Step 3: Dedup — SET NX EX (atomic, must run BEFORE any DB mutation)
+        String dedupKey = "msg:delete-dedup:" + userId + ":" + clientDeleteId;
+        Boolean isNew = redisTemplate.opsForValue()
+                .setIfAbsent(dedupKey, "PENDING", DEDUP_TTL);
+
+        if (Boolean.FALSE.equals(isNew)) {
+            handleDuplicateDeleteFrame(userId, clientDeleteId, dedupKey, convId);
+            return;
+        }
+
+        // Step 4: Load message — anti-enumeration: merge all not-found/not-owner/already-deleted → MSG_NOT_FOUND
+        Message message = messageRepository.findById(payload.messageId()).orElse(null);
+
+        if (message == null
+                || !message.getConversation().getId().equals(convId)
+                || message.getSender() == null
+                || !message.getSender().getId().equals(userId)
+                || message.getDeletedAt() != null) {
+            throw new AppException(HttpStatus.NOT_FOUND, "MSG_NOT_FOUND",
+                    "Tin nhắn không tồn tại hoặc không thể xóa",
+                    Map.of("clientDeleteId", clientDeleteId));
+        }
+
+        // Step 5: Soft delete
+        message.markAsDeletedBy(userId);
+        message = messageRepository.save(message);
+
+        Instant deletedAt = message.getDeletedAt().toInstant();
+
+        // Step 6: Update dedup value to real messageId
+        redisTemplate.opsForValue().set(dedupKey, message.getId().toString(), DEDUP_TTL);
+
+        // Step 7: Publish broadcast event (AFTER_COMMIT)
+        final UUID messageId = message.getId();
+        eventPublisher.publishEvent(new MessageDeletedEvent(convId, messageId, deletedAt, userId));
+
+        // Step 8: Send DELETE ACK AFTER_COMMIT
+        final String ackClientDeleteId = clientDeleteId;
+        final String ackUserId = userId.toString();
+        final UUID ackConvId = convId;
+        final Instant ackDeletedAt = deletedAt;
+        final UUID ackDeletedBy = userId;
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    sendDeleteAck(ackUserId, ackClientDeleteId, messageId, ackConvId, ackDeletedAt, ackDeletedBy);
+                }
+            });
+        } else {
+            sendDeleteAck(ackUserId, ackClientDeleteId, messageId, ackConvId, ackDeletedAt, ackDeletedBy);
+        }
+    }
+
+    // =========================================================================
     // Private helpers
     // =========================================================================
 
@@ -626,6 +715,123 @@ public class MessageService {
             );
         } catch (Exception e) {
             log.error("[STOMP] Failed to send EDIT ACK to userId={}, clientEditId={}", userId, clientEditId, e);
+        }
+    }
+
+    /**
+     * Validate clientDeleteId (UUID format) and messageId presence.
+     * Throws AppException with details.clientDeleteId set so exception handler can echo it.
+     */
+    private void validateDeletePayload(DeleteMessagePayload payload, String clientDeleteId) {
+        if (clientDeleteId == null || !UUID_PATTERN.matcher(clientDeleteId).matches()) {
+            String echoed = clientDeleteId != null ? clientDeleteId : "unknown";
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "clientDeleteId không hợp lệ, phải là UUID v4",
+                    Map.of("clientDeleteId", echoed, "field", "clientDeleteId", "error", "Must be UUID v4 format"));
+        }
+
+        if (payload.messageId() == null) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "messageId không được để trống",
+                    Map.of("clientDeleteId", clientDeleteId, "field", "messageId", "error", "Must not be null"));
+        }
+    }
+
+    /**
+     * Rate limit for delete operations — 10 deletes/min/user.
+     * Key: rate:msg-delete:{userId}. Fail-open when Redis unavailable.
+     */
+    private void checkDeleteRateLimit(UUID userId, String clientDeleteId) {
+        String rateKey = "rate:msg-delete:" + userId;
+        try {
+            Long count = redisTemplate.opsForValue().increment(rateKey);
+            if (count != null && count == 1) {
+                redisTemplate.expire(rateKey, 60, TimeUnit.SECONDS);
+            }
+            if (count != null && count > DELETE_RATE_LIMIT_PER_MINUTE) {
+                long retryAfter = 60;
+                try {
+                    Long ttl = redisTemplate.getExpire(rateKey, TimeUnit.SECONDS);
+                    if (ttl != null && ttl > 0) retryAfter = ttl;
+                } catch (Exception ignored) { /* best-effort */ }
+                throw new AppException(HttpStatus.TOO_MANY_REQUESTS, "MSG_RATE_LIMITED",
+                        "Xóa quá nhanh, thử lại sau " + retryAfter + " giây",
+                        Map.of("clientDeleteId", clientDeleteId, "retryAfterSeconds", retryAfter));
+            }
+        } catch (AppException e) {
+            throw e;
+        } catch (DataAccessException e) {
+            log.warn("Redis unavailable for delete rate limit check (key={}), fail-open", rateKey);
+        }
+    }
+
+    /**
+     * Handles duplicate/retry delete frames when dedup key already exists in Redis.
+     *
+     * - If value == "PENDING": previous delete is still in-flight → drop silently.
+     * - If value == real messageId: previous delete completed → re-send minimal ACK idempotently.
+     */
+    private void handleDuplicateDeleteFrame(UUID userId, String clientDeleteId, String dedupKey, UUID convId) {
+        String savedValue;
+        try {
+            savedValue = redisTemplate.opsForValue().get(dedupKey);
+        } catch (DataAccessException e) {
+            log.warn("[DELETE-DEDUP] Redis unavailable when reading dedup key={}, dropping frame", dedupKey);
+            return;
+        }
+
+        if ("PENDING".equals(savedValue) || savedValue == null) {
+            log.warn("[DELETE-DEDUP] Concurrent/duplicate frame for clientDeleteId={}, userId={} (still PENDING) — dropping",
+                    clientDeleteId, userId);
+            return;
+        }
+
+        // Real messageId stored — re-send minimal DELETE ACK (idempotent)
+        try {
+            UUID existingMsgId = UUID.fromString(savedValue);
+            messageRepository.findById(existingMsgId).ifPresentOrElse(
+                    existing -> {
+                        if (existing.getDeletedAt() != null && existing.getDeletedBy() != null) {
+                            sendDeleteAck(userId.toString(), clientDeleteId,
+                                    existing.getId(), convId,
+                                    existing.getDeletedAt().toInstant(),
+                                    existing.getDeletedBy());
+                        }
+                    },
+                    () -> log.warn("[DELETE-DEDUP] dedup key={} has messageId={} but not found in DB",
+                            dedupKey, savedValue)
+            );
+        } catch (IllegalArgumentException e) {
+            log.warn("[DELETE-DEDUP] dedup key={} has invalid value={}", dedupKey, savedValue);
+        }
+    }
+
+    /**
+     * Send DELETE-operation minimal ACK to /user/queue/acks.
+     *
+     * Per contract §3d.3: ACK payload is minimal — only id, conversationId, deletedAt, deletedBy.
+     * Does NOT send full MessageDto (unlike SEND/EDIT ACK).
+     */
+    private void sendDeleteAck(String userId, String clientDeleteId,
+                                UUID messageId, UUID conversationId,
+                                Instant deletedAt, UUID deletedBy) {
+        try {
+            Map<String, Object> messagePayload = Map.of(
+                    "id", messageId.toString(),
+                    "conversationId", conversationId.toString(),
+                    "deletedAt", deletedAt.toString(),
+                    "deletedBy", deletedBy.toString()
+            );
+            // AckPayload.message is typed as MessageDto, but DELETE ACK is minimal (not full DTO).
+            // Use a raw Map envelope to match §3d.3 contract exactly.
+            Map<String, Object> ackEnvelope = Map.of(
+                    "operation", "DELETE",
+                    "clientId", clientDeleteId,
+                    "message", messagePayload
+            );
+            messagingTemplate.convertAndSendToUser(userId, "/queue/acks", ackEnvelope);
+        } catch (Exception e) {
+            log.error("[STOMP] Failed to send DELETE ACK to userId={}, clientDeleteId={}", userId, clientDeleteId, e);
         }
     }
 

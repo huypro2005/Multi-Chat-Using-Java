@@ -2209,3 +2209,91 @@ src/main/java/com/yourapp/chat/
     ├── GlobalExceptionHandler.java
     └── AppException.java
 ```
+
+---
+
+## 12. Architectural Decision Records (ADR)
+
+> Đây là mục tổng hợp các quyết định kiến trúc có ảnh hưởng đến toàn dự án.
+> **ADR chi tiết đầy đủ nằm trong `.claude/memory/reviewer-knowledge.md`** (ADR-001 … ADR-018).
+> Mục này chỉ chứa các ADR làm thay đổi tài liệu gốc (ARCHITECTURE.md mục 1-11)
+> để reader không đọc knowledge file vẫn nhận biết được sự lệch.
+
+### ADR-014: W4 chọn REST-gửi + STOMP-broadcast (thay cho tempId flow gốc mục 5)
+
+- **Status**: Superseded (xem ADR-016)
+- **Tóm tắt**: Tuần 4 đã implement mô hình REST `POST /messages` + STOMP broadcast `MESSAGE_CREATED`, tạm thời bỏ qua tempId ACK/ERROR flow mô tả ở mục 5 (dòng 84-124) và mục 7.4 (dòng 1051-1097).
+- **Chi tiết**: xem `.claude/memory/reviewer-knowledge.md` → ADR-014.
+
+### ADR-015: SimpleBroker cho V1, RabbitMQ cho V2
+
+- **Status**: Accepted
+- **Tóm tắt**: Dùng Spring SimpleBroker (in-memory) cho V1 (1 BE instance, <1000 concurrent). Trigger migrate RabbitMQ: (1) scale >1 BE instance, hoặc (2) cần persistent queue cho offline catch-up.
+- **Chi tiết**: xem `.claude/memory/reviewer-knowledge.md` → ADR-015.
+
+### ADR-016: Switch message send path from REST to STOMP
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-20 (Tuần 4, sau khi W4D4 xong)
+- **Context**: ADR-014 chọn REST-send để đơn giản (không tempId, không ACK/ERROR routing, broadcast sau `AFTER_COMMIT`). Sau khi implement xong W4, team đánh giá lại và quyết định chuyển sang STOMP-send để:
+  - Giảm latency: bỏ 1 HTTP round-trip (~30-50ms) trên mọi lần gửi tin.
+  - Thống nhất transport layer: mọi tương tác real-time (send, typing, presence, read-receipt) đều đi qua STOMP → giảm code path phân mảnh.
+  - Chuẩn bị cho Tuần 5 (typing/presence/read) — các event này vốn đã qua STOMP, nên send-message qua cùng transport sẽ đơn giản hoá state machine FE.
+  - Tiến gần lại thiết kế gốc của ARCHITECTURE.md mục 5 (tempId flow).
+- **Decision**:
+  - Client gửi tin nhắn qua STOMP destination `/app/conv.{convId}.message` với `tempId` (UUID v4 client-generated).
+  - Server ACK qua `/user/queue/acks` với payload `{tempId, message: MessageDto}` — chỉ sender nhận.
+  - Server ERROR qua `/user/queue/errors` với payload `{tempId, error, code}` — chỉ sender nhận.
+  - Redis dedup bằng key `msg:dedup:{userId}:{tempId}` TTL 60s — nếu key tồn tại, drop silently và trả ACK cho message đã save.
+  - Broadcast `MESSAGE_CREATED` qua `/topic/conv.{convId}` giữ nguyên như ADR-014 — tất cả subscriber (kể cả sender) nhận.
+  - Client dedupe broadcast bằng message id thật (sau khi ACK đã replace optimistic tempId bằng id thật).
+  - REST `POST /api/conversations/{id}/messages` **không bị xoá** — giữ lại cho batch import, bot API, testing, và fallback khi STOMP không khả dụng. FE không còn gọi endpoint này trên hot path.
+- **Consequences**:
+  - BE phải implement `@MessageMapping("/conv.{convId}.message")` handler với Redis dedup check trước khi save + publish event.
+  - BE phải route ACK/ERROR qua `/user/queue/acks` và `/user/queue/errors` (Spring user destination).
+  - FE phải implement tempId lifecycle state machine: SENDING → SENT (nhận ACK) hoặc FAILED (nhận ERROR hoặc timeout 10s).
+  - FE phải implement timeout 10s client-side — nếu không nhận ACK/ERROR → set message status `failed` + show retry button.
+  - Nếu STOMP chưa connect khi user gửi → queue trong FE hoặc disable input, không fallback sang REST.
+  - Transaction boundary vẫn phải đúng: `publishEvent(MessageCreatedEvent)` trong `@Transactional`, broadcaster chạy ở `@TransactionalEventListener(AFTER_COMMIT)` (giữ nguyên pattern ADR-014).
+  - Error code mới cần thống nhất: `CONV_NOT_FOUND` (không phải member), `FORBIDDEN` (bị block), `INTERNAL` (lỗi server), `MSG_CONTENT_TOO_LONG` (>5000 chars), `MSG_RATE_LIMITED` (vượt 30/phút).
+- **Migration path**:
+  - BE implement STOMP handler + giữ REST handler (không deprecate code, chỉ deprecate FE usage).
+  - FE refactor `sendMessage` mutation từ axios POST sang STOMP `publish()` + subscribe 2 user queue.
+  - Contract update: SOCKET_EVENTS.md bump `v1.0-draft-w4` → `v1.1-w4` (minor bump vì thêm inbound destination breaking so với W4).
+  - API_CONTRACT.md thêm note deprecated vào POST `/messages` (không xoá section).
+- **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-016 (khi reviewer add vào knowledge file sau).
+
+### ADR-018: Delete policy — no time window, soft delete, content strip tại mapper
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-20 (Tuần 5, W5-D3)
+- **Context**: Tuần 5 cần implement delete message. Team đứng trước 2 trục quyết định:
+  1. **Time window**: có giới hạn thời gian được xoá (giống edit 5 phút) hay không?
+  2. **Semantics**: hard delete (xoá khỏi DB) hay soft delete (giữ row, set `deleted_at`)?
+  Ngoài ra cần thống nhất cách serialize: BE có strip `content` trước khi gửi client hay FE tự hiện placeholder dựa trên `deletedAt != null`?
+- **Decision**:
+  - **Không time window**: user có quyền xoá lịch sử của chính mình bất kỳ lúc nào (khác EDIT — edit có 5 phút window vì sửa content đã gửi có thể "gaslight" người khác; delete chỉ xoá khỏi hiển thị chung, không thay đổi ngữ nghĩa).
+  - **Soft delete**: thêm 2 cột `deleted_at TIMESTAMPTZ NULL` + `deleted_by UUID NULL REFERENCES users(id)` vào bảng `messages`. Không xoá row. Lý do:
+    - Bảo toàn thứ tự và scroll position (FE không cần reflow layout).
+    - Giữ reply-to reference — message Y reply X, nếu X bị hard delete → Y mồ côi (snapshot `replyToMessage` vẫn có nhưng FE không tra được context).
+    - Giữ unread count chính xác (count message visible, nhưng đã mark read từ trước thì không ảnh hưởng).
+    - Audit trail: admin có thể xem log ai xoá gì (V2 feature).
+  - **BE strip `content=null` tại `MessageMapper.toDto`**: khi `deletedAt != null`, mapper set `content=null` bất kể chạy cho REST response hay WS broadcast hay ACK. FE chỉ việc check `deletedAt != null` → render placeholder "🚫 Tin nhắn đã bị xóa". Lý do: single source of stripping logic (không trùng lặp BE + FE), không leak content qua payload nào.
+  - **Anti-enumeration**: merge 4 case thành 1 error code `MSG_NOT_FOUND` (null / wrong-conv / not-owner / already-deleted). Cùng pattern với EDIT (§3c.2) và REST 404 (CONV_NOT_FOUND).
+  - **Rate limit**: 10 delete/phút/user (Redis `rate:msg-delete:{userId}` INCR + EX 60, pattern ADR-005). Thấp hơn send (30/phút) và bằng edit (10/phút) — delete là destructive op, cần giới hạn mạnh hơn.
+  - **Broadcast minimal**: MESSAGE_DELETED payload chỉ `{id, conversationId, deletedAt, deletedBy}` — không phải MessageDto đầy đủ. FE đã có message trong cache, chỉ cần patch 3 field.
+  - **ACK metadata minimal**: DELETE ACK `message` field chỉ có 4 key như broadcast (không có content/sender/createdAt/replyToMessage) — tránh leak + giảm payload.
+- **Consequences**:
+  - BE migration (Flyway) thêm 2 cột `deleted_at` + `deleted_by` vào `messages`. Partial index `WHERE deleted_at IS NOT NULL` cho audit query V2.
+  - BE `MessageMapper.toDto` cần 2 field mới + strip `content=null`. Test: serialize message có `deletedAt` → JSON có `"content": null`, `"deletedAt": "..."`, `"deletedBy": "..."`.
+  - BE `MessageService.deleteViaStomp(convId, userId, payload)` pattern giống `editViaStomp`: validate → rate limit → dedup NX EX → load + ownership check (merge NOT_FOUND) → update `deletedAt + deletedBy` trong `@Transactional` → publishEvent → ACK trong `afterCommit`.
+  - BE query `GET /conversations/{id}/messages` KHÔNG filter `deleted_at IS NULL` — trả về tất cả message, FE render placeholder cho message đã xoá. Lý do: đảm bảo thứ tự + reply-to context + unread count.
+  - FE `MessageDto` type thêm 2 field `deletedAt + deletedBy`. Render component check `deletedAt != null` → placeholder, không hover actions.
+  - FE edit flow: nếu đang edit message X mà X bị delete broadcast về → exit edit silently (discard draft).
+  - Tech debt V2: undo grace period 5s client-side (show "Đã xoá" snackbar with "Hoàn tác" button → nếu click trước 5s, gửi `/app/conv.{id}.undelete` hoặc `/app/conv.{id}.edit` với restored content). V1 chấp nhận delete là vĩnh viễn.
+  - Tech debt V2: thêm `replyToMessage.deleted: boolean` vào snapshot để FE render quote box với placeholder nếu parent đã xoá. V1 FE check qua cache client (nếu message gốc còn cache) — best effort.
+- **Alternatives considered**:
+  - **Hard delete**: loại vì mất reply-to context + phá thứ tự.
+  - **Time window**: loại vì user có quyền xoá lịch sử — khác edit (edit có thể manipulate ngữ nghĩa).
+  - **FE tự render placeholder, BE không strip content**: loại vì (1) duplicate logic BE/FE, (2) content vẫn bay qua network dù không render → leak + waste bandwidth cho group lớn.
+- **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-018.

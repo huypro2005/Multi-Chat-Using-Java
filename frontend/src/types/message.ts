@@ -30,15 +30,20 @@ export interface MessageDto {
   conversationId: string
   sender: MessageSenderDto
   type: MessageType
-  content: string
+  content: string | null // null khi message đã bị soft-delete (deletedAt != null)
   replyToMessage: ReplyPreviewDto | null
   editedAt: string | null // ISO8601
   createdAt: string // ISO8601
+  // Soft-delete fields — set bởi BE khi xoá, null nếu chưa bị xoá
+  deletedAt: string | null // ISO8601
+  deletedBy: string | null // UUID string
   // Optimistic / Path B fields — chỉ set trên client, không có trong REST response
   clientTempId?: string
   status?: 'sending' | 'sent' | 'failed'
   failureCode?: string
   failureReason?: string
+  // Delete operation state — chỉ set trên client trong khoảng chờ ACK
+  deleteStatus?: 'deleting'
 }
 
 export interface MessageListResponse {
@@ -74,6 +79,14 @@ export interface ErrorEnvelope {
   clientId: string
   error: string
   code: string
+}
+
+// DELETE ACK minimal payload — chỉ có id + conversationId + deletedAt + deletedBy (§3d.3)
+export interface DeleteAckMessage {
+  id: string
+  conversationId: string
+  deletedAt: string
+  deletedBy: string
 }
 
 // Legacy — giữ lại để không break import cũ nếu có, nhưng sẽ dùng AckEnvelope/ErrorEnvelope

@@ -84,6 +84,13 @@ public class Message {
     @Column(name = "deleted_at")
     private OffsetDateTime deletedAt;
 
+    /**
+     * User who performed the soft delete. NULL = not deleted.
+     * Maps to deleted_by UUID column. ON DELETE SET NULL handled at DB level.
+     */
+    @Column(name = "deleted_by")
+    private UUID deletedBy;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -102,6 +109,11 @@ public class Message {
     }
 
     public void markAsDeleted() {
-        this.deletedAt = OffsetDateTime.now();
+        this.deletedAt = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+    }
+
+    public void markAsDeletedBy(UUID byUserId) {
+        this.deletedAt = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        this.deletedBy = byUserId;
     }
 }

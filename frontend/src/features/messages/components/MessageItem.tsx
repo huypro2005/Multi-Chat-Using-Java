@@ -1,12 +1,15 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { format } from 'date-fns'
-import { AlertCircle, Check, Loader2, Pencil, RotateCcw, X } from 'lucide-react'
+import { AlertCircle, Check, Loader2, RotateCcw, X } from 'lucide-react'
 import UserAvatar from '@/components/UserAvatar'
 import type { MessageDto, MessageListResponse } from '@/types/message'
 import { useQueryClient } from '@tanstack/react-query'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { useSendMessage } from '../hooks'
 import { useEditMessage } from '../useEditMessage'
+import { useDeleteMessage } from '../useDeleteMessage'
+import { MessageActions } from './MessageActions'
+import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -52,7 +55,7 @@ function RetryButton({ message }: RetryButtonProps) {
 
     // 2. Gửi lại với tempId MỚI (không reuse tempId cũ — contract mục 3b.4)
     try {
-      sendMessage(message.content)
+      sendMessage(message.content ?? '')
     } catch {
       // Nếu STOMP vẫn chưa connect → thông báo ngầm (không crash UI)
       // MessageInput sẽ disable send button khi mất kết nối
@@ -214,10 +217,11 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
   const isSending = message.status === 'sending'
   const isFailed = message.status === 'failed'
   const isTemp = isSending || isFailed || message.id.startsWith('temp-')
+  const isDeleted = message.deletedAt != null
+  const isDeleting = message.deleteStatus === 'deleting'
   const timeLabel = format(new Date(message.createdAt), 'HH:mm')
 
   // Edit eligibility — tính từ createdAt timestamp, không dùng Date.now() trong render.
-  // Dùng useMemo với messageAge (số giây) thay vì gọi Date.now() trực tiếp.
   const messageAgeMs = useMemo(
     () => new Date().getTime() - new Date(message.createdAt).getTime(),
     [message.createdAt], // chỉ recompute khi createdAt đổi (message mới)
@@ -226,7 +230,10 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
     isOwn &&
     !message.clientTempId && // chưa confirmed (optimistic)
     !message.failureCode && // message đang có lỗi send
+    !isDeleted && // đã xoá không được sửa
     messageAgeMs < EDIT_WINDOW_MS
+
+  const { deleteMessage } = useDeleteMessage(message.conversationId)
 
   const handleOpenEdit = useCallback(() => {
     setIsEditing(true)
@@ -235,6 +242,20 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
   const handleCloseEdit = useCallback(() => {
     setIsEditing(false)
   }, [])
+
+  const handleDelete = useCallback(() => {
+    deleteMessage(message.id)
+  }, [deleteMessage, message.id])
+
+  const handleReply = useCallback(() => {
+    console.log('TODO D4 — reply to', message.id)
+  }, [message.id])
+
+  const handleCopy = useCallback(() => {
+    if (message.content) {
+      void navigator.clipboard.writeText(message.content)
+    }
+  }, [message.content])
 
   // --- Bubble sent by current user ---
   if (isOwn) {
@@ -250,9 +271,26 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
             {timeLabel}
           </span>
 
-          <div className={`max-w-xs sm:max-w-sm md:max-w-md ${isFailed ? 'opacity-60' : ''}`}>
+          {/* MessageActions — chỉ hiện khi không đang edit, không deleted, không temp */}
+          {!isEditing && !isDeleted && !isTemp && (
+            <div className="self-end mb-1">
+              <MessageActions
+                message={message}
+                isOwn={isOwn}
+                canEdit={canEdit}
+                onEdit={handleOpenEdit}
+                onDelete={handleDelete}
+                onReply={handleReply}
+                onCopy={handleCopy}
+              />
+            </div>
+          )}
+
+          <div
+            className={`max-w-xs sm:max-w-sm md:max-w-md ${isFailed ? 'opacity-60' : ''} ${isDeleting ? 'opacity-50' : ''}`}
+          >
             {/* Reply preview */}
-            {message.replyToMessage && (
+            {message.replyToMessage && !isDeleted && (
               <div
                 className="mb-1 ml-auto max-w-full border-l-2 border-indigo-300 bg-indigo-50
                   pl-2 pr-3 py-1 rounded text-xs text-gray-500 italic truncate opacity-80"
@@ -262,10 +300,13 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
               </div>
             )}
 
-            {/* Inline edit mode */}
-            {isEditing ? (
+            {/* Deleted placeholder */}
+            {isDeleted ? (
+              <DeletedMessagePlaceholder />
+            ) : isEditing ? (
+              /* Inline edit mode */
               <InlineEditArea
-                initialContent={message.content}
+                initialContent={message.content ?? ''}
                 messageId={message.id}
                 convId={message.conversationId}
                 failureCode={message.failureCode}
@@ -273,13 +314,14 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
                 onClose={handleCloseEdit}
               />
             ) : (
+              /* Normal bubble */
               <div
                 className={`rounded-2xl rounded-br-sm px-4 py-2 text-sm whitespace-pre-wrap break-words
                   ${isFailed ? 'bg-red-100 text-red-800 border border-red-200' : 'bg-indigo-600 text-white'}`}
               >
                 {message.content}
-                {/* "(đã chỉnh sửa)" nhỏ khi editedAt có giá trị */}
-                {message.editedAt && (
+                {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
+                {message.editedAt && !isDeleted && (
                   <span className="text-indigo-200 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
                 )}
               </div>
@@ -300,21 +342,6 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
             )}
           </div>
         </div>
-
-        {/* Edit button — chỉ hiện khi hover + canEdit + không đang editing */}
-        {canEdit && !isEditing && !isTemp && (
-          <button
-            type="button"
-            onClick={handleOpenEdit}
-            aria-label="Sửa tin nhắn"
-            className="opacity-0 group-hover:opacity-100 transition-opacity
-              text-xs text-gray-400 hover:text-indigo-600 flex items-center gap-0.5
-              mr-9 -mt-0.5"
-          >
-            <Pencil size={10} />
-            Sửa
-          </button>
-        )}
 
         {/* Retry row — chỉ hiện khi failed (send failure, không phải edit failure) */}
         {isFailed && isTemp && (
@@ -341,7 +368,7 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
         )}
 
         {/* Reply preview */}
-        {message.replyToMessage && (
+        {message.replyToMessage && !isDeleted && (
           <div
             className="mb-1 max-w-full border-l-2 border-indigo-400 bg-gray-100
               pl-2 pr-3 py-1 rounded text-xs text-gray-500 italic truncate opacity-80"
@@ -351,18 +378,37 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar }: Pr
           </div>
         )}
 
-        {/* Bubble */}
-        <div
-          className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm
-            px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
-        >
-          {message.content}
-          {/* "(đã chỉnh sửa)" nhỏ khi editedAt có giá trị */}
-          {message.editedAt && (
-            <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
-          )}
-        </div>
+        {/* Deleted placeholder or normal bubble */}
+        {isDeleted ? (
+          <DeletedMessagePlaceholder />
+        ) : (
+          <div
+            className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm
+              px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
+          >
+            {message.content}
+            {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
+            {message.editedAt && !isDeleted && (
+              <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* MessageActions — chỉ hiện khi không deleted */}
+      {!isDeleted && (
+        <div className="self-end mb-1">
+          <MessageActions
+            message={message}
+            isOwn={isOwn}
+            canEdit={false} // other user's message — không edit được
+            onEdit={handleOpenEdit}
+            onDelete={handleDelete}
+            onReply={handleReply}
+            onCopy={handleCopy}
+          />
+        </div>
+      )}
 
       {/* Timestamp — hiện khi hover */}
       <span

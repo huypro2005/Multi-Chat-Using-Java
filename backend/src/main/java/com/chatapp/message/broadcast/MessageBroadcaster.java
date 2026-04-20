@@ -1,6 +1,7 @@
 package com.chatapp.message.broadcast;
 
 import com.chatapp.message.event.MessageCreatedEvent;
+import com.chatapp.message.event.MessageDeletedEvent;
 import com.chatapp.message.event.MessageUpdatedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -78,6 +79,34 @@ public class MessageBroadcaster {
         } catch (Exception e) {
             log.error("Failed to broadcast MESSAGE_UPDATED {} to conv {}",
                     event.messageDto().id(), event.conversationId(), e);
+        }
+    }
+
+    /**
+     * Broadcast MESSAGE_DELETED sau khi message bị soft-delete thành công.
+     *
+     * Payload minimal: chỉ id, conversationId, deletedAt, deletedBy.
+     * Content đã nil → không broadcast content để tránh leak.
+     * Xem SOCKET_EVENTS.md mục 3.3.
+     */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onMessageDeleted(MessageDeletedEvent event) {
+        try {
+            String destination = "/topic/conv." + event.conversationId();
+            Map<String, Object> envelope = Map.of(
+                    "type", "MESSAGE_DELETED",
+                    "payload", Map.of(
+                            "id", event.messageId().toString(),
+                            "conversationId", event.conversationId().toString(),
+                            "deletedAt", event.deletedAt().toString(),
+                            "deletedBy", event.deletedBy().toString()
+                    )
+            );
+            messagingTemplate.convertAndSend(destination, envelope);
+            log.debug("Broadcasted MESSAGE_DELETED {} to {}", event.messageId(), destination);
+        } catch (Exception e) {
+            log.error("Failed to broadcast MESSAGE_DELETED {} to conv {}",
+                    event.messageId(), event.conversationId(), e);
         }
     }
 }

@@ -34,6 +34,14 @@ interface MessageUpdatedPayload {
   editedAt: string
 }
 
+// Payload của MESSAGE_DELETED (§3.3 SOCKET_EVENTS.md)
+interface MessageDeletedPayload {
+  id: string
+  conversationId: string
+  deletedAt: string
+  deletedBy: string
+}
+
 function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boolean {
   if (!tempMsg.clientTempId) return false
   if (tempMsg.type !== incoming.type) return false
@@ -71,6 +79,12 @@ export function useConvSubscription(conversationId: string | undefined): void {
               queryClient,
               conversationId!,
               event.payload as MessageUpdatedPayload,
+            )
+          } else if (event.type === 'MESSAGE_DELETED') {
+            handleMessageDeleted(
+              queryClient,
+              conversationId!,
+              event.payload as MessageDeletedPayload,
             )
           }
         } catch (e) {
@@ -145,6 +159,43 @@ function handleMessageUpdated(
   )
 
   // V1 đơn giản: luôn invalidate conversations để sidebar refresh lastMessagePreview
+  void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+}
+
+// ---------------------------------------------------------------------------
+// Helper: handle MESSAGE_DELETED broadcast — soft delete (§3.3 SOCKET_EVENTS.md)
+// ---------------------------------------------------------------------------
+function handleMessageDeleted(
+  queryClient: QueryClient,
+  conversationId: string,
+  deleted: MessageDeletedPayload,
+): void {
+  queryClient.setQueryData(
+    messageKeys.all(conversationId),
+    (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) => {
+      if (!old) return old
+
+      const pages = old.pages.map((page) => {
+        const idx = page.items.findIndex((m) => m.id === deleted.id)
+        if (idx === -1) return page
+
+        const nextItems = [...page.items]
+        nextItems[idx] = {
+          ...nextItems[idx],
+          content: null,
+          deletedAt: deleted.deletedAt,
+          deletedBy: deleted.deletedBy,
+          // Clear deleteStatus nếu sender tab này đang chờ ACK từ trước
+          deleteStatus: undefined,
+        }
+        return { ...page, items: nextItems }
+      })
+
+      return { ...old, pages }
+    },
+  )
+
+  // Invalidate conversations để sidebar refresh (message bị xoá có thể là lastMessage)
   void queryClient.invalidateQueries({ queryKey: ['conversations'] })
 }
 

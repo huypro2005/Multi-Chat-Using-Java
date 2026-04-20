@@ -21,8 +21,9 @@ import { getStompClient, onConnectionStateChange } from '@/lib/stompClient'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { timerRegistry } from './timerRegistry'
 import { editTimerRegistry } from './editTimerRegistry'
+import { deleteTimerRegistry } from './deleteTimerRegistry'
 import { replaceTempWithReal, patchMessageByTempId, patchMessageById } from './hooks'
-import type { AckEnvelope, ErrorEnvelope, MessageListResponse } from '@/types/message'
+import type { AckEnvelope, DeleteAckMessage, ErrorEnvelope, MessageListResponse } from '@/types/message'
 
 // ---------------------------------------------------------------------------
 // ERROR handler — SEND operation
@@ -143,8 +144,35 @@ export function useAckErrorSubscription(): void {
               break
             }
 
+            case 'DELETE': {
+              // Tab-awareness: không có entry → ACK của tab khác → ignore
+              const deleteEntry = deleteTimerRegistry.get(clientId)
+              if (!deleteEntry) return
+
+              deleteTimerRegistry.clear(clientId)
+
+              // DELETE ACK message chỉ có id + conversationId + deletedAt + deletedBy (§3d.3)
+              const deleteMsg = message as unknown as DeleteAckMessage
+
+              // Patch message: set deletedAt + deletedBy + strip content
+              queryClient.setQueryData(
+                messageKeys.all(deleteEntry.convId),
+                (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) =>
+                  patchMessageById(old, deleteMsg.id, {
+                    deletedAt: deleteMsg.deletedAt,
+                    deletedBy: deleteMsg.deletedBy,
+                    content: null,
+                    deleteStatus: undefined,
+                  }),
+              )
+
+              // Invalidate conversations để sidebar refresh (trường hợp deleted là lastMessage)
+              void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+              break
+            }
+
             default:
-              // DELETE / REACT — chưa implement, ignore
+              // REACT và operation khác — chưa implement, ignore
               break
           }
         } catch (e) {
@@ -206,6 +234,41 @@ export function useAckErrorSubscription(): void {
                     failureReason: error,
                   }),
               )
+              break
+            }
+
+            case 'DELETE': {
+              // Tab-awareness: không có entry → ERROR của tab khác → ignore
+              const deleteEntry = deleteTimerRegistry.get(clientId)
+              if (!deleteEntry) return
+
+              deleteTimerRegistry.clear(clientId)
+
+              // Revert deleteStatus — xoá thất bại, user có thể thử lại
+              queryClient.setQueryData(
+                messageKeys.all(deleteEntry.convId),
+                (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) =>
+                  patchMessageById(old, deleteEntry.messageId, { deleteStatus: undefined }),
+              )
+
+              // Toast theo error code
+              const deleteErrorMsg =
+                code === 'MSG_NOT_FOUND'
+                  ? 'Tin nhắn không tồn tại hoặc bạn không có quyền xoá'
+                  : code === 'MSG_RATE_LIMITED'
+                    ? 'Bạn đang xoá quá nhanh, vui lòng thử lại sau'
+                    : code === 'AUTH_REQUIRED'
+                      ? 'Phiên đăng nhập hết hạn, vui lòng đăng nhập lại'
+                      : error ?? 'Không thể xoá tin nhắn'
+              console.error('[WS] DELETE error:', deleteErrorMsg, code)
+
+              if (code === 'AUTH_REQUIRED' || code === 'AUTH_TOKEN_EXPIRED') {
+                void import('@/services/authService').then(({ authService }) =>
+                  authService.refresh().catch(() => {
+                    window.location.href = '/login'
+                  }),
+                )
+              }
               break
             }
 
