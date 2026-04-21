@@ -6,9 +6,20 @@ interface Props {
   onCancel: () => void
 }
 
+// Helper detect icon từ MIME client-side (trước khi server confirm iconType)
+function clientIconEmoji(mime: string): string {
+  if (mime.startsWith('image/')) return '🖼️'
+  if (mime === 'application/pdf') return '📄'
+  if (mime.includes('wordprocessingml') || mime === 'application/msword') return '📝'
+  if (mime.includes('spreadsheetml') || mime === 'application/vnd.ms-excel') return '📊'
+  if (mime.includes('presentationml') || mime === 'application/vnd.ms-powerpoint') return '📽️'
+  if (mime === 'text/plain') return '📋'
+  if (mime.includes('zip') || mime.includes('7z')) return '📦'
+  return '📎'
+}
+
 export function PendingAttachmentItem({ pending, onCancel }: Props) {
   const isImage = pending.file.type.startsWith('image/')
-  const isPdf = pending.file.type === 'application/pdf'
   const hasError = pending.status === 'error'
 
   return (
@@ -23,16 +34,19 @@ export function PendingAttachmentItem({ pending, onCancel }: Props) {
           alt={pending.file.name}
           className="w-full h-full object-cover"
         />
-      ) : isPdf ? (
-        <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 p-1">
-          <span className="text-2xl">📄</span>
-          <span className="text-xs text-gray-500 truncate w-full text-center mt-0.5">
-            {pending.file.name.length > 10
-              ? pending.file.name.slice(0, 8) + '…'
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 p-1 gap-0.5">
+          <span className="text-2xl">{clientIconEmoji(pending.file.type)}</span>
+          <span
+            className="text-[10px] text-gray-500 text-center leading-tight px-0.5 overflow-hidden"
+            style={{ wordBreak: 'break-all' }}
+          >
+            {pending.file.name.length > 12
+              ? pending.file.name.slice(0, 8) + '…' + pending.file.name.slice(-3)
               : pending.file.name}
           </span>
         </div>
-      ) : null}
+      )}
 
       {/* Progress overlay */}
       {pending.status === 'uploading' && (

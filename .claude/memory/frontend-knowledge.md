@@ -261,12 +261,21 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 - Ảnh hiển thị KHÔNG có bubble background — chỉ render `<AttachmentGallery>` (grid thumbnail).
 - Text caption (nếu có) hiển thị PHÍA DƯỚI ảnh, trong bubble riêng.
 - Nếu chỉ có text: bubble như cũ. Nếu chỉ có ảnh: không có bubble.
-- PDF render qua `<PdfCard>` (link card) thay vì gallery.
+- Non-image docs/archives render qua `<FileCard>` (generic card). `PdfCard` đã xóa.
 
-### validateFiles
-- Chỉ: all-images (tối đa 5 total) OR exactly 1 PDF alone (không mixed).
-- Check MIME + size (20MB max) per file.
-- Nhận `currentPendingCount` để check total khi user chọn nhiều lần.
+### validateFiles (v0.9.5)
+- Group A: all-images (tối đa 5 total, có thể chọn nhiều lần).
+- Group B: exactly 1 non-image alone (PDF, Word, Excel, PPT, TXT, ZIP, 7z).
+- Check mixing: images + non-image = rejected; 2+ non-image = rejected.
+- Signature: `validateFiles(newFiles, count, pendingMimes?)` — pass `pendingMimes` để check mixing.
+- Caller phải filter `status !== 'error'` trước khi tính count và extract mimes.
+
+### iconType-based rendering (W6-D4-extend)
+- FE đọc `attachment.iconType` (server-computed) để chọn icon — KHÔNG hard-code MIME → icon map ở render layer.
+- Fallback: nếu `iconType` undefined (optimistic msg chưa có server confirm) → check `mime.startsWith('image/')`.
+- `clientIconEmoji(mime)` trong `PendingAttachmentItem`: detect icon client-side TRƯỚC khi upload xong (pending state). Tách biệt với server iconType.
+- `FileCard.tsx` generic: nhận `AttachmentDto`, hiển thị icon + size + download. Replace `PdfCard.tsx`.
+- `AttachmentDto.iconType` field non-optional (required) trong type — mọi mock/test phải có.
 
 ### Drag-drop pattern trong MessageInput
 - `onDragLeave`: chỉ clear `isDragging` khi `!e.currentTarget.contains(e.relatedTarget as Node)` — tránh flicker khi rời child element.

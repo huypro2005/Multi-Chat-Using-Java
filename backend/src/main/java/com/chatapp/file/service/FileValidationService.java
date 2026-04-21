@@ -25,18 +25,39 @@ import java.util.Set;
  * toàn stream. Nhưng vẫn MARK stream trước khi gọi, RESET sau đó nếu caller cần
  * đọc lại. Ở đây ta gọi trên `MultipartFile.getInputStream()` — mỗi lần gọi
  * trả về stream mới, nên không cần mark/reset.
+ *
+ * ZIP→Office note: DOCX/XLSX/PPTX là ZIP container. Tika có thể detect thành
+ * application/zip nếu file thiếu Office-specific metadata. Khi đó, dùng extension
+ * hint (từ originalFilename) để override CHỈN KHI Tika trả application/zip —
+ * không phải trong mọi trường hợp. MIME whitelist vẫn check sau override.
+ *
+ * Charset strip: Tika trả "text/plain; charset=UTF-8" cho text file — strip
+ * phần sau ";" trước khi check whitelist.
  */
 @Slf4j
 @Service
 public class FileValidationService {
 
-    // Whitelist MIME được phép upload (V1) — ADR-019, API_CONTRACT.md.
+    // Whitelist MIME được phép upload (W6-D4-extend) — ADR-019, API_CONTRACT.md.
+    // Group A: Images (gallery-capable, 1–5 per message)
+    // Group B: Documents & archives (1 per message)
     public static final Set<String> ALLOWED_MIMES = Set.of(
+            // Group A — Images
             "image/jpeg",
             "image/png",
             "image/webp",
             "image/gif",
-            "application/pdf"
+            // Group B — Documents & archives
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // docx
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        // xlsx
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",// pptx
+            "application/msword",            // doc (legacy)
+            "application/vnd.ms-excel",      // xls (legacy)
+            "application/vnd.ms-powerpoint", // ppt (legacy)
+            "text/plain",
+            "application/zip",
+            "application/x-7z-compressed"
     );
 
     public static final long MAX_SIZE_BYTES = 20L * 1024 * 1024; // 20MB
@@ -44,13 +65,23 @@ public class FileValidationService {
     /**
      * Mapping MIME → file extension CỐ ĐỊNH — không đọc từ originalName (path traversal).
      * Bao phủ đúng whitelist ALLOWED_MIMES.
+     * Dùng Map.ofEntries vì > 10 entries (Map.of() nhận tối đa 10 key-value pairs).
      */
-    private static final Map<String, String> MIME_TO_EXT = Map.of(
-            "image/jpeg", "jpg",
-            "image/png", "png",
-            "image/webp", "webp",
-            "image/gif", "gif",
-            "application/pdf", "pdf"
+    private static final Map<String, String> MIME_TO_EXT = Map.ofEntries(
+            Map.entry("image/jpeg", "jpg"),
+            Map.entry("image/png",  "png"),
+            Map.entry("image/webp", "webp"),
+            Map.entry("image/gif",  "gif"),
+            Map.entry("application/pdf", "pdf"),
+            Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
+            Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
+            Map.entry("application/msword", "doc"),
+            Map.entry("application/vnd.ms-excel", "xls"),
+            Map.entry("application/vnd.ms-powerpoint", "ppt"),
+            Map.entry("text/plain", "txt"),
+            Map.entry("application/zip", "zip"),
+            Map.entry("application/x-7z-compressed", "7z")
     );
 
     private final Tika tika = new Tika();
@@ -79,11 +110,34 @@ public class FileValidationService {
         // 3. Detect MIME qua magic bytes
         String detectedMime;
         try (InputStream in = file.getInputStream()) {
-            detectedMime = tika.detect(in);
+            String raw = tika.detect(in);
+            // Charset strip: Tika trả "text/plain; charset=UTF-8" — strip phần charset.
+            detectedMime = raw != null ? raw.split(";")[0].trim() : null;
         } catch (IOException e) {
             log.warn("Tika detect IOException: {}", e.getMessage());
             // I/O khi detect → treat như file không hợp lệ (không leak chi tiết ra client)
             throw new FileTypeNotAllowedException(ALLOWED_MIMES, "unknown");
+        }
+
+        // ZIP→Office override: DOCX/XLSX/PPTX là ZIP container — Tika có thể trả
+        // application/zip nếu file thiếu Office-specific metadata. Dùng extension hint
+        // CHỈ KHI Tika trả application/zip (fallback an toàn).
+        if ("application/zip".equals(detectedMime)) {
+            String originalFilename = file.getOriginalFilename();
+            if (originalFilename != null) {
+                String ext = org.springframework.util.StringUtils.getFilenameExtension(originalFilename);
+                if (ext != null) {
+                    String extLower = ext.toLowerCase();
+                    if ("docx".equals(extLower)) {
+                        detectedMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+                    } else if ("xlsx".equals(extLower)) {
+                        detectedMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                    } else if ("pptx".equals(extLower)) {
+                        detectedMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                    }
+                    // else: giữ nguyên application/zip (file zip thật)
+                }
+            }
         }
 
         if (detectedMime == null || !ALLOWED_MIMES.contains(detectedMime)) {

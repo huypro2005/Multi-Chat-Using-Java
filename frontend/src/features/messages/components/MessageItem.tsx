@@ -12,7 +12,7 @@ import { MessageActions } from './MessageActions'
 import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
 import { ReplyQuote } from './ReplyQuote'
 import { AttachmentGallery } from '@/features/files/components/AttachmentGallery'
-import { PdfCard } from '@/features/files/components/PdfCard'
+import { FileCard } from '@/features/files/components/FileCard'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -325,10 +325,12 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
                 {/* Attachments — Messenger-style: no bubble background */}
                 {hasAttachments && (
                   <div className="mb-1">
-                    {message.attachments![0].mime === 'application/pdf' ? (
-                      <PdfCard attachment={message.attachments![0]} />
-                    ) : (
+                    {(message.attachments![0].iconType === 'IMAGE' ||
+                      (!message.attachments![0].iconType &&
+                        message.attachments![0].mime.startsWith('image/'))) ? (
                       <AttachmentGallery attachments={message.attachments!} />
+                    ) : (
+                      <FileCard attachment={message.attachments![0]} />
                     )}
                   </div>
                 )}
@@ -402,12 +404,14 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
         ) : (
           <>
             {/* Attachments — Messenger-style: no bubble background */}
-            {message.attachments && message.attachments.length > 0 && (
+            {message.attachments && message.attachments.length > 0 && !isDeleted && (
               <div className="mb-1">
-                {message.attachments[0].mime === 'application/pdf' ? (
-                  <PdfCard attachment={message.attachments[0]} />
-                ) : (
+                {(message.attachments[0].iconType === 'IMAGE' ||
+                  (!message.attachments[0].iconType &&
+                    message.attachments[0].mime.startsWith('image/'))) ? (
                   <AttachmentGallery attachments={message.attachments} />
+                ) : (
+                  <FileCard attachment={message.attachments[0]} />
                 )}
               </div>
             )}

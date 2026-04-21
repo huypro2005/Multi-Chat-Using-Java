@@ -791,14 +791,49 @@ Note:
 
 ---
 
-## Files Management (v0.9.0-files — W6-D1)
+## Files Management (v0.9.5-files-extended — W6-D4-extend)
 
-> **Phase**: Tuần 6 — File upload + attachments.
+> **Phase**: Tuần 6 — File upload + attachments (mở rộng MIME types W6-D4).
 > **Scope V1**: Local disk storage + StorageService interface (ADR-019, ARCHITECTURE.md §7.7). V2 migrate S3.
-> **Allowed MIME**: Images (`image/jpeg`, `image/png`, `image/webp`, `image/gif`) + PDF (`application/pdf`). Tất cả khác reject.
+> **Allowed MIME**: Xem mục "Allowed MIME types (v0.9.5)" bên dưới — Group A (images) + Group B (office docs, text, archives).
 > **Max size**: 20MB per file.
 > **Expiry**: 30 ngày kể từ `createdAt`. Daily cleanup job xoá file disk + mark row `expired`. Xem ADR-019 & §7.8.
 > **Auth**: Bearer JWT bắt buộc cho tất cả endpoints.
+
+### Allowed MIME types (v0.9.5)
+
+Group A — Images (gallery-capable, 1–5 per message):
+- image/jpeg  (.jpg, .jpeg)
+- image/png   (.png)
+- image/webp  (.webp)
+- image/gif   (.gif)
+
+Group B — Non-image documents & archives (exactly 1 per message):
+- application/pdf (.pdf)
+- application/vnd.openxmlformats-officedocument.wordprocessingml.document (.docx)
+- application/vnd.openxmlformats-officedocument.spreadsheetml.sheet (.xlsx)
+- application/vnd.openxmlformats-officedocument.presentationml.presentation (.pptx)
+- application/msword (.doc — legacy Word)
+- application/vnd.ms-excel (.xls — legacy Excel)
+- application/vnd.ms-powerpoint (.ppt — legacy PowerPoint)
+- text/plain (.txt)
+- application/zip (.zip)
+- application/x-7z-compressed (.7z)
+
+Blacklist — Never allow (even if future expand):
+- Executables: .exe, .dll, .bat, .sh, .cmd, .ps1, .msi
+- Scripts: .js (standalone), .vbs, .py
+- Markup/XSS vectors: image/svg+xml, text/html, application/xhtml+xml
+
+**Mixing rules:**
+- Group A + Group A: OK if total ≤ 5
+- Group B: exactly 1 file, alone (no mixing with Group A or other Group B)
+- Group A + Group B together: REJECT → MSG_ATTACHMENTS_MIXED
+- 2+ Group B files: REJECT → MSG_ATTACHMENTS_MIXED
+
+**Error codes:**
+- MSG_ATTACHMENTS_TOO_MANY: > 5 images in Group A
+- MSG_ATTACHMENTS_MIXED: mixing groups, or > 1 non-image file
 
 ### FileDto shape (dùng chung mọi nơi — response upload, attachment trong MessageDto)
 
@@ -810,6 +845,7 @@ Note:
   "size": "long (bytes, 1..20971520)",
   "url": "string (GET /api/files/{id})",
   "thumbUrl": "string | null (GET /api/files/{id}/thumb — null nếu không phải image)",
+  "iconType": "IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC",
   "expiresAt": "ISO8601 UTC (createdAt + 30 ngày)"
 }
 ```
@@ -820,6 +856,15 @@ Field notes:
 - `url`: path relative (FE prefix với base API URL). Authorization check mỗi lần GET.
 - `thumbUrl`: `null` cho PDF / non-image. Cho image: trả về endpoint `/api/files/{id}/thumb` luôn (không pre-compute thumbnail tồn tại hay không — server lazy-generate).
 - `size`: bytes, client dùng để hiển thị (ví dụ "2.3 MB").
+- `iconType`: enum server-computed từ MIME. FE dùng để chọn icon render (không dùng MIME trực tiếp ở FE để dễ extend whitelist sau này mà không cần đổi FE). Mapping:
+  - `IMAGE` → image/* (jpeg, png, webp, gif)
+  - `PDF` → application/pdf
+  - `WORD` → .doc, .docx
+  - `EXCEL` → .xls, .xlsx
+  - `POWERPOINT` → .ppt, .pptx
+  - `TEXT` → text/plain
+  - `ARCHIVE` → .zip, .7z
+  - `GENERIC` → fallback nếu MIME match whitelist nhưng chưa có mapping cụ thể (defensive — KHÔNG xảy ra V1, có để future-proof)
 - `expiresAt`: FE dùng để warn user trước expiry (ví dụ hiển thị "File sẽ hết hạn trong 3 ngày").
 
 ---
@@ -852,6 +897,7 @@ Field notes:
   "size": 2457600,
   "url": "/api/files/550e8400-e29b-41d4-a716-446655440000",
   "thumbUrl": "/api/files/550e8400-e29b-41d4-a716-446655440000/thumb",
+  "iconType": "IMAGE",
   "expiresAt": "2026-05-20T10:00:00Z"
 }
 ```
@@ -864,7 +910,7 @@ Field notes:
 | 400 | `VALIDATION_FAILED` | `file` field sai shape (không phải multipart part). |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
 | 413 | `FILE_TOO_LARGE` | File > 20 MB. Kèm `details.maxBytes: 20971520` + `details.actualBytes`. |
-| 415 | `FILE_TYPE_NOT_ALLOWED` | MIME không nằm trong whitelist `[jpeg, png, webp, gif, pdf]`. Kèm `details.allowedMimes` + `details.actualMime`. |
+| 415 | `FILE_TYPE_NOT_ALLOWED` | MIME không nằm trong whitelist (xem mục "Allowed MIME types (v0.9.5)" — Group A images + Group B docs/archives). Kèm `details.allowedMimes` + `details.actualMime`. |
 | 415 | `MIME_MISMATCH` | MIME detect qua magic bytes (Apache Tika) khác với `Content-Type` header. Attacker đổi extension/header để bypass whitelist. Kèm `details.declaredMime` + `details.detectedMime`. |
 | 429 | `RATE_LIMITED` | Vượt 20/phút/user. Kèm `details.retryAfterSeconds`. |
 | 500 | `STORAGE_FAILED` | Lỗi ghi disk (disk full, permission denied, I/O error). Log chi tiết server-side, client chỉ nhận generic message. |
@@ -956,7 +1002,7 @@ Field notes:
 |------|-----------|-----------|
 | 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
-| 404 | `NOT_FOUND` | File không tồn tại / không có quyền / đã expire / **KHÔNG PHẢI image** (PDF không có thumbnail → 404 giống "không tồn tại" để consistent). |
+| 404 | `NOT_FOUND` | File không tồn tại / không có quyền / đã expire / **KHÔNG PHẢI image** (PDF, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z không có thumbnail → 404 giống "không tồn tại" để consistent — FE dùng `iconType` chọn icon static). |
 | 500 | `INTERNAL_ERROR` | Lỗi generate thumbnail (Thumbnailator exception, disk I/O). |
 
 **Notes**:
@@ -992,6 +1038,7 @@ Field notes:
       "size": "long",
       "url": "string",
       "thumbUrl": "string | null",
+      "iconType": "IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC",
       "expiresAt": "ISO8601"
     }
   ],
@@ -1035,10 +1082,14 @@ Field rules:
 **Validation rules** (server-side, enforce nghiêm ngặt):
 
 1. **Phải có content HOẶC attachments**: nếu `content` rỗng/null/toàn-whitespace AND `attachmentIds` rỗng/null → `MSG_NO_CONTENT`.
-2. **Mixed type NOT ALLOWED**: `attachmentIds` không được trộn image với PDF. Tất cả phải là image HOẶC tất cả là PDF. Vi phạm → `MSG_ATTACHMENTS_MIXED`.
+2. **Mixing rules** (theo mục "Allowed MIME types (v0.9.5)"):
+   - Tất cả Group A (images): OK if total ≤ 5.
+   - Đúng 1 Group B (non-image: pdf, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z): OK, alone.
+   - Trộn Group A + Group B → `MSG_ATTACHMENTS_MIXED`.
+   - 2+ Group B files → `MSG_ATTACHMENTS_MIXED` (Group B exactly 1 per message).
 3. **Count limits**:
-   - Images: 1–5 items. >5 → `MSG_ATTACHMENTS_TOO_MANY` (kèm `details.maxItems: 5, details.actualCount`).
-   - PDF: **đúng 1 item**. >1 PDF → `MSG_ATTACHMENTS_TOO_MANY` (kèm `details.maxItems: 1`).
+   - Group A images: 1–5 items. >5 → `MSG_ATTACHMENTS_TOO_MANY` (kèm `details.maxItems: 5, details.actualCount`).
+   - Group B (non-image): exactly 1. >1 → `MSG_ATTACHMENTS_MIXED` (vì có nghĩa "trộn 2 Group B").
 4. **Per-attachment check** (cho mỗi `attachmentId`):
    - File không tồn tại → `MSG_ATTACHMENT_NOT_FOUND`.
    - File đã expire (`expires_at < now()`) → `MSG_ATTACHMENT_EXPIRED`.
@@ -1056,8 +1107,8 @@ Field rules:
 | `MSG_NO_CONTENT` | 400 / STOMP | Cả `content` và `attachmentIds` đều rỗng. |
 | `MSG_ATTACHMENT_NOT_OWNED` | 403 / STOMP | File `uploader_id != senderId`. |
 | `MSG_ATTACHMENT_ALREADY_USED` | 409 / STOMP | File đã attach vào message khác (UNIQUE constraint). |
-| `MSG_ATTACHMENTS_MIXED` | 400 / STOMP | Trộn image + PDF trong cùng message. |
-| `MSG_ATTACHMENTS_TOO_MANY` | 400 / STOMP | >5 images hoặc >1 PDF. |
+| `MSG_ATTACHMENTS_MIXED` | 400 / STOMP | Trộn Group A (images) + Group B (non-image), HOẶC 2+ files Group B trong cùng message. |
+| `MSG_ATTACHMENTS_TOO_MANY` | 400 / STOMP | >5 images trong Group A. |
 | `MSG_ATTACHMENT_NOT_FOUND` | 404 / STOMP | `attachmentId` không tồn tại. |
 | `MSG_ATTACHMENT_EXPIRED` | 410 / STOMP | File đã expire (`expires_at < now()`). |
 
@@ -1069,6 +1120,7 @@ Field rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-21 | v0.9.5-files-extended | **W6-D4-extend**: Mở rộng MIME whitelist từ 5 type (image jpeg/png/webp/gif + pdf) sang 14 type chia 2 group: Group A (images, gallery 1–5/message) + Group B (non-image: pdf, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z — exactly 1/message). Documented blacklist (executables, scripts, XSS vectors svg/html). Mixing rules formalized: Group A only OR exactly 1 Group B; trộn → `MSG_ATTACHMENTS_MIXED`; 2+ Group B → `MSG_ATTACHMENTS_MIXED`. Thêm field `iconType` vào `FileDto`: enum `IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC` server-computed từ MIME (FE dùng để chọn icon, không bind MIME trực tiếp → dễ extend whitelist sau). Thumbnail endpoint vẫn chỉ phục vụ Group A images; Group B trả 404 (FE fallback `iconType` icon static). Update `MSG_ATTACHMENTS_TOO_MANY` chỉ cho >5 images; >1 Group B fall vào `MSG_ATTACHMENTS_MIXED`. WARNINGS thêm office macro risk + blacklist maintenance cycle. |
 | 2026-04-20 | v0.9.0-files | **W6-D1**: Thêm Files Management section với `FileDto` shape dùng chung (id, mime, name, size, url, thumbUrl, expiresAt). 3 endpoints: `POST /api/files/upload` (multipart, 20MB max, rate limit 20/phút, MIME whitelist jpeg/png/webp/gif/pdf, MIME verify qua Apache Tika magic bytes — khác `Content-Type` header → `MIME_MISMATCH`), `GET /api/files/{id}` (auth = uploader OR member của conv chứa attachment, 404 merge cho expired + not-found + forbidden, Content-Disposition inline + X-Content-Type-Options nosniff), `GET /api/files/{id}/thumb` (image 200×200 JPEG lazy-generate cache, PDF/non-image trả 404). Update `MessageDto` thêm `attachments: FileDto[]` (luôn là array, không null), `content` nullable khi có attachments. Validation SEND+EDIT với attachments: phải có content HOẶC attachments (`MSG_NO_CONTENT`), images 1-5 OR pdf đúng 1, không trộn (`MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`), per-file check `MSG_ATTACHMENT_NOT_OWNED/ALREADY_USED/NOT_FOUND/EXPIRED`. EDIT KHÔNG sửa attachments V1 (chỉ sửa content). Error codes mới: `FILE_TOO_LARGE` (413), `FILE_TYPE_NOT_ALLOWED` (415), `FILE_EMPTY` (400), `MIME_MISMATCH` (415), `STORAGE_FAILED` (500), và 7 MSG_* codes ở trên. Soft-delete message strip cả `content=null` + `attachments=[]` (W5-D3 mở rộng cho W6). ADR-019 quyết local disk + StorageService interface, migration V7 thêm `files` + `message_attachments`. |
 | 2026-04-20 | v0.6.2-messages-after-param | **W5-D4**: GET /api/conversations/{convId}/messages thêm `after` param (forward pagination, ORDER ASC, include deleted). `cursor` và `after` mutually exclusive (400 nếu dùng cùng nhau). `ReplyPreviewDto` thêm field `deletedAt` (null nếu source chưa bị xóa, ISO8601 nếu đã bị xóa) và `contentPreview` = null khi source deleted. STOMP `SendMessagePayload` thêm `replyToMessageId` (nullable UUID) với validation: source phải thuộc cùng conversation, quoting deleted source allowed. |
 | 2026-04-20 | v0.6.1-messages-stomp-shift | **ADR-016**: POST /api/conversations/{convId}/messages được **deprecated** cho FE hot path. FE chuyển sang STOMP `/app/conv.{id}.message` với tempId (xem SOCKET_EVENTS.md v1.1-w4). Endpoint REST KHÔNG bị xoá — giữ cho batch import, bot API, integration testing, và fallback. Shape response không đổi. |

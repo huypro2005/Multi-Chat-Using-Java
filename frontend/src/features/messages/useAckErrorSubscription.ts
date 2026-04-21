@@ -206,7 +206,7 @@ export function useAckErrorSubscription(): void {
                   toast.error('Tệp đã được sử dụng trong tin nhắn khác')
                   break
                 case 'MSG_ATTACHMENTS_MIXED':
-                  toast.error('Không thể gửi lẫn PDF và ảnh cùng lúc')
+                  toast.error('Không thể trộn ảnh với tệp khác hoặc gửi nhiều tệp tài liệu')
                   break
                 case 'MSG_ATTACHMENTS_TOO_MANY':
                   toast.error('Vượt giới hạn số tệp đính kèm (tối đa 5)')

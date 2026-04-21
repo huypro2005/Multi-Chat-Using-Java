@@ -17,6 +17,44 @@ Contract: ...
 
 ---
 
+## [W6-D4-extend] Implement expand file types — APPROVE
+
+Verdict: APPROVE. Tests 210/210 pass (target 197+13). FE `npm run build` zero TS errors.
+
+Checklist all PASS:
+1. ALLOWED_MIMES = 14 (4 image + 10 non-image), khớp contract.
+2. Charset strip `tika.detect().split(";")[0].trim()` cho `text/plain; charset=...`.
+3. ZIP→Office override CHỈ áp dụng khi Tika trả `application/zip` + extension docx/xlsx/pptx; ZIP thật giữ `application/zip` (test V14 cover).
+4. resolveIconType cover đủ 8 enum: IMAGE/PDF/WORD/EXCEL/POWERPOINT/TEXT/ARCHIVE/GENERIC.
+5. singleNonImage rule = `files.size()==1 && !allImages` thay cho hardcode singlePdf. MAX_PDF_ATTACHMENTS xoá có comment giải thích.
+6. FileDto field order: id, mime, name, size, url, thumbUrl, **iconType**, expiresAt — đúng vị trí giữa thumbUrl và expiresAt.
+7. validateFiles 3-arg signature, được call ở cả handleFileChange + handleDrop với activePending.length + pendingMimes.
+8. AttachmentDto.iconType non-optional. Optimistic message tạo `attachments: []` (length 0) → MessageItem có guard `attachments.length > 0` trước khi access `[0].iconType` → an toàn, không break.
+9. FileCard dùng `attachment.iconType ?? 'GENERIC'` để chọn emoji + color, KHÔNG hard-code MIME.
+10. PdfCard không còn import nào (grep clean).
+11. Security blacklist verify: F22 test upload .exe (MZ magic) → 415 FILE_TYPE_NOT_ALLOWED (Tika detect application/x-msdownload, không trong whitelist).
+12. MIME mismatch defense: Tika magic bytes detect → reject nếu không khớp whitelist (V07 EXE rename → reject).
+
+Key decisions confirmed:
+- ZIP→Office override chỉ kích hoạt cho `application/zip` (an toàn, không over-eager).
+- iconType là non-optional ở FE type — buộc BE luôn populate (đã verify resolveIconType có default GENERIC).
+- MessageItem fallback: nếu `iconType` null/undefined (defensive cho legacy), check `mime.startsWith('image/')` — vẫn safe khi BE deploy đúng.
+- MAX_PDF_ATTACHMENTS removed thay vì rename, comment ghi rõ thay bằng singleNonImage logic.
+
+Patterns confirmed:
+- Group A/B mixing semantics: Group A 1-5 OR Group B exactly 1 alone, không trộn.
+- `MSG_ATTACHMENTS_TOO_MANY` chỉ cho >5 ảnh; >1 file Group B fall vào `MSG_ATTACHMENTS_MIXED` (đúng theo error message mới "Chỉ được gửi 1-5 ảnh, hoặc 1 tệp khác").
+- Map.ofEntries dùng cho >10 entries trong MIME_TO_EXT (Map.of() max 10).
+
+Non-blocking suggestions (tuỳ chọn, không cần fix):
+- `MessageInput.tsx` accept attribute liệt kê 14 MIME + 14 extension — verbose. Có thể trích thành const ALLOWED_FILE_PICKER_ACCEPT chung với validateFiles ALLOWED_MIMES để 1 nguồn truth ở FE.
+- `useAckErrorSubscription` toast cho `MSG_ATTACHMENTS_MIXED` đang ghi "Không thể gửi lẫn PDF và ảnh cùng lúc" — message chưa update theo W6-D4-extend (Group A/B). Cosmetic, FE có thể đổi thành "Không thể trộn ảnh với tệp khác / chỉ gửi 1 tệp".
+- FE `clientIconEmoji` ở PendingAttachmentItem trùng logic với BE resolveIconType → khi extend MIME phải sửa 2 nơi. Acceptable cho V1 (client preview chỉ là UI).
+
+Contract: `docs/API_CONTRACT.md` v0.9.5-files-extended — ĐÃ CHỐT, khớp implementation.
+
+---
+
 ## [W6-D4] FE File Upload UI + Attachment Display — APPROVE
 
 Blocking: 0. Build clean (`npm run build` zero errors, 2 pre-existing warnings là chunk size + dynamic import authService — không cần fix). Diff: 5 file FE modified + 1 folder mới (`features/files/` có 2 hook + 3 component).

@@ -55,7 +55,7 @@ public class MessageService {
     private static final int DELETE_RATE_LIMIT_PER_MINUTE = 10;
     private static final int CONTENT_MAX_LENGTH = 5000;
     private static final int MAX_IMAGE_ATTACHMENTS = 5;
-    private static final int MAX_PDF_ATTACHMENTS = 1;
+    // MAX_PDF_ATTACHMENTS removed W6-D4-extend — replaced by singleNonImage logic
     private static final long EDIT_WINDOW_SECONDS = 300; // 5 minutes
     private static final Duration DEDUP_TTL = Duration.ofSeconds(60);
     private static final Pattern UUID_PATTERN =
@@ -726,10 +726,10 @@ public class MessageService {
     private void validateAndAttachFiles(Message message, List<UUID> attachmentIds,
                                          UUID userId, String tempId) {
         // Rule 1: Count — pre-check trước khi load DB để fail-fast.
-        // Image/PDF mix hạn chế khác nhau; check tổng > 5 trước (upper bound tuyệt đối).
+        // Upper bound tuyệt đối: max 5 files (ảnh). 1 file Group B sẽ được enforce ở Rule 6.
         if (attachmentIds.size() > MAX_IMAGE_ATTACHMENTS) {
             throw new AppException(HttpStatus.BAD_REQUEST, "MSG_ATTACHMENTS_TOO_MANY",
-                    "Tối đa " + MAX_IMAGE_ATTACHMENTS + " ảnh hoặc 1 file PDF trong một tin nhắn",
+                    "Tối đa " + MAX_IMAGE_ATTACHMENTS + " tệp đính kèm trong một tin nhắn",
                     Map.of("tempId", tempId, "maxItems", MAX_IMAGE_ATTACHMENTS,
                             "actualCount", attachmentIds.size()));
         }
@@ -768,19 +768,18 @@ public class MessageService {
             }
         }
 
-        // Rule 6: Group type — all images OR exactly 1 PDF.
+        // Rule 6: Group type — all images (1-5) OR exactly 1 non-image file (Group B).
+        // W6-D4-extend: mở rộng từ "1 PDF" → "1 file không phải image" để support docx/xlsx/txt/zip/7z.
         Set<String> mimes = files.stream()
                 .map(FileRecord::getMime)
                 .collect(Collectors.toSet());
         boolean allImages = mimes.stream().allMatch(m -> m != null && m.startsWith("image/"));
-        boolean singlePdf = files.size() == MAX_PDF_ATTACHMENTS
-                && mimes.size() == 1
-                && mimes.contains("application/pdf");
+        boolean singleNonImage = files.size() == 1 && !allImages; // 1 file, any non-image Group B type
 
-        if (!allImages && !singlePdf) {
-            // Covers: mixed images+PDF, multiple PDFs, non-image-non-PDF (không xảy ra do whitelist upload).
+        if (!allImages && !singleNonImage) {
+            // Covers: mixed images+doc, multiple docs, 2+ non-image files.
             throw new AppException(HttpStatus.BAD_REQUEST, "MSG_ATTACHMENTS_MIXED",
-                    "Chỉ được gửi 1 PDF hoặc 1-5 ảnh trong một tin nhắn",
+                    "Chỉ được gửi 1-5 ảnh, hoặc 1 tệp khác / tin nhắn",
                     Map.of("tempId", tempId));
         }
 

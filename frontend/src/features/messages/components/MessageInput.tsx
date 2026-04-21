@@ -85,7 +85,9 @@ export function MessageInput({
     // Reset input value so selecting the same file again triggers onChange
     e.target.value = ''
     if (files.length === 0) return
-    const { ok, errors } = validateFiles(files, pending.length)
+    const activePending = pending.filter((p) => p.status !== 'error')
+    const pendingMimes = activePending.map((p) => p.file.type)
+    const { ok, errors } = validateFiles(files, activePending.length, pendingMimes)
     errors.forEach((err) => toast.error(err))
     if (ok.length > 0) void upload(ok)
   }
@@ -156,7 +158,9 @@ export function MessageInput({
     e.preventDefault()
     setIsDragging(false)
     const files = Array.from(e.dataTransfer.files)
-    const { ok, errors } = validateFiles(files, pending.length)
+    const activePending = pending.filter((p) => p.status !== 'error')
+    const pendingMimes = activePending.map((p) => p.file.type)
+    const { ok, errors } = validateFiles(files, activePending.length, pendingMimes)
     errors.forEach((err) => toast.error(err))
     if (ok.length > 0) void upload(ok)
   }
@@ -229,7 +233,24 @@ export function MessageInput({
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"
+          accept={[
+            // Images
+            'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+            // Documents
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'application/msword',
+            'application/vnd.ms-excel',
+            'application/vnd.ms-powerpoint',
+            'text/plain',
+            'application/zip',
+            'application/x-7z-compressed',
+            // Extensions (mobile Safari needs this)
+            '.jpg', '.jpeg', '.png', '.webp', '.gif',
+            '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.txt', '.zip', '.7z',
+          ].join(',')}
           onChange={handleFileChange}
           className="hidden"
         />

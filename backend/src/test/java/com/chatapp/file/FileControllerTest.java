@@ -278,16 +278,17 @@ class FileControllerTest {
     }
 
     // =========================================================================
-    // F05: upload MIME không trong whitelist (text/plain) → 415
+    // F05: upload MIME không trong whitelist (EXE magic) → 415
     // =========================================================================
 
     @Test
     void upload_mimeNotInWhitelist_returns415() throws Exception {
         String token = registerAndGetToken("f05_bad_mime@test.com", "f05bmime");
 
-        byte[] textContent = "This is plain text content.".getBytes();
+        // EXE magic bytes (MZ) — application/x-msdownload, không trong whitelist
+        byte[] exeBytes = new byte[]{0x4D, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         MockMultipartFile file = new MockMultipartFile(
-                "file", "note.txt", "text/plain", textContent);
+                "file", "virus.exe", "application/octet-stream", exeBytes);
 
         mockMvc.perform(multipart("/api/files/upload")
                         .file(file)
@@ -635,5 +636,130 @@ class FileControllerTest {
                         .header("Authorization", "Bearer " + token))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    // =========================================================================
+    // W6-D4-extend — New file types + iconType tests
+    // =========================================================================
+
+    // Magic bytes
+    // ZIP/DOCX/XLSX/PPTX magic: PK\x03\x04
+    private static final byte[] ZIP_MAGIC = {0x50, 0x4B, 0x03, 0x04, 0x00, 0x00};
+    // TXT: plain text bytes
+    private static final byte[] TXT_BYTES = "Hello World text content".getBytes();
+
+    /**
+     * F19 (W6-D4-extend): Upload DOCX (ZIP magic + .docx extension) → 201 + iconType=WORD.
+     * Tika detect ZIP_MAGIC → application/zip → override via extension → docx MIME.
+     */
+    @Test
+    void upload_docxFile_returns201WithIconTypeWord() throws Exception {
+        String token = registerAndGetToken("f19_docx@test.com", "f19docx");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "document.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ZIP_MAGIC);
+
+        MvcResult result = mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.iconType").value("WORD"))
+                .andReturn();
+
+        var tree = objectMapper.readTree(result.getResponse().getContentAsString());
+        // MIME stored phải là docx MIME (sau override)
+        String mime = tree.get("mime").asText();
+        assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document", mime);
+    }
+
+    /**
+     * F20 (W6-D4-extend): Upload TXT → 201 + iconType=TEXT.
+     */
+    @Test
+    void upload_txtFile_returns201WithIconTypeText() throws Exception {
+        String token = registerAndGetToken("f20_txt@test.com", "f20txt");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "readme.txt", "text/plain", TXT_BYTES);
+
+        mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.iconType").value("TEXT"))
+                .andExpect(jsonPath("$.mime").value("text/plain"));
+    }
+
+    /**
+     * F21 (W6-D4-extend): Upload ZIP → 201 + iconType=ARCHIVE.
+     */
+    @Test
+    void upload_zipFile_returns201WithIconTypeArchive() throws Exception {
+        String token = registerAndGetToken("f21_zip@test.com", "f21zip");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "archive.zip", "application/zip", ZIP_MAGIC);
+
+        mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.iconType").value("ARCHIVE"))
+                .andExpect(jsonPath("$.mime").value("application/zip"));
+    }
+
+    /**
+     * F22 (W6-D4-extend): Upload file .exe → 400 FILE_TYPE_NOT_ALLOWED.
+     * Bytes giả EXE magic: MZ = 0x4D 0x5A.
+     */
+    @Test
+    void upload_exeFile_returns400FileTypeNotAllowed() throws Exception {
+        String token = registerAndGetToken("f22_exe@test.com", "f22exe");
+
+        byte[] exeMagic = {0x4D, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "virus.exe", "application/octet-stream", exeMagic);
+
+        mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.error").value("FILE_TYPE_NOT_ALLOWED"));
+    }
+
+    /**
+     * F23 (W6-D4-extend): Upload JPEG → iconType=IMAGE.
+     */
+    @Test
+    void upload_jpeg_iconTypeIsImage() throws Exception {
+        String token = registerAndGetToken("f23_img@test.com", "f23img");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "photo.jpg", "image/jpeg", JPEG_REAL);
+
+        mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.iconType").value("IMAGE"));
+    }
+
+    /**
+     * F24 (W6-D4-extend): Upload PDF → iconType=PDF.
+     */
+    @Test
+    void upload_pdf_iconTypeIsPdf() throws Exception {
+        String token = registerAndGetToken("f24_pdfico@test.com", "f24pdfico");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "report.pdf", "application/pdf", PDF_MAGIC);
+
+        mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.iconType").value("PDF"));
     }
 }

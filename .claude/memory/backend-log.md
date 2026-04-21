@@ -16,6 +16,8 @@
 
 ---
 
+## [W6-D4-extend] feat: expand file types 5→14 MIME types, iconType field, singleNonImage group validation. 13 tests added (210 total pass).
+
 ## [W6-D3] feat: File cleanup jobs (expiry + orphan) + graceful 404 + @EnableScheduling
 
 **Files changed:**

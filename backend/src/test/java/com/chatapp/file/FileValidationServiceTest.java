@@ -117,10 +117,10 @@ class FileValidationServiceTest {
     // V07
     @Test
     void validate_mimeNotInWhitelist_throwsFileTypeNotAllowedException() {
-        // text/plain KHÔNG trong whitelist
-        byte[] textContent = "This is plain text, not a valid image or PDF.".getBytes();
+        // EXE magic bytes (MZ) — không trong whitelist
+        byte[] exeBytes = new byte[]{0x4D, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         MultipartFile file = new MockMultipartFile(
-                "file", "note.txt", "text/plain", textContent);
+                "file", "virus.exe", "application/octet-stream", exeBytes);
 
         FileTypeNotAllowedException ex = assertThrows(FileTypeNotAllowedException.class,
                 () -> service.validate(file));
@@ -144,11 +144,25 @@ class FileValidationServiceTest {
     // V09
     @Test
     void extensionFromMime_allWhitelistMimes_returnsCorrectExt() {
-        assertEquals("jpg", service.extensionFromMime("image/jpeg"));
-        assertEquals("png", service.extensionFromMime("image/png"));
+        // Group A: Images
+        assertEquals("jpg",  service.extensionFromMime("image/jpeg"));
+        assertEquals("png",  service.extensionFromMime("image/png"));
         assertEquals("webp", service.extensionFromMime("image/webp"));
-        assertEquals("gif", service.extensionFromMime("image/gif"));
-        assertEquals("pdf", service.extensionFromMime("application/pdf"));
+        assertEquals("gif",  service.extensionFromMime("image/gif"));
+        // Group B: Documents & archives
+        assertEquals("pdf",  service.extensionFromMime("application/pdf"));
+        assertEquals("docx", service.extensionFromMime(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+        assertEquals("xlsx", service.extensionFromMime(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+        assertEquals("pptx", service.extensionFromMime(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+        assertEquals("doc",  service.extensionFromMime("application/msword"));
+        assertEquals("xls",  service.extensionFromMime("application/vnd.ms-excel"));
+        assertEquals("ppt",  service.extensionFromMime("application/vnd.ms-powerpoint"));
+        assertEquals("txt",  service.extensionFromMime("text/plain"));
+        assertEquals("zip",  service.extensionFromMime("application/zip"));
+        assertEquals("7z",   service.extensionFromMime("application/x-7z-compressed"));
     }
 
     // V10
@@ -159,6 +173,49 @@ class FileValidationServiceTest {
                 "file", "photo.jpg", "image/jpg", JPEG_MAGIC);
         String mime = service.validate(file);
         assertEquals("image/jpeg", mime);
+    }
+
+    // V11 (W6-D4-extend): text/plain bytes → trả "text/plain" (charset stripped nếu có)
+    @Test
+    void validate_textPlain_returnsTextPlain() {
+        byte[] textContent = "Hello World text content".getBytes();
+        MultipartFile file = new MockMultipartFile(
+                "file", "readme.txt", "text/plain", textContent);
+        String mime = service.validate(file);
+        // charset suffix phải đã stripped
+        assertEquals("text/plain", mime);
+    }
+
+    // V12 (W6-D4-extend): ZIP magic + extension .docx → override thành docx MIME
+    @Test
+    void validate_zipMagicWithDocxExtension_returnsDocxMime() {
+        byte[] zipMagic = {0x50, 0x4B, 0x03, 0x04, 0x00, 0x00};
+        String docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        MultipartFile file = new MockMultipartFile(
+                "file", "document.docx", docxMime, zipMagic);
+        String result = service.validate(file);
+        assertEquals(docxMime, result);
+    }
+
+    // V13 (W6-D4-extend): ZIP magic + extension .xlsx → override thành xlsx MIME
+    @Test
+    void validate_zipMagicWithXlsxExtension_returnsXlsxMime() {
+        byte[] zipMagic = {0x50, 0x4B, 0x03, 0x04, 0x00, 0x00};
+        String xlsxMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        MultipartFile file = new MockMultipartFile(
+                "file", "sheet.xlsx", xlsxMime, zipMagic);
+        String result = service.validate(file);
+        assertEquals(xlsxMime, result);
+    }
+
+    // V14 (W6-D4-extend): ZIP magic + extension .zip (thật sự là zip) → giữ application/zip
+    @Test
+    void validate_zipMagicWithZipExtension_returnsApplicationZip() {
+        byte[] zipMagic = {0x50, 0x4B, 0x03, 0x04, 0x00, 0x00};
+        MultipartFile file = new MockMultipartFile(
+                "file", "archive.zip", "application/zip", zipMagic);
+        String result = service.validate(file);
+        assertEquals("application/zip", result);
     }
 
     // Helper: MockMultipartFile với explicit size, phục vụ test size limit mà không cần alloc 20MB byte[]

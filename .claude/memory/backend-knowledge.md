@@ -395,6 +395,18 @@ V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-in
 
 ---
 
+### File Type Expansion Pattern (W6-D4-extend)
+
+- Whitelist MIME set: dùng `Set.of()` vì Set.of() không giới hạn số args (không phải Map.of()). Nhưng `Map.ofEntries(Map.entry(...))` dùng khi > 10 entries cho MIME_TO_EXT.
+- Charset strip: `tika.detect().split(";")[0].trim()` — text/plain và vài MIME khác có charset suffix.
+- ZIP→Office override: DOCX/XLSX/PPTX là ZIP container → Tika không luôn detect đúng MIME nếu thiếu Office metadata. Dùng extension hint CHỈ KHI Tika trả `application/zip` (không phải mọi lúc).
+- iconType: Server-computed từ MIME, FE đọc để chọn icon. Map trong `FileService.resolveIconType()`. `GENERIC` là fallback.
+- Group validation update: `singlePdf` → `singleNonImage` (`files.size() == 1 && !allImages`). Bao gồm tất cả Group B types.
+- Test V07 fix: text/plain đã vào whitelist → dùng EXE magic (MZ=0x4D5A) cho test "not in whitelist".
+- Test F05 fix: tương tự dùng EXE bytes thay vì text/plain bytes.
+
+---
+
 ## Changelog file này
 
 - 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.

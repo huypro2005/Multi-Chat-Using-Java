@@ -5,6 +5,10 @@
 
 ---
 
+[2026-04-21 W6-D4-extend] feat: expand file types (Office/text/archive), FileCard, group validation update. Accept attribute 14 MIME types + extensions. PdfCard deleted. Build clean (0 TS errors).
+
+---
+
 [W6-D4] fix: useProtectedObjectUrl add AbortController to cancel in-flight requests on unmount. docs: add auth-protected image pattern to knowledge. [2026-04-21]
 
 ---

@@ -202,8 +202,26 @@ public class FileService {
                 record.getSizeBytes(),
                 url,
                 thumbUrl,
+                resolveIconType(record.getMime()),
                 record.getExpiresAt()
         );
+    }
+
+    /**
+     * Tính iconType từ MIME — server-computed, FE dùng để chọn icon phù hợp.
+     * Map: IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC.
+     * W6-D4-extend.
+     */
+    private static String resolveIconType(String mime) {
+        if (mime == null) return "GENERIC";
+        if (mime.startsWith("image/")) return "IMAGE";
+        if ("application/pdf".equals(mime)) return "PDF";
+        if (mime.contains("wordprocessingml") || "application/msword".equals(mime)) return "WORD";
+        if (mime.contains("spreadsheetml") || "application/vnd.ms-excel".equals(mime)) return "EXCEL";
+        if (mime.contains("presentationml") || "application/vnd.ms-powerpoint".equals(mime)) return "POWERPOINT";
+        if ("text/plain".equals(mime)) return "TEXT";
+        if (mime.contains("zip") || mime.contains("7z")) return "ARCHIVE";
+        return "GENERIC";
     }
 
     // =========================================================================

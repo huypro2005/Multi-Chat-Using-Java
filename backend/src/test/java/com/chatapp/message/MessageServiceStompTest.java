@@ -628,4 +628,91 @@ class MessageServiceStompTest {
                 () -> messageService.sendViaStomp(convId, userId, payload));
         assertEquals("MSG_ATTACHMENT_NOT_FOUND", ex.getErrorCode());
     }
+
+    // =========================================================================
+    // W6-D4-extend: Group validation tests cho non-image types
+    // =========================================================================
+
+    // W6-T12: 2 DOCX attachments → MSG_ATTACHMENTS_MIXED (only 1 non-image allowed)
+    @Test
+    void sendViaStomp_with2DocxFiles_rejectedMixed() {
+        String tempId = UUID.randomUUID().toString();
+        UUID id1 = UUID.randomUUID(), id2 = UUID.randomUUID();
+        String docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        FileRecord docx1 = mockFileWithMime(id1, docxMime, userId);
+        FileRecord docx2 = mockFileWithMime(id2, docxMime, userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(id1, id2))).thenReturn(List.of(docx1, docx2));
+        when(fileRecordRepository.findById(id1)).thenReturn(Optional.of(docx1));
+        when(messageAttachmentRepository.existsByIdFileId(any())).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, "two docs", "TEXT",
+                null, List.of(id1, id2));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENTS_MIXED", ex.getErrorCode());
+    }
+
+    // W6-T13: 1 DOCX → OK (singleNonImage rule)
+    @Test
+    void sendViaStomp_with1Docx_ok() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        String docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        FileRecord docx = mockFileWithMime(fileId, docxMime, userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(docx));
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(docx));
+        when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, "see doc", "TEXT",
+                null, List.of(fileId));
+
+        assertDoesNotThrow(() -> messageService.sendViaStomp(convId, userId, payload));
+        verify(messageAttachmentRepository).save(any(MessageAttachment.class));
+    }
+
+    // W6-T14: 1 image + 1 DOCX → MSG_ATTACHMENTS_MIXED (mixing not allowed)
+    @Test
+    void sendViaStomp_imageAndDocx_rejectedMixed() {
+        String tempId = UUID.randomUUID().toString();
+        UUID imgId = UUID.randomUUID(), docxId = UUID.randomUUID();
+        String docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        FileRecord img = mockFile(imgId, "image/jpeg", userId);
+        FileRecord docx = mockFileWithMime(docxId, docxMime, userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(imgId, docxId))).thenReturn(List.of(img, docx));
+        when(fileRecordRepository.findById(imgId)).thenReturn(Optional.of(img));
+        when(messageAttachmentRepository.existsByIdFileId(any())).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT",
+                null, List.of(imgId, docxId));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENTS_MIXED", ex.getErrorCode());
+    }
+
+    // Helper: tạo FileRecord với MIME bất kỳ (dùng cho non-image types)
+    private FileRecord mockFileWithMime(UUID id, String mime, UUID uploaderId) {
+        String ext = mime.contains("wordprocessingml") ? "docx"
+                   : mime.contains("spreadsheetml") ? "xlsx"
+                   : mime.contains("presentationml") ? "pptx"
+                   : mime.contains("zip") ? "zip" : "bin";
+        return FileRecord.builder()
+                .id(id)
+                .uploaderId(uploaderId)
+                .originalName("file." + ext)
+                .mime(mime)
+                .sizeBytes(2048L)
+                .storagePath("2026/04/" + id + "." + ext)
+                .createdAt(OffsetDateTime.now(ZoneOffset.UTC))
+                .expiresAt(OffsetDateTime.now(ZoneOffset.UTC).plusDays(30))
+                .expired(false)
+                .build();
+    }
 }

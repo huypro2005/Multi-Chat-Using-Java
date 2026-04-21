@@ -36,6 +36,7 @@ export interface AttachmentDto {
   size: number
   url: string
   thumbUrl: string | null
+  iconType: 'IMAGE' | 'PDF' | 'WORD' | 'EXCEL' | 'POWERPOINT' | 'TEXT' | 'ARCHIVE' | 'GENERIC'
   expiresAt: string // ISO8601
 }
 
