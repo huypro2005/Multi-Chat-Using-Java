@@ -920,7 +920,8 @@ Field notes:
 | 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
 | 404 | `NOT_FOUND` | File không tồn tại **HOẶC** caller không có quyền (không uploader + không member của conv chứa message attach file này) **HOẶC** file đã expire (`expires_at < now()`). Merge tất cả để chống enumeration. |
-| 500 | `INTERNAL_ERROR` | I/O error khi đọc file từ disk. |
+| 404 | `FILE_PHYSICALLY_DELETED` | File record còn trong DB (vì có message attachment FK) nhưng physical file đã bị cleanup job xóa khỏi disk. Xảy ra khi `expired=true` + `stillAttached=true`. FE nên xử lý gracefully (show placeholder). |
+| 500 | `INTERNAL_ERROR` | I/O error không mong đợi (disk full, permission denied, v.v.). Phân biệt với `FILE_PHYSICALLY_DELETED` ở trên. |
 
 **Notes — V1 anti-enumeration**:
 - **404 cho cả expired và not-found**: không trả `410 GONE` (sẽ tiết lộ "file từng tồn tại"). Consumer chỉ biết "tôi không có quyền xem file này hoặc nó không tồn tại" — không phân biệt được.

@@ -31,6 +31,11 @@ app:
     allowed-origins: http://localhost:3000,http://localhost:5173
   websocket:
     allowed-origins: http://localhost:3000,http://localhost:5173
+  # W6-D3: Cron set "-" = disabled trigger. Bean vẫn load (enabled=true) để test gọi method trực tiếp.
+  file-cleanup:
+    enabled: true
+    expired-cron: "-"
+    orphan-cron: "-"
 
 # W6-D1 — test-only storage path (relative, cleanup tự nhiên khi test suite kết thúc).
 storage:

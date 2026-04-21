@@ -16,6 +16,26 @@
 
 ---
 
+## [W6-D3] feat: File cleanup jobs (expiry + orphan) + graceful 404 + @EnableScheduling
+
+**Files changed:**
+- `com.chatapp.ChatAppApplication` — thêm `@EnableScheduling`.
+- `com.chatapp.file.repository.FileRecordRepository` — thêm 2 methods: `findByExpiresAtBeforeAndExpiredFalse(OffsetDateTime, Pageable)` + `findByAttachedAtIsNullAndCreatedAtBefore(OffsetDateTime, Pageable)`.
+- `com.chatapp.file.scheduler.FileCleanupJob` (new) — 2 jobs: `cleanupExpiredFiles` (3 AM daily) + `cleanupOrphanFiles` (hourly). `@ConditionalOnProperty(enabled=true, matchIfMissing=true)`.
+- `com.chatapp.file.controller.FileController` — wrap `openStream()` / `openThumbnailStream()` với try-catch `StorageException` → 404 `FILE_PHYSICALLY_DELETED`.
+- `backend/src/main/resources/application.yml` — thêm section `app.file-cleanup: {enabled, expired-cron, orphan-cron}`.
+- `backend/src/test/resources/application-test.yml` — thêm `app.file-cleanup: {enabled: true, expired-cron: "-", orphan-cron: "-"}` để disable trigger trong test.
+- `com.chatapp.file.scheduler.FileCleanupJobTest` (new) — 6 tests: CJ01–CJ06.
+
+**Key decisions:**
+- Cron "-" (disabled value) trong test profile cho phép bean load nhưng không auto-trigger.
+- H2 timestamp test dùng `minusDays(2)` thay vì `minusHours(2)` để tránh H2 sub-hour precision issue.
+- FileController catch `StorageException` (không `IOException`) vì FileService đã wrap IOException.
+
+**Test:** 197 tests pass (191 cũ + 6 mới).
+
+---
+
 ## [W6-D2] feat: Thumbnail + FileAuthService + STOMP attachments
 
 **Files changed:**

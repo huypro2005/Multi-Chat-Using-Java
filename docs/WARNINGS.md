@@ -111,6 +111,7 @@ Outside scope V1, ghi nhận để future consideration.
 - **Destination ACL built-in broker** — V1 custom `AuthChannelInterceptor` SUBSCRIBE. V2 nếu migrate RabbitMQ → dùng broker ACL.
 - **Revoke all sessions qua SET members** thay `KEYS refresh:{userId}:*` (O(N) scan). V2 SADD `user_sessions:{userId}` jti.
 - **Circuit breaker cho Redis blacklist fail-open** — V1 ADR-011 accept trade-off, V2 nếu có tool monitoring.
+- **`@Scheduled` multi-instance race — FileCleanupJob** — V1 single BE instance OK. V2 multi-instance + RabbitMQ: 2 instance cùng chạy `@Scheduled` → có thể cùng DELETE FileRecord → `StaleObjectStateException`. Fix: Redis SETNX distributed lock (`SETNX lock:file-cleanup:expired instanceId EX 1800`). Pattern đầy đủ xem `backend-knowledge.md` mục "FileCleanupJob V2".
 
 ---
 

@@ -3,6 +3,7 @@ package com.chatapp.file.controller;
 import com.chatapp.exception.AppException;
 import com.chatapp.file.dto.FileDto;
 import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.exception.StorageException;
 import com.chatapp.file.service.FileAuthService;
 import com.chatapp.file.service.FileService;
 import com.chatapp.user.entity.User;
@@ -81,7 +82,14 @@ public class FileController {
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND",
                         "Không tìm thấy file"));
 
-        InputStream stream = fileService.openStream(record);
+        InputStream stream;
+        try {
+            stream = fileService.openStream(record);
+        } catch (StorageException e) {
+            log.warn("[FileController] Physical file missing for record {} — storage error: {}", id, e.getMessage());
+            throw new AppException(HttpStatus.NOT_FOUND, "FILE_PHYSICALLY_DELETED",
+                    "File đã bị xóa khỏi hệ thống");
+        }
         InputStreamResource resource = new InputStreamResource(stream);
 
         // Content-Disposition: inline cho browser render (image/PDF). Sanitize tránh header injection.
@@ -122,7 +130,14 @@ public class FileController {
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND",
                         "Không tìm thấy thumbnail"));
 
-        InputStream stream = fileService.openThumbnailStream(record);
+        InputStream stream;
+        try {
+            stream = fileService.openThumbnailStream(record);
+        } catch (StorageException e) {
+            log.warn("[FileController] Physical thumbnail missing for record {} — storage error: {}", id, e.getMessage());
+            throw new AppException(HttpStatus.NOT_FOUND, "FILE_PHYSICALLY_DELETED",
+                    "Thumbnail đã bị xóa khỏi hệ thống");
+        }
         InputStreamResource resource = new InputStreamResource(stream);
 
         return ResponseEntity.ok()

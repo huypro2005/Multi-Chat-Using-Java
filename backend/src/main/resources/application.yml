@@ -65,6 +65,12 @@ app:
   websocket:
     # Origin patterns cho STOMP/SockJS handshake. KHÔNG để "*" ở production.
     allowed-origins: ${WS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+  file-cleanup:
+    enabled: ${FILE_CLEANUP_ENABLED:true}
+    # Expired cleanup: chạy 3:00 AM mỗi ngày (UTC).
+    expired-cron: ${FILE_CLEANUP_EXPIRED_CRON:0 0 3 * * *}
+    # Orphan cleanup: chạy đầu mỗi giờ.
+    orphan-cron: ${FILE_CLEANUP_ORPHAN_CRON:0 0 * * * *}
 
 # W6-D1 — File storage config. V1 dùng local disk; V2 migrate S3 (ADR-019).
 storage:

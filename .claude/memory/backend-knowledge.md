@@ -368,6 +368,33 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### @Scheduled Cleanup Job Pattern (W6-D3)
+
+- `@ConditionalOnProperty(name="app.file-cleanup.enabled", havingValue="true", matchIfMissing=true)` — cho phép disable bean hoàn toàn qua property. Test profile dùng `enabled=true` + cron="-" (Spring disabled value) để bean load nhưng trigger không chạy.
+- `expired-cron: "-"` và `orphan-cron: "-"` trong application-test.yml: cron "-" là giá trị Spring dùng để disable trigger — cron expression không hợp lệ → scheduler bỏ qua, bean vẫn tồn tại.
+- Test pattern: `@SpringBootTest` + `@MockBean StorageService` để inject mock vào `FileCleanupJob`. Gọi `fileCleanupJob.cleanupExpiredFiles()` / `cleanupOrphanFiles()` trực tiếp trong test method (không chờ cron).
+- Batch pagination: `findBy...(..., PageRequest.of(0, batchSize))` luôn query page 0. Đúng vì sau mỗi batch, records đã delete/update → page 0 tiếp theo chứa records mới (không bỏ sót).
+- Per-record try-catch: 1 file fail IOException không làm cả job fail. Log error + continue. Đối với expired job, sau exception vẫn set `expired=true` để không bị query lại.
+- stillAttached handling: physical delete trước → set `expired=true` + save DB → GET /files/{id} → `openStream()` → `StorageException` → controller catch → 404 graceful.
+- `OffsetDateTime.now(ZoneOffset.UTC)` cho threshold — consistent với entity `@PrePersist` pattern.
+- Orphan query: `findByAttachedAtIsNullAndCreatedAtBefore` — method naming đủ, không cần `@Query` vì `attachedAt` đã encode trạng thái.
+- H2 timestamp test pitfall: dùng `minusDays(2)` thay vì `minusHours(2)` cho threshold diff trong test để tránh H2 sub-hour precision issue với TIMESTAMPTZ comparison. (Consistent với W4-D1 pattern "vd: plusDays(i)").
+- JdbcTemplate timestamp override: `java.sql.Timestamp.from(offsetDateTime.toInstant())` + `CAST(? AS UUID)` cho WHERE clause — H2 cần explicit CAST cho UUID comparison trong native SQL.
+- FileController graceful missing: catch `StorageException` (không `IOException` — FileService wrap IOException thành StorageException) → throw `AppException(404, "FILE_PHYSICALLY_DELETED", ...)`. Áp dụng cho cả `download` lẫn `downloadThumb` endpoint.
+
+### FileCleanupJob V2 — Multi-instance coordination (document)
+
+V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-instance:
+- 2 instance cùng chạy @Scheduled cùng lúc → risk: 2 instance cùng delete FileRecord → StaleObjectStateException.
+- V2 fix: Redis SETNX distributed lock:
+  ```java
+  Boolean acquired = redis.setIfAbsent("lock:file-cleanup:expired", instanceId, Duration.ofMinutes(30));
+  if (Boolean.TRUE.equals(acquired)) { try { /* logic */ } finally { redis.delete(lockKey); } }
+  ```
+- Track trong WARNINGS.md V2 bucket.
+
+---
+
 ## Changelog file này
 
 - 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.

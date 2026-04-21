@@ -17,6 +17,52 @@ Contract: ...
 
 ---
 
+## [W6-D3] File Cleanup Jobs (@Scheduled expired + orphan) — APPROVE
+
+Blocking: 0. Tests 197/197 BE pass (191 cũ + 6 mới CJ01-06).
+
+Key findings:
+- `@EnableScheduling` thêm vào `ChatAppApplication.java` (BLOCKING #1 pass).
+- Cron format Spring 6 6-fields (`second minute hour day month weekday`) đúng:
+  - `0 0 3 * * *` → 3:00:00 AM UTC mỗi ngày (expired)
+  - `0 0 * * * *` → đầu mỗi giờ (orphan)
+  - Externalize qua `${FILE_CLEANUP_EXPIRED_CRON}` / `${FILE_CLEANUP_ORPHAN_CRON}` — ops có thể tune.
+- `@ConditionalOnProperty(name="app.file-cleanup.enabled", havingValue="true", matchIfMissing=true)` trên class — toàn bộ bean disable được qua flag duy nhất.
+- Test profile dùng `enabled=true` + `cron="-"` (Spring disabled trigger value): bean vẫn load để test inject + gọi method trực tiếp, nhưng scheduler KHÔNG fire trong test → no race với assertion.
+- Batch pagination: `findBy...(threshold, PageRequest.of(0, 100))` luôn page 0. Đúng vì sau mỗi batch records bị delete/update khỏi predicate (`expired=false → true` hoặc DELETE), page 0 tiếp theo chứa records mới — không bỏ sót, không OOM.
+- Loop terminate khi `batch.isEmpty()` HOẶC `batch.getNumberOfElements() < BATCH_SIZE` — tránh extra query thừa khi đã hết records.
+- Per-record try-catch trong loop: 1 file IOException không kill cả job, log error + continue. Sau exception expired-job vẫn `setExpired(true)` defensive để không bị query lại vô hạn (nested try-catch nếu cả save fail thì log đôi).
+- `stillAttached` handling đúng spec: physical delete TRƯỚC → check `existsByIdFileId` → nếu attached → `setExpired(true) + save` (DB record giữ, log WARN); nếu không → `delete()` DB row.
+- `FileController.download` + `FileController.downloadThumb` cả 2 catch `StorageException` (FileService wrap IOException → StorageException) → `AppException(404, "FILE_PHYSICALLY_DELETED", ...)` thay vì 500. Dovetail với stillAttached: GET /files/{id} của file expired-but-attached → 404 graceful.
+- Repository methods Spring Data naming convention chuẩn: `findByExpiresAtBeforeAndExpiredFalse(threshold, Pageable)` + `findByAttachedAtIsNullAndCreatedAtBefore(threshold, Pageable)`. Cả 2 trả `Page<FileRecord>` đúng signature cho `PageRequest.of`.
+- `LocalStorageService.delete()` dùng `Files.deleteIfExists()` — idempotent: file đã bị xóa (race với 2nd run) không throw, swallow gracefully.
+- `deletePhysical` xóa cả `storagePath` + `thumbnailInternalPath` (nếu có) — không leak orphan thumbnail trên disk khi original bị xóa.
+
+Test coverage (CJ01-06 — full Spring context để inject real repos + JdbcTemplate):
+- CJ01 expired no-attachment → DB delete + storage.delete called
+- CJ02 not-yet-expired → untouched (storage.delete never)
+- CJ03 expired but still attached → physical delete + DB kept với expired=true
+- CJ04 orphan >1h → DB delete
+- CJ05 orphan <1h (5min) → untouched (grace period)
+- CJ06 attached file (createdAt 2 days old) → orphan-job không touch (attachedAt non-null)
+- JdbcTemplate override timestamp pattern (vì `@PrePersist` set createdAt=now) — CAST(? AS UUID) cho H2 + java.sql.Timestamp.from(Instant) cho TIMESTAMPTZ.
+- @MockBean StorageService + StringRedisTemplate (do FileService inject Redis cần mock để context load).
+
+Minor (non-blocking, đã document):
+- `MessageAttachmentRepository.existsByIdFileId(UUID)` đã exists trước W6-D3 (W6-D2 wiring) — reuse OK, không tạo method mới redundant.
+- Multi-instance race risk khi scale V2 (2 BE instance cùng chạy `@Scheduled` → potential double-delete + StaleObjectStateException) — đã document trong `backend-knowledge.md` mục "FileCleanupJob V2" với Redis SETNX pattern. NOTE: chưa thêm vào `WARNINGS.md` V2 Enhancement bucket — recommend orchestrator gọi BE add 1 dòng.
+
+Patterns confirmed (added to knowledge):
+- `@Scheduled` cleanup job pattern (cron format 6-field, ConditionalOnProperty disable, batch page-0 loop, per-record try-catch).
+- stillAttached graceful flow (physical delete → DB mark expired → GET 404 graceful via StorageException → AppException).
+- Test profile `cron="-"` để disable trigger (giữ bean load).
+
+Contract: không thay đổi REST/SOCKET contract. Cleanup job là internal background — không expose public.
+
+Verdict: APPROVE. Cleanup pipeline kiến trúc gọn, idempotent, defensive, test coverage đủ 6 case quan trọng. Pre-launch: thêm V2 multi-instance lock note vào WARNINGS.md.
+
+---
+
 ## [W6-D2] Thumbnail + File Auth + Wire Attachments — APPROVE WITH COMMENTS
 
 Blocking: 0. Tests 191/191 BE pass (172 cũ + 19 mới).
