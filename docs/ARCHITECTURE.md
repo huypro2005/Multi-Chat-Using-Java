@@ -2336,3 +2336,48 @@ src/main/java/com/yourapp/chat/
   - **File URL pre-signed với HMAC token** (thay cho auth check): rejected — URL leak sẽ bypass auth. V2 S3 pre-signed URL OK vì S3 tự sign + TTL ngắn.
   - **Keep file sau message delete**: decision là RESTRICT FK — file không bị xoá khi soft-delete message (vì message row vẫn còn). Hard-delete message (V2 audit cleanup) sẽ CASCADE xoá `message_attachments`, files vẫn giữ đến expiry (user có thể có message khác không — nhưng UNIQUE(file_id) đảm bảo không). Có thể thêm cleanup job xoá files không còn attachment link.
 - **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-019 (reviewer sẽ add sau W6 review).
+
+### ADR-020: Group Chat Architecture (W7)
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-21 (Tuần 7, W7-D1)
+- **Context**: W3 spec (ARCHITECTURE.md §3.2) yêu cầu group chat + role management (OWNER/ADMIN/MEMBER) nhưng W3 chỉ implement ONE_ON_ONE + skeleton `conversation_members`. W7 backfill toàn bộ group management: schema, endpoints, events, authorization matrix.
+- **Decision**:
+  - **3 roles**: `OWNER` / `ADMIN` / `MEMBER` (enum `member_role` — lowercase Postgres enum, UPPERCASE Java enum `MemberRole` — theo ADR-012 convention).
+  - **Group size**: minimum 3 members (creator + 2 others), maximum 50. Rationale: <3 là de facto ONE_ON_ONE; >50 cần design khác (paginated member list, channel-style, không trong scope V1).
+  - **Auto-transfer khi OWNER leave**:
+    - Priority 1: ADMIN oldest `joined_at` → promote OWNER.
+    - Priority 2 (nếu không còn ADMIN): MEMBER oldest `joined_at` → promote OWNER.
+    - Priority 3 (nếu OWNER là thành viên cuối cùng): set `owner_id = NULL` + preserve empty group (V1 không auto-delete empty group — xem WARNINGS W7-2).
+  - **Authorization matrix** (V1 simplified — không custom per-user permission):
+    - OWNER-only: change member role (ADMIN↔MEMBER), delete group, transfer ownership, remove ADMIN.
+    - OWNER + ADMIN: add members, remove MEMBER, rename group, change avatar.
+    - Any member: leave group, view members, send/edit/delete own messages.
+  - **Schema V7 migration** (`V7__add_group_chat.sql`):
+    - `CREATE TYPE member_role AS ENUM ('OWNER', 'ADMIN', 'MEMBER')`.
+    - `ALTER TABLE conversation_members ADD role member_role NOT NULL DEFAULT 'MEMBER', ADD joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+    - `ALTER TABLE conversations ADD name VARCHAR(100), ADD avatar_file_id UUID REFERENCES files(id) ON DELETE SET NULL, ADD owner_id UUID REFERENCES users(id) ON DELETE SET NULL`.
+    - CHECK constraint `chk_group_metadata`: `(type='ONE_ON_ONE' AND name IS NULL AND owner_id IS NULL) OR (type='GROUP' AND name IS NOT NULL AND owner_id IS NOT NULL)` — enforce shape invariant ở DB level.
+    - Indexes: `idx_conversation_members_conv_role`, `idx_conversation_members_conv_joined`, `idx_conversations_owner` (partial WHERE owner_id IS NOT NULL).
+  - **Endpoints mới (7 REST)**: PATCH /{id}, DELETE /{id}, POST /{id}/members, DELETE /{id}/members/{uid}, POST /{id}/leave, PATCH /{id}/members/{uid}/role, POST /{id}/transfer-owner. Xem API_CONTRACT.md v1.0.0-w7.
+  - **STOMP events mới (6)**: CONVERSATION_UPDATED, MEMBER_ADDED, MEMBER_REMOVED (reason KICKED|LEFT), ROLE_CHANGED, OWNER_TRANSFERRED, GROUP_DELETED. Xem SOCKET_EVENTS.md v1.5-w7.
+- **Consequences**:
+  - `member_role` enum là **permanent schema** — add value sau này (ví dụ `MODERATOR`) cần `ALTER TYPE ADD VALUE` — Postgres support nhưng phải cẩn thận (khó rollback).
+  - `avatar_file_id` reuse `files` table (ADR-019) — chỉ IMAGE MIME allowed (Group A jpeg/png/webp/gif). Avatar KHÔNG đi qua `message_attachments` — đi trực tiếp qua `conversations.avatar_file_id` column. Lý do: avatar là conversation metadata, không phải message content; avoid UNIQUE(file_id) constraint của `message_attachments`.
+  - `owner_id ON DELETE SET NULL`: khi user OWNER bị xoá account, group vẫn tồn tại (owner_id = NULL). V1 không auto-promote ADMIN thành OWNER khi user deleted — chỉ xảy ra khi OWNER leave (qua endpoint). V2 cân nhắc event-driven promotion.
+  - Empty group (last member leaves) preserved trong V1 — monitoring alert sau 7 ngày (WARNINGS W7-2). V2 auto-delete với grace period hoặc UI-triggered cleanup.
+  - FE types: `ConversationDto` thêm `owner: {userId, username, fullName} | null`, `members[].role`, `members[].joinedAt`. Breaking nhẹ — FE phase sau W7-D1 phải deploy đồng bộ BE.
+  - CHECK constraint enforcement catch FE bugs sớm — insert GROUP thiếu name → DB reject 500 → reviewer catch ở integration test.
+- **Alternatives considered**:
+  - **Custom permission model** (per-user bitmask thay enum role): rejected — overkill cho V1 <1000 users. V2 revisit nếu enterprise customer yêu cầu.
+  - **Group invitation links** (Telegram-style `t.me/joinchat/...`): rejected V1 — add friction, cần share URL + token validation + rate-limit invite attempts. V2 enhancement.
+  - **Join request + approval flow**: rejected V1 — OWNER/ADMIN direct-add đủ cho use case. V2 enhancement.
+  - **Multiple OWNER**: rejected — single OWNER đơn giản hoá auto-transfer + permission check. Nếu cần co-management → dùng ADMIN role.
+  - **Soft-leave `left_at` column** (thay hard-delete conversation_members): rejected V1 — extra complexity cho query filter (`WHERE left_at IS NULL` mọi nơi). V2 xem xét nếu cần "group history với user đã rời".
+  - **Embedded permission methods trong enum Java** vs utility class: chọn embedded — `MemberRole.canAddMembers()` inline với enum, tránh scatter if-else ở service layer. Pattern trong API_CONTRACT.md Appendix.
+- **Migration path V2**:
+  - Custom permissions granular (bitmask: CAN_INVITE, CAN_KICK, CAN_PIN, CAN_MENTION_ALL, ...) replacing hard-coded role methods.
+  - Group invitation links.
+  - Join requests + approval.
+  - Multi-OWNER / delegated admins với audit log.
+- **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-020.

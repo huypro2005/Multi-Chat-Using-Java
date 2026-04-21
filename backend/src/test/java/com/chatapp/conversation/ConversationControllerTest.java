@@ -314,6 +314,7 @@ class ConversationControllerTest {
         String userBId = registerAndGetUserId("t06b@test.com", "t06_userB");
         String userCId = registerAndGetUserId("t06c@test.com", "t06_userC");
 
+        // W7 v1.0.0-w7: GROUP missing name → GROUP_NAME_REQUIRED (was VALIDATION_FAILED in v0.5)
         mockMvc.perform(post("/api/conversations")
                         .header("Authorization", "Bearer " + tokenA)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -325,7 +326,7 @@ class ConversationControllerTest {
                                 }
                                 """.formatted(userBId, userCId)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+                .andExpect(jsonPath("$.error").value("GROUP_NAME_REQUIRED"));
     }
 
     // =========================================================================
@@ -337,6 +338,7 @@ class ConversationControllerTest {
         String tokenA = register("t07a@test.com", "t07_userA");
         String userBId = registerAndGetUserId("t07b@test.com", "t07_userB");
 
+        // W7 v1.0.0-w7: GROUP <2 members → GROUP_MEMBERS_MIN (was VALIDATION_FAILED in v0.5)
         mockMvc.perform(post("/api/conversations")
                         .header("Authorization", "Bearer " + tokenA)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -348,7 +350,7 @@ class ConversationControllerTest {
                                 }
                                 """.formatted(userBId)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+                .andExpect(jsonPath("$.error").value("GROUP_MEMBERS_MIN"));
     }
 
     // =========================================================================
@@ -420,6 +422,7 @@ class ConversationControllerTest {
         String userBId = registerAndGetUserId("t07d_b@test.com", "t07d_userB");
 
         // Send userB twice — after dedup only 1 unique member, invalid
+        // W7 v1.0.0-w7: GROUP <2 unique → GROUP_MEMBERS_MIN (was VALIDATION_FAILED in v0.5)
         mockMvc.perform(post("/api/conversations")
                         .header("Authorization", "Bearer " + tokenA)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -431,7 +434,7 @@ class ConversationControllerTest {
                                 }
                                 """.formatted(userBId, userBId)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+                .andExpect(jsonPath("$.error").value("GROUP_MEMBERS_MIN"));
     }
 
     // =========================================================================

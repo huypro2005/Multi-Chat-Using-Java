@@ -407,8 +407,66 @@ V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-in
 
 ---
 
+### Group Chat Schema + CRUD Pattern (W7-D1, ADR-020)
+
+**Enum with permission methods** (anti-pattern scatter if-else):
+- `MemberRole` embed 6 permission methods: `canRename()`, `canAddMembers()`, `canRemoveMember(targetRole)`, `canChangeRole()`, `canDeleteGroup()`, `canTransferOwnership()`. Service gọi `member.getRole().canRename()` thay vì `if (member.getRole() == OWNER || ...)`. Khi spec thay đổi (vd MODERATOR), chỉ sửa enum.
+- `canRemoveMember(target)` — logic 2-tham số: OWNER kick bất kỳ trừ OWNER; ADMIN kick MEMBER; MEMBER không kick được ai.
+
+**CHECK constraint cho type-specific columns**:
+- Pattern: `CHECK ((type='A' AND col1 IS NULL AND col2 IS NULL) OR (type='B' AND col1 IS NOT NULL))` — enforce shape invariant ở DB level. ONE_ON_ONE không có name/owner; GROUP bắt buộc name (owner có thể NULL sau ON DELETE SET NULL).
+- H2 test profile `ddl-auto: create-drop` → Hibernate KHÔNG tạo CHECK constraint từ migration SQL. Validation chỉ ở Java layer trong test (assertion entity non-null, không assertion DB violation).
+
+**Soft-delete filter pattern `deleted_at IS NULL`**:
+- Repository thêm method `findActiveById(UUID)` + `findActiveByIdWithMembers(UUID)` filter `c.deletedAt IS NULL`. Caller dùng method active cho PATCH/DELETE/GET flows.
+- Native queries list/count thêm `WHERE c.deleted_at IS NULL` — tránh hiển thị group đã xoá trong sidebar.
+- Partial index `WHERE deleted_at IS NOT NULL` — chỉ index rows ít (audit query) thay vì full index.
+
+**ON DELETE SET NULL cho owner_id**:
+- `conversations.owner_id UUID REFERENCES users(id) ON DELETE SET NULL` — khi user bị xoá account, group vẫn tồn tại. V1 không auto-promote ADMIN; owner_id = NULL, response trả `owner: null` (FE fallback UI).
+- Khác với `ON DELETE CASCADE` cho message_attachments.message_id → attachment đi theo message. Logic: group sống sót, message metadata không.
+
+**Tristate DTO cho PATCH (absent / null / value)**:
+- Jackson record deserialize KHÔNG phân biệt "field absent" vs "field = null" — cả hai đều set null. Dùng `@JsonAnySetter` + Map để giữ key-presence:
+  ```java
+  private final Map<String, Object> rawFields = new HashMap<>();
+  @JsonAnySetter public void set(String k, Object v) { rawFields.put(k, v); }
+  public boolean hasAvatarFileId() { return rawFields.containsKey("avatarFileId"); }
+  public boolean isRemoveAvatar() { return hasAvatarFileId() && rawFields.get("avatarFileId") == null; }
+  ```
+- Contract semantics: `undefined → no change`, `null → remove`, `uuid → set`.
+
+**LinkedHashMap cho broadcast payload với null values**:
+- `Map.of()` throws NPE với null value. Broadcast `CONVERSATION_UPDATED` có `changes: {avatarUrl: null}` (remove) → phải dùng `LinkedHashMap` + `put()`. Apply cho mọi envelope cần null-tolerant.
+
+**Avatar attach flow**:
+- Validate avatar: (1) exists (merge anti-enum với not-owned), (2) uploader=caller, (3) MIME ∈ {jpeg,png,webp,gif}, (4) chưa expired. Dùng helper `validateGroupAvatar(fileId, callerId)` chung cho create + update.
+- Sau validate pass → `fileRecord.markAttached()` + save → orphan cleanup job (1h) skip. Avatar đi qua `conversations.avatar_file_id`, KHÔNG qua `message_attachments` (tránh UNIQUE constraint conflict; avatar là metadata, không phải content).
+
+**Broadcast via Event Publisher (reuse pattern W4-D4)**:
+- `ApplicationEventPublisher.publishEvent(new ConversationUpdatedEvent(...))` trong @Transactional method.
+- Broadcaster `@TransactionalEventListener(phase=AFTER_COMMIT)` + try-catch toàn bộ (broadcast fail không propagate, REST đã trả response).
+- Events: `ConversationUpdatedEvent{convId, changes Map, actorId, actorFullName, occurredAt}`, `GroupDeletedEvent{convId, actorId, actorFullName, deletedAt}`.
+
+**Naming drift V7 vs V9**:
+- V7 đã dùng cho files (W6-D1). Docs ADR-020 viết `V7__add_group_chat.sql` nhưng thực tế dùng V9 vì V7/V8 đã occupied. Flyway filename là SOURCE OF TRUTH (DB history immutable), docs chấp nhận drift — ghi chú trong migration comment.
+
+**Member sort rule**:
+- GET /{id} trả members sort: `role ASC (ordinal)` → OWNER (0) đầu, ADMIN (1), MEMBER (2). Secondary: `joinedAt ASC` (cũ nhất trước). FE render không cần sort lại.
+- Java: `Comparator.comparing(m -> m.getRole().ordinal()).thenComparing(m -> m.getJoinedAt().toInstant())`.
+
+**Backward-compat cho DIRECT shape**:
+- W7: `POST /conversations` ONE_ON_ONE dùng `targetUserId` (singular). Legacy W3 dùng `memberIds: [uuid]`. Service accept cả hai: `UUID targetUserId = req.targetUserId() != null ? req.targetUserId() : (memberIds != null && size==1 ? memberIds.get(0) : null)`.
+
+**Schema column verification trong test**:
+- Dùng `DataSource.getConnection().getMetaData().getColumns(null, null, TABLE, COLUMN)` để verify cột tồn tại (case-insensitive check vì H2 uppercase unquoted identifiers; thử cả UPPER và lower).
+- Không dùng để test CHECK constraint (H2 create-drop không apply migration SQL).
+
+---
+
 ## Changelog file này
 
+- 2026-04-21 W7D1: Thêm Group Chat Schema + CRUD Pattern (ADR-020) — MemberRole permission methods, CHECK constraint shape, soft-delete filter, ON DELETE SET NULL cho owner_id, Tristate DTO qua @JsonAnySetter Map, LinkedHashMap cho broadcast null-tolerant, avatar attach flow (markAttached), Event Publisher broadcast, naming drift V7→V9, member sort role+joinedAt, targetUserId backward-compat, DataSource metadata cho column verification test.
 - 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.
 - 2026-04-21 W6D1: Thêm File Upload Foundation pattern (Tika MIME detect, LocalStorageService path traversal defense, MIME→ext cố định, 6 exception class, anti-enumeration 404 cho download, MultipartFile test pattern). Migration V7 dùng UUID FK (không BIGINT như task spec).
 - 2026-04-20 W5D4: Thêm Forward Pagination Pattern (after param), ReplyPreviewDto deletedAt field, STOMP reply validation pattern.

@@ -16,6 +16,59 @@
 
 ---
 
+## [W7-D1] feat: Schema V9 + Group Chat CRUD (ADR-020) — 21 new tests, 231 total pass
+
+**Migration**: Đặt tên V9 thay V7 — V7 đã dùng cho files table (W6-D1). Docs ADR-020 viết V7 là naming drift; không rename để giữ flyway history thuần tuý (Flyway V1-V8 đã applied).
+
+**Schema changes (`V9__add_group_chat.sql`)**:
+- ALTER `conversations` ADD `owner_id UUID REFERENCES users(id) ON DELETE SET NULL`, `avatar_file_id UUID REFERENCES files(id) ON DELETE SET NULL`, `deleted_at TIMESTAMPTZ`.
+- KHÔNG tạo ENUM `member_role` — giữ VARCHAR(20) + CHECK (đã có từ V3) để tương thích H2 test.
+- KHÔNG thêm `role`/`joined_at` vào `conversation_members` — V3 đã tạo.
+- CHECK constraint `chk_group_metadata`: ONE_ON_ONE phải có `name`+`owner_id` NULL; GROUP phải có `name` non-null. owner_id có thể NULL cho GROUP (edge case OWNER bị xoá account → ON DELETE SET NULL).
+- Partial indexes: `idx_conversations_owner` (WHERE owner_id NOT NULL), `idx_conversations_deleted` (WHERE deleted_at NOT NULL); (conv_id, role), (conv_id, joined_at) cho `conversation_members`.
+
+**Files changed**:
+- `conversation/enums/MemberRole.java` — thêm 6 permission methods (canRename/canAddMembers/canRemoveMember/canChangeRole/canDeleteGroup/canTransferOwnership) theo API_CONTRACT Appendix — tránh scatter if-else.
+- `conversation/entity/Conversation.java` — thêm `ownerId`, `avatarFileId`, `deletedAt` + domain methods `markDeleted()`, `isDeleted()`. Giữ legacy `avatarUrl` TEXT column (V3) nhưng ưu tiên `avatarFileId` làm source of truth ở W7+.
+- `conversation/dto/CreateConversationRequest.java` — record với 5 fields: `type`, `name`, `targetUserId` (W7 new), `memberIds` (backward-compat), `avatarFileId`.
+- `conversation/dto/UpdateGroupRequest.java` (new) — dùng `@JsonAnySetter` + Map để tristate (absent / null / value) cho `avatarFileId`. Lý do: record Jackson không phân biệt "field absent" vs "field = null".
+- `conversation/dto/OwnerDto.java` (new) — minimal {userId, username, fullName} cho GROUP owner.
+- `conversation/dto/ConversationDto.java` — thêm `owner: OwnerDto?` field. `from(conv, Function<UUID,User> resolver)` — caller inject userRepository lookup. Sort members `role ASC (ordinal), joinedAt ASC` → OWNER đầu. avatarUrl compute: avatarFileId ? "/api/files/{id}" : legacy avatar_url.
+- `conversation/repository/ConversationRepository.java` — thêm `findActiveByIdWithMembers`, `findActiveById` với filter `deleted_at IS NULL`. Update native queries filter `c.deleted_at IS NULL` cho list + findExistingOneOnOne.
+- `conversation/repository/ConversationMemberRepository.java` — thêm `findByConversation_IdOrderByJoinedAtAsc`, `findByConversation_IdAndRoleOrderByJoinedAtAsc`, `countByConversation_Id`, `deleteByConversation_Id` (@Modifying @Query).
+- `conversation/event/ConversationUpdatedEvent.java`, `GroupDeletedEvent.java` (new) — records cho @TransactionalEventListener.
+- `conversation/broadcast/ConversationBroadcaster.java` (new) — AFTER_COMMIT listeners fire CONVERSATION_UPDATED và GROUP_DELETED qua `/topic/conv.{id}`. LinkedHashMap (không Map.of) để cho phép null values (avatarUrl: null khi remove).
+- `conversation/service/ConversationService.java` — refactor createOneOnOne để accept cả `targetUserId` (W7) và `memberIds[0]` (backward-compat). Thêm `updateGroupInfo`, `deleteGroup`. Thêm `validateGroupAvatar` (exists + uploader = caller + MIME image + chưa expired) dùng chung giữa createGroup và updateGroupInfo. markAttached file avatar để tránh orphan cleanup.
+- `conversation/controller/ConversationController.java` — thêm `PATCH /{id}`, `DELETE /{id}` (trả 204).
+
+**Error code contract (v1.0.0-w7)**:
+- `GROUP_NAME_REQUIRED` (400) — name null/empty/whitespace.
+- `GROUP_MEMBERS_MIN` (400) — <2 unique memberIds.
+- `GROUP_MEMBERS_MAX` (400) — >49 memberIds.
+- `GROUP_MEMBER_NOT_FOUND` (404) — với `details.missingIds`.
+- `GROUP_AVATAR_NOT_OWNED` (403) — merge anti-enum cho not-exist + not-owner + expired.
+- `GROUP_AVATAR_NOT_IMAGE` (415) — MIME ≠ whitelist image.
+- `NOT_GROUP` (400) — PATCH/DELETE trên ONE_ON_ONE.
+- `INSUFFICIENT_PERMISSION` (403) — MEMBER rename, ADMIN delete.
+- `CONV_NOT_FOUND` (404) — anti-enum cho non-member + soft-deleted.
+
+**Tests (21 new, all pass)**:
+- S01-S03: schema column verification qua DatabaseMetaData + S03 createGroup persists owner_id/name.
+- G01-G09: createGroup (happy path, exact-min, min, max, dedup, missing user, empty name, long name, avatar not owned).
+- H01-H02: GET (owner info + sort members, non-member 404).
+- U01-U04: updateGroupInfo (OWNER/ADMIN rename, MEMBER deny, NOT_GROUP).
+- D01-D03: deleteGroup (OWNER soft-delete + clear members + broadcast, ADMIN deny, NOT_GROUP).
+
+**Regression fix**: 3 test cũ trong `ConversationControllerTest` (createGroup_missingName/tooFewMembers/duplicateTooFew) đổi expected `VALIDATION_FAILED` → `GROUP_NAME_REQUIRED`/`GROUP_MEMBERS_MIN` (breaking theo contract v1.0.0-w7).
+
+**Total tests**: 231 pass, 0 fail (từ 210 → 231 = +21 new).
+
+**Pitfall gặp**: Map.of() NPE với null value. Dùng LinkedHashMap để broadcast payload có avatarUrl: null (remove avatar). UpdateGroupRequest dùng @JsonAnySetter Map thay vì record để phân biệt tristate.
+
+**Ngày 2 chưa làm (theo spec)**: member management (add/remove/leave/role-change/transfer-owner) + system messages. Migration V9 + MemberRole enum đã sẵn sàng cho Ngày 2 — chỉ cần thêm endpoints + service methods + broadcasts.
+
+---
+
 ## [W6-D4-extend] feat: expand file types 5→14 MIME types, iconType field, singleNonImage group validation. 13 tests added (210 total pass).
 
 ## [W6-D3] feat: File cleanup jobs (expiry + orphan) + graceful 404 + @EnableScheduling

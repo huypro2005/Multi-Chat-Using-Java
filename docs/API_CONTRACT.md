@@ -392,11 +392,13 @@ Validation rules:
 
 ---
 
-## Conversations API (v0.5.0-conversations — W3-D2+)
+## Conversations API (v1.0.0-w7 — Group Chat)
 
+> **Version bump W7 (2026-04-21)**: v0.9.5-files-extended → **v1.0.0-w7**. Lý do major bump: thêm full Group Chat management (W7-D1) — role enum (OWNER/ADMIN/MEMBER), metadata group (name/avatar/owner), + 7 endpoints mới (PATCH/DELETE conv, add/remove/leave/role-change/transfer-owner). Xem ADR-020. Schema migration V7 (`V7__add_group_chat.sql`) thêm `member_role` enum + columns `joined_at`, `conversations.name/avatar_file_id/owner_id` + CHECK constraint type-specific. Breaking: `POST /api/conversations` payload cho GROUP đổi — thêm `name` + `avatarFileId` optional; `type="GROUP"` BẮT BUỘC có `name` + `memberIds` ≥ 2 (tổng member ≥ 3 gồm caller).
+>
 > **Naming note**: V1 đơn giản hoá so với ARCHITECTURE.md mục 3.2:
 > - `type` dùng UPPERCASE `ONE_ON_ONE` | `GROUP` (không phải lowercase `direct`/`group` trong ARCHITECTURE gốc). Xem ADR-012.
-> - Bỏ `left_at` / `leave_reason` (soft-leave), `is_hidden` / `cleared_at` (soft-hide) khỏi V1 migration. Khi cần tính năng "rời nhóm" hoặc "xoá lịch sử chat" sẽ thêm migration V4. Trong scope tuần 3, rời nhóm = hard-delete row `conversation_members` (qua endpoint riêng sẽ design ở tuần 5-6).
+> - Bỏ `left_at` / `leave_reason` (soft-leave), `is_hidden` / `cleared_at` (soft-hide) khỏi V1 migration. Khi cần tính năng "rời nhóm" hoặc "xoá lịch sử chat" sẽ thêm migration riêng. W7 implement rời nhóm = hard-delete row `conversation_members` (qua `POST /api/conversations/{id}/leave`).
 > - `muted_until` (snake_case → DB) / `mutedUntil` (camelCase → JSON) có mặt nhưng endpoint mute sẽ chốt sau.
 >
 > Nguyên tắc chung cho mọi endpoint trong nhóm này:
@@ -406,41 +408,110 @@ Validation rules:
 
 ---
 
+### Schema V7 migration (W7-D1)
+
+File: `backend/src/main/resources/db/migration/V7__add_group_chat.sql`
+
+```sql
+-- Enum role (OWNER / ADMIN / MEMBER)
+CREATE TYPE member_role AS ENUM ('OWNER', 'ADMIN', 'MEMBER');
+
+-- Alter conversation_members: thêm role + joined_at
+ALTER TABLE conversation_members
+  ADD COLUMN role member_role NOT NULL DEFAULT 'MEMBER',
+  ADD COLUMN joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- Alter conversations: thêm metadata group
+ALTER TABLE conversations
+  ADD COLUMN name VARCHAR(100),
+  ADD COLUMN avatar_file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+  ADD COLUMN owner_id UUID REFERENCES users(id) ON DELETE SET NULL;
+
+-- Indexes
+CREATE INDEX idx_conversation_members_conv_role
+  ON conversation_members(conversation_id, role);
+CREATE INDEX idx_conversation_members_conv_joined
+  ON conversation_members(conversation_id, joined_at);
+CREATE INDEX idx_conversations_owner
+  ON conversations(owner_id) WHERE owner_id IS NOT NULL;
+
+-- Constraint: GROUP conversation PHẢI có name + owner; DIRECT (ONE_ON_ONE) PHẢI có cả 2 NULL
+ALTER TABLE conversations
+  ADD CONSTRAINT chk_group_metadata
+  CHECK (
+    (type = 'ONE_ON_ONE' AND name IS NULL AND owner_id IS NULL) OR
+    (type = 'GROUP' AND name IS NOT NULL AND owner_id IS NOT NULL)
+  );
+```
+
+**Backfill note**: V7 migration chạy khi chưa có GROUP conversation trong DB (W1-W6 chỉ test ONE_ON_ONE). Nếu production đã có row GROUP pre-W7, cần backfill `name` + `owner_id` TRƯỚC khi apply CHECK constraint — V1 acceptable không có rows.
+
+> **Naming drift nhẹ**: Migration dùng `DIRECT` / `GROUP` trong doc ADR-020, nhưng DB column `type` enum giữ `ONE_ON_ONE` | `GROUP` theo ADR-012. CHECK constraint code trên đã sync lại `'ONE_ON_ONE'` để khớp DB. Trong text/docs có thể dùng "DIRECT" đồng nghĩa "ONE_ON_ONE" cho ngắn gọn; code luôn dùng `ONE_ON_ONE`.
+
+---
+
 ### POST /api/conversations
 
-**Description**: Tạo conversation mới (1-1 hoặc nhóm). Caller tự động trở thành thành viên với role `OWNER`.
+**Description**: Tạo conversation mới (1-1 hoặc nhóm). Caller tự động trở thành thành viên với role `OWNER` (GROUP) hoặc `MEMBER` (ONE_ON_ONE — role không có ý nghĩa với DIRECT).
 
 **Auth required**: Yes
 
 **Rate limit**: 10 requests/phút/user (chống spam tạo nhóm).
 
-**Request body**:
+**Request body (ONE_ON_ONE)**:
 
 ```json
 {
   "type": "ONE_ON_ONE",
-  "name": null,
-  "memberIds": ["9b1a7c16-4c72-4a2a-a8f6-abc111222333"]
+  "targetUserId": "9b1a7c16-4c72-4a2a-a8f6-abc111222333"
+}
+```
+
+> **Shape change W7**: `targetUserId` (singular UUID) thay cho `memberIds: [uuid]` array cho DIRECT. Lý do: DIRECT luôn 1-1, array 1-phần-tử thừa + dễ confuse với GROUP. BE backward-compat: nếu FE gửi `memberIds: [uuid]` với `type="ONE_ON_ONE"` → vẫn accept (deprecated path, BE lấy phần tử [0] làm targetUserId).
+
+**Request body (GROUP)**:
+
+```json
+{
+  "type": "GROUP",
+  "name": "Dự án đồ án",
+  "memberIds": [
+    "9b1a7c16-4c72-4a2a-a8f6-abc111222333",
+    "7c1a7c16-4c72-4a2a-a8f6-def444555666"
+  ],
+  "avatarFileId": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
 Validation rules:
 - `type`: bắt buộc, enum `"ONE_ON_ONE" | "GROUP"`.
+- `targetUserId` (chỉ cho `ONE_ON_ONE`): bắt buộc UUID, **khác caller id**. Gửi kèm `GROUP` → `VALIDATION_FAILED`.
 - `name`:
-  - `ONE_ON_ONE`: phải là `null` (server không dùng field này; gửi string sẽ bị bỏ qua hoặc trả `VALIDATION_FAILED` — để rõ ràng FE gửi `null`).
-  - `GROUP`: bắt buộc, 1–100 ký tự, không toàn whitespace.
-- `memberIds`: bắt buộc, array UUID, **không chứa UUID của caller** (caller tự add qua OWNER role). Không được có phần tử trùng. Giới hạn độ dài:
-  - `ONE_ON_ONE`: exactly 1 phần tử (sẽ có tổng 2 members gồm caller + 1 user kia).
-  - `GROUP`: tối thiểu 2, tối đa 49 (cộng caller = 50, khớp giới hạn V1 "tối đa 50 thành viên" trong ARCHITECTURE).
+  - `ONE_ON_ONE`: phải là `null` hoặc không gửi field (server không dùng; gửi string non-null → `VALIDATION_FAILED`).
+  - `GROUP`: **bắt buộc non-null**, 1–100 ký tự sau trim, không toàn whitespace. Thiếu hoặc rỗng → `GROUP_NAME_REQUIRED`.
+- `memberIds` (chỉ cho `GROUP`): bắt buộc, array UUID, **không chứa UUID của caller** (caller tự add qua OWNER role). Không được có phần tử trùng. Giới hạn độ dài:
+  - `GROUP`: tối thiểu **2 phần tử** (tổng member ≥ 3 gồm caller + 2 others → minimum group size). < 2 → `GROUP_MEMBERS_MIN`. Tối đa 49 (cộng caller = 50, khớp giới hạn V1 "tối đa 50 thành viên"). > 49 → `GROUP_MEMBERS_MAX`.
+  - Nếu 1 UUID trong `memberIds` không tồn tại / `status != 'active'` → `GROUP_MEMBER_NOT_FOUND` (details.missingIds).
+- `avatarFileId` (optional, chỉ cho `GROUP`): UUID của `FileRecord` đã upload qua `POST /api/files/upload`. Validation:
+  - File phải exists (else `GROUP_AVATAR_NOT_OWNED` — merge với not-owned để anti-enum).
+  - File `uploader_id == callerId` (else `GROUP_AVATAR_NOT_OWNED`).
+  - File MIME phải là image (group A: jpeg/png/webp/gif). PDF/office → `GROUP_AVATAR_NOT_IMAGE`.
+  - File chưa expire.
+  - File sẽ được "attach" vào conversation (BE set `attached_at` để không bị orphan cleanup — xem `AttachAvatarToConversation` flow). Reuse cho multiple group không OK V1 (file chỉ attach 1 nơi theo UNIQUE constraint message_attachments; avatar đi qua conversations.avatar_file_id column KHÔNG qua message_attachments → không conflict nhưng V1 giới hạn 1 group dùng 1 file avatar cho đơn giản).
 
 **Response 201**:
 
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "type": "ONE_ON_ONE",
-  "name": null,
-  "avatarUrl": null,
+  "type": "GROUP",
+  "name": "Dự án đồ án",
+  "avatarUrl": "/api/files/550e8400-e29b-41d4-a716-446655440000",
+  "owner": {
+    "userId": "9b1a7c16-4c72-4a2a-a8f6-abc111222333",
+    "username": "alice",
+    "fullName": "Alice Nguyen"
+  },
   "createdBy": {
     "id": "9b1a7c16-4c72-4a2a-a8f6-abc111222333",
     "username": "alice",
@@ -454,7 +525,7 @@ Validation rules:
       "fullName": "Alice Nguyen",
       "avatarUrl": null,
       "role": "OWNER",
-      "joinedAt": "2026-04-19T10:00:00Z"
+      "joinedAt": "2026-04-21T10:00:00Z"
     },
     {
       "userId": "7c1a7c16-4c72-4a2a-a8f6-def444555666",
@@ -462,31 +533,43 @@ Validation rules:
       "fullName": "Bob Tran",
       "avatarUrl": null,
       "role": "MEMBER",
-      "joinedAt": "2026-04-19T10:00:00Z"
+      "joinedAt": "2026-04-21T10:00:00Z"
     }
   ],
-  "createdAt": "2026-04-19T10:00:00Z",
+  "createdAt": "2026-04-21T10:00:00Z",
   "lastMessageAt": null
 }
 ```
+
+Field notes (W7):
+- `name`: `null` cho ONE_ON_ONE, string (1-100) cho GROUP.
+- `avatarUrl`: `null` cho ONE_ON_ONE; cho GROUP — `null` nếu không có avatar, else `/api/files/{avatarFileId}` (FE dùng `useProtectedObjectUrl` render).
+- `owner` (W7 mới): chỉ có cho GROUP (null cho ONE_ON_ONE). Shape minimal `{userId, username, fullName}` — **không expose** `avatarUrl` tại `owner` (FE đã có full info trong `members` array; tránh duplicate). Khi user OWNER bị xoá → `owner_id` DB set NULL → response trả `owner: null` (V1 edge case rare, UI fallback).
 
 **Error responses**:
 
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
-| 400 | `VALIDATION_FAILED` | Vi phạm validation rule (type sai enum, memberIds rỗng, GROUP thiếu name, ONE_ON_ONE có name ≠ null, v.v.); kèm `details.fields`. |
+| 400 | `VALIDATION_FAILED` | Vi phạm validation rule chung (type sai enum, UUID malformed, ONE_ON_ONE có name/memberIds, targetUserId = callerId, …); kèm `details.fields`. |
+| 400 | `GROUP_NAME_REQUIRED` | `type="GROUP"` nhưng `name` null/empty/toàn whitespace. |
+| 400 | `GROUP_MEMBERS_MIN` | `type="GROUP"` nhưng `memberIds.length < 2` (nhóm tối thiểu 3 người gồm caller). |
+| 400 | `GROUP_MEMBERS_MAX` | `type="GROUP"` nhưng `memberIds.length > 49` (tổng > 50). |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
-| 404 | `CONV_MEMBER_NOT_FOUND` | Một hoặc nhiều `memberIds` không trỏ tới user tồn tại; kèm `details.missingIds: [uuid, ...]`. |
-| 409 | `CONV_ONE_ON_ONE_EXISTS` | Đã tồn tại `ONE_ON_ONE` giữa caller và user kia; kèm `details.conversationId` để FE redirect luôn. |
+| 403 | `GROUP_AVATAR_NOT_OWNED` | `avatarFileId` không exists HOẶC uploader_id ≠ callerId (merge anti-enum). |
+| 404 | `CONV_MEMBER_NOT_FOUND` / `GROUP_MEMBER_NOT_FOUND` | Một hoặc nhiều `memberIds` (hoặc `targetUserId`) không trỏ tới user active; kèm `details.missingIds: [uuid, ...]`. Alias: `GROUP_MEMBER_NOT_FOUND` dùng cho GROUP để rõ nghĩa; `CONV_MEMBER_NOT_FOUND` giữ cho ONE_ON_ONE (backward-compat). |
+| 409 | `CONV_ONE_ON_ONE_EXISTS` | Đã tồn tại `ONE_ON_ONE` giữa caller và target user; kèm `details.conversationId` để FE redirect luôn. |
 | 409 | `CONV_MEMBER_BLOCKED` | Caller đã block / bị block bởi 1 trong các `memberIds`; kèm `details.blockedIds: [uuid, ...]`. (V1 nếu `user_blocks` chưa wire, error này không fire — documented để FE sẵn sàng khi bật.) |
+| 415 | `GROUP_AVATAR_NOT_IMAGE` | `avatarFileId` trỏ tới file không phải image (PDF, docx, …). Kèm `details.actualMime`. |
 | 429 | `RATE_LIMITED` | Vượt 10 requests/phút/user; kèm `details.retryAfterSeconds`. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
 **Notes**:
 - **Idempotency `ONE_ON_ONE`**: server query xem giữa caller và target user đã có `ONE_ON_ONE` chưa. Có → trả `409 CONV_ONE_ON_ONE_EXISTS` với `details.conversationId` (FE điều hướng sang conv cũ). KHÔNG tự động trả 200 với conv cũ — để FE chủ động xử lý UX "bạn đã có chat với người này".
 - **Race duplicate ONE_ON_ONE**: 2 request song song có thể cùng pass existence check. V1 chấp nhận edge case (traffic thấp); cần partial UNIQUE index cho lần cleanup V2: `CREATE UNIQUE INDEX ... ON conversations(LEAST(user_a, user_b), GREATEST(user_a, user_b)) WHERE type='ONE_ON_ONE'` (denormalize 2 columns hoặc dùng conv_members swap). Documented trong WARNINGS.md.
-- **Role mặc định**: caller = `OWNER`; các `memberIds` khác = `MEMBER`. Không cho phép set role khác qua endpoint này.
-- `lastMessageAt` luôn `null` khi vừa tạo — cập nhật khi có message đầu tiên (tuần 4).
+- **Role mặc định**: caller (GROUP) = `OWNER`; các `memberIds` khác = `MEMBER`. Không cho phép set role khác qua endpoint này — dùng `PATCH /api/conversations/{id}/members/{userId}/role` sau khi tạo. Với ONE_ON_ONE, role không có nghĩa — BE set cả 2 members = `MEMBER` (hoặc lưu NULL — chọn MEMBER để NOT NULL constraint pass).
+- **owner_id persistence**: BE set `conversations.owner_id = callerId` cho GROUP, `NULL` cho ONE_ON_ONE (CHECK constraint enforce).
+- **Avatar attach flow**: sau khi validate `avatarFileId` pass, BE set `FileRecord.attached_at = NOW()` để không bị orphan cleanup (giống pattern message attachment). V1 KHÔNG lưu row vào `message_attachments` — avatar đi qua `conversations.avatar_file_id` column trực tiếp.
+- `lastMessageAt` luôn `null` khi vừa tạo — cập nhật khi có message đầu tiên.
 
 ---
 
@@ -570,7 +653,30 @@ Field notes:
 **Path params**:
 - `id`: UUID của conversation.
 
-**Response 200**: cùng shape với response 201 của `POST /api/conversations` — đầy đủ `createdBy` và `members[]` với `role` + `joinedAt`.
+**Response 200**: cùng shape với response 201 của `POST /api/conversations` — đầy đủ `createdBy`, `owner` (nullable, chỉ có cho GROUP), `members[]` với `role` + `joinedAt`, `name`, `avatarUrl`.
+
+```json
+{
+  "id": "uuid",
+  "type": "ONE_ON_ONE" | "GROUP",
+  "name": "string | null",
+  "avatarUrl": "string | null",
+  "createdAt": "ISO8601",
+  "lastMessageAt": "ISO8601 | null",
+  "members": [
+    {
+      "userId": "uuid",
+      "username": "string",
+      "fullName": "string",
+      "avatarUrl": "string | null",
+      "role": "OWNER" | "ADMIN" | "MEMBER",
+      "joinedAt": "ISO8601"
+    }
+  ],
+  "owner": { "userId": "uuid", "username": "string", "fullName": "string" } | null,
+  "createdBy": { "id": "uuid", "username": "string", "fullName": "string", "avatarUrl": "string | null" }
+}
+```
 
 **Error responses**:
 
@@ -583,7 +689,384 @@ Field notes:
 
 **Notes**:
 - **Authorization merge với not-found**: nếu conv tồn tại nhưng caller không phải member → trả `404 CONV_NOT_FOUND` (không phải `403 AUTH_FORBIDDEN`). Lý do: tránh tiết lộ "conv này tồn tại" qua error code khác nhau. Đây là pattern chống enumeration — thống nhất với cách `/login` dùng cùng error cho user-not-found và wrong-password.
-- BE implement hiện đã có `ConversationRepository.findByIdWithMembers(UUID)` (JOIN FETCH) — dùng trực tiếp, tránh N+1.
+- **Member list sort (W7)**: BE trả `members[]` sort theo `role DESC, joinedAt ASC` (OWNER đầu → ADMINs cũ nhất → MEMBERs cũ nhất). Sidebar / DetailPage render theo order này không cần sort lại FE.
+- BE implement hiện đã có `ConversationRepository.findByIdWithMembers(UUID)` (JOIN FETCH) — dùng trực tiếp, tránh N+1. W7 cập nhật query include `role` + `joined_at` + LEFT JOIN `users` cho `owner` (có thể NULL sau cascade).
+
+---
+
+### PATCH /api/conversations/{id}
+
+**Description** (W7-D1): Cập nhật metadata của GROUP conversation — rename hoặc đổi avatar. Không áp dụng cho ONE_ON_ONE (trả `NOT_GROUP`).
+
+**Auth required**: Yes
+
+**Rate limit**: 20 requests/phút/user.
+
+**Path params**: `id` (UUID).
+
+**Request body**:
+
+```json
+{
+  "name": "Tên nhóm mới (optional)",
+  "avatarFileId": "uuid | null (optional, null = remove avatar)"
+}
+```
+
+Validation rules:
+- **Ít nhất 1 field phải hiện diện** (cả 2 undefined → `VALIDATION_FAILED`).
+- `name` (optional): nếu present — 1-100 chars sau trim, non-empty.
+- `avatarFileId` (optional, nullable):
+  - `undefined` → không đổi avatar.
+  - `null` → remove avatar (set `conversations.avatar_file_id = NULL`). KHÔNG xoá `FileRecord` (giữ cho audit; file sẽ bị orphan cleanup sau 30d expiry nếu không attach lại).
+  - `uuid` → set avatar mới. Validation giống POST: exists + uploader = caller + MIME image. Errors: `GROUP_AVATAR_NOT_OWNED`, `GROUP_AVATAR_NOT_IMAGE`.
+
+**Authorization**: `OWNER` hoặc `ADMIN` của conversation. MEMBER → `INSUFFICIENT_PERMISSION`.
+
+**Response 200**: updated `ConversationDto` (shape như GET /{id}).
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | Cả 2 field undefined, `name` rỗng sau trim hoặc > 100 chars. |
+| 400 | `NOT_GROUP` | Conversation là ONE_ON_ONE. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller là MEMBER (không phải OWNER/ADMIN). |
+| 403 | `GROUP_AVATAR_NOT_OWNED` | `avatarFileId` không exists hoặc không phải caller upload. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member (anti-enum). |
+| 415 | `GROUP_AVATAR_NOT_IMAGE` | avatarFileId MIME ≠ image. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Broadcast**: sau commit, fire STOMP event `CONVERSATION_UPDATED` qua `/topic/conv.{id}` với `changes: {name?, avatarUrl?}`. Xem SOCKET_EVENTS.md §3.6. System message OPTIONAL (W7 dự kiến ngày 4 implement — placeholder "X đã đổi tên nhóm thành Y" / "X đã đổi ảnh đại diện nhóm").
+
+---
+
+### DELETE /api/conversations/{id}
+
+**Description** (W7-D1): Soft-delete GROUP conversation. Đánh dấu `conversations.deleted_at`, đẩy toàn bộ members ra (hard-delete rows `conversation_members` — giữ messages cho audit). Không áp dụng cho ONE_ON_ONE V1 (trả `NOT_GROUP`).
+
+**Auth required**: Yes
+
+**Rate limit**: 10 requests/phút/user.
+
+**Path params**: `id` (UUID).
+
+**Authorization**: `OWNER` only. ADMIN/MEMBER → `INSUFFICIENT_PERMISSION`. OWNER leave-then-delete: dùng `POST /leave` để transfer ownership tự động, KHÔNG delete.
+
+**Response 204**: No Content.
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `NOT_GROUP` | Conversation là ONE_ON_ONE (V1 không cho delete). |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller không phải OWNER. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Side effects**:
+1. Set `conversations.deleted_at = NOW()` (soft delete — row giữ).
+2. Hard-delete toàn bộ rows `conversation_members WHERE conversation_id = :id` (caller nhận broadcast rồi mới bị remove khỏi subscription).
+3. Detach avatar (set `avatar_file_id = NULL` nếu có — FileRecord giữ lại, orphan cleanup sẽ dọn sau 30d).
+4. Broadcast `GROUP_DELETED` qua `/topic/conv.{id}` TRƯỚC khi unsubscribe all members. FE nhận → navigate về `/conversations` + remove conv khỏi sidebar.
+5. Messages KHÔNG bị xoá (giữ cho compliance/audit). Nếu UI FE cần load lại conv đã delete → trả 404 (soft-delete filter).
+
+**Query filter rule**: Tất cả endpoint list/read conversations (`GET /api/conversations`, `GET /api/conversations/{id}`, `GET /messages`) PHẢI filter `WHERE conversations.deleted_at IS NULL`.
+
+---
+
+### POST /api/conversations/{id}/members
+
+**Description** (W7-D1): Thêm 1 hoặc nhiều user vào GROUP conversation. Batch tối đa 10 mỗi request.
+
+**Auth required**: Yes
+
+**Rate limit**: 20 requests/phút/user.
+
+**Path params**: `id` (UUID).
+
+**Request body**:
+
+```json
+{
+  "userIds": ["uuid", "uuid", "..."]
+}
+```
+
+Validation rules:
+- `userIds`: bắt buộc array UUID, length 1-10. Không duplicate.
+- Mỗi user phải `status='active'`.
+- User không được là current member (else `GROUP_MEMBER_ALREADY_IN`).
+- Tổng sau add không vượt 50 (else `GROUP_FULL`). BE dùng `SELECT COUNT(*) FROM conversation_members WHERE conversation_id = :id FOR UPDATE` trước INSERT để chống race (xem WARNINGS W7-3).
+
+**Authorization**: `OWNER` hoặc `ADMIN`. MEMBER → `INSUFFICIENT_PERMISSION`.
+
+**Response 200**:
+
+```json
+{
+  "added": [
+    {
+      "userId": "uuid",
+      "username": "string",
+      "fullName": "string",
+      "avatarUrl": "string | null",
+      "role": "MEMBER",
+      "joinedAt": "ISO8601"
+    }
+  ]
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | userIds rỗng / > 10 / duplicate. |
+| 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller là MEMBER. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 404 | `GROUP_MEMBER_NOT_FOUND` | 1+ userIds không tồn tại hoặc inactive (details.missingIds). |
+| 409 | `GROUP_MEMBER_ALREADY_IN` | 1+ userIds đã là member (details.alreadyMemberIds). |
+| 409 | `GROUP_FULL` | Sau add > 50 members. details.currentCount + details.attemptedCount. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Broadcast**: fire `MEMBER_ADDED` event qua `/topic/conv.{id}` với list users mới + `addedBy`. Xem SOCKET_EVENTS.md §3.7.
+
+**Notes**:
+- Transaction boundary: validate → COUNT FOR UPDATE → INSERT batch → publish event. Tất cả trong 1 `@Transactional`.
+- New members default `role='MEMBER'`, `joined_at=NOW()`. OWNER không thể add directly với role khác — dùng PATCH role riêng sau.
+
+---
+
+### DELETE /api/conversations/{id}/members/{userId}
+
+**Description** (W7-D1): Kick user ra khỏi GROUP conversation. Hard-delete row `conversation_members` (không soft-leave V1). Đồng thời force-unsubscribe user khỏi `/topic/conv.{id}` (V1 chấp nhận client chỉ bị filter qua member-check tại lần SUBSCRIBE tiếp theo — xem Limitations SOCKET_EVENTS.md §8).
+
+**Auth required**: Yes
+
+**Rate limit**: 20 requests/phút/user.
+
+**Path params**: `id` (conversation UUID), `userId` (target user UUID).
+
+**Authorization matrix**:
+- **OWNER**: có thể kick bất kỳ ai **trừ chính mình** (OWNER self-kick = transfer-then-leave, dùng endpoint `/leave` thay).
+- **ADMIN**: chỉ kick được `MEMBER`. Kick ADMIN khác hoặc OWNER → `INSUFFICIENT_PERMISSION`.
+- **MEMBER**: không kick được ai → `INSUFFICIENT_PERMISSION`.
+
+**Response 204**: No Content.
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
+| 400 | `CANNOT_REMOVE_OWNER` | Target là OWNER (chỉ OWNER mới được remove OWNER, mà OWNER không remove chính mình — dùng `/leave` thay). |
+| 400 | `CANNOT_REMOVE_SELF` | Caller = target qua endpoint này (dùng `/leave`). |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | ADMIN kick ADMIN/OWNER; MEMBER kick bất kỳ. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 404 | `GROUP_MEMBER_NOT_FOUND` | Target userId không phải member của conv. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Broadcast**: fire `MEMBER_REMOVED` với `reason: "KICKED"` + `removedBy`. Target user FE nhận → navigate away khỏi conv (nếu đang mở) + remove khỏi sidebar. Xem SOCKET_EVENTS.md §3.8.
+
+---
+
+### POST /api/conversations/{id}/leave
+
+**Description** (W7-D1): Member tự rời khỏi GROUP conversation. Bất kỳ role nào cũng dùng được (MEMBER/ADMIN/OWNER). Khi OWNER leave → **auto-transfer** ownership theo rule dưới.
+
+**Auth required**: Yes
+
+**Rate limit**: 10 requests/phút/user.
+
+**Path params**: `id` (UUID).
+
+**Request body**: Không có (empty body).
+
+**Authorization**: Bất kỳ member nào (MEMBER / ADMIN / OWNER).
+
+**Response 204**: No Content.
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `NOT_GROUP` | Conv là ONE_ON_ONE (V1 không cho leave DIRECT — dùng block hoặc ẩn hội thoại, chưa implement). |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Auto-transfer logic (OWNER leave only)**:
+
+1. SELECT ADMIN có `joined_at` nhỏ nhất (oldest ADMIN) — nếu có → promote thành OWNER.
+2. Nếu không có ADMIN — SELECT MEMBER oldest `joined_at` → promote thành OWNER.
+3. Nếu không còn ai khác (OWNER là member cuối) — set `conversations.owner_id = NULL` (DB cho phép SET NULL theo FK) + **giữ group**. V1 không auto-delete empty group — xem WARNINGS W7-2. Empty group sẽ bị alert monitoring sau 7 ngày.
+4. Bước 1-3 dùng `SELECT ... FOR UPDATE` trên `conversation_members` rows để tránh race với concurrent kick/leave (xem WARNINGS W7-1).
+5. Fire 2 broadcasts atomic-in-order:
+   - `ROLE_CHANGED` (với newOwner info) NẾU có transfer.
+   - `MEMBER_LEFT` với `reason: "LEFT"` cho caller.
+
+**Notes**:
+- Sau leave, caller KHÔNG còn subscribe `/topic/conv.{id}` (member check fail ở SUBSCRIBE lần sau; V1 chấp nhận currently-open subscription vẫn nhận event cho đến unsubscribe — xem SOCKET_EVENTS.md §8 Limitations).
+- OWNER self-kick qua `DELETE /members/{self-id}` → `CANNOT_REMOVE_SELF`. Dùng `/leave` thay.
+
+---
+
+### PATCH /api/conversations/{id}/members/{userId}/role
+
+**Description** (W7-D1): Thay đổi role của 1 member. OWNER-only (V1).
+
+**Auth required**: Yes
+
+**Rate limit**: 20 requests/phút/user.
+
+**Path params**: `id` (conv UUID), `userId` (target UUID).
+
+**Request body**:
+
+```json
+{
+  "role": "ADMIN" | "MEMBER"
+}
+```
+
+Validation rules:
+- `role`: enum strict `"ADMIN" | "MEMBER"`. Promote thành `"OWNER"` phải dùng `/transfer-owner` thay (V1 phân tách flow).
+
+**Authorization**: `OWNER` only (V1). ADMIN/MEMBER → `INSUFFICIENT_PERMISSION`.
+
+**Response 200**:
+
+```json
+{
+  "userId": "uuid",
+  "oldRole": "MEMBER",
+  "newRole": "ADMIN",
+  "changedAt": "ISO8601"
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `role` không đúng enum. |
+| 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
+| 400 | `INVALID_ROLE_CHANGE` | target là OWNER (đổi OWNER role qua endpoint này cấm — dùng transfer); hoặc new role = current role (no-op); hoặc target == caller (OWNER self-demote cấm — dùng transfer). |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller không phải OWNER. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 404 | `GROUP_MEMBER_NOT_FOUND` | Target userId không phải member. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Broadcast**: fire `ROLE_CHANGED` event với `userId + newRole + changedBy`. Xem SOCKET_EVENTS.md §3.9.
+
+---
+
+### POST /api/conversations/{id}/transfer-owner
+
+**Description** (W7-D1): OWNER chuyển quyền sở hữu cho 1 member khác. Current OWNER → ADMIN, new user → OWNER. Atomic 2-way swap.
+
+**Auth required**: Yes
+
+**Rate limit**: 10 requests/phút/user.
+
+**Path params**: `id` (UUID).
+
+**Request body**:
+
+```json
+{
+  "newOwnerId": "uuid"
+}
+```
+
+Validation rules:
+- `newOwnerId`: bắt buộc UUID, phải là current member của conv. Khác caller id (self-transfer = no-op `INVALID_ROLE_CHANGE`).
+
+**Authorization**: `OWNER` only.
+
+**Response 200**:
+
+```json
+{
+  "oldOwner": { "userId": "uuid", "newRole": "ADMIN" },
+  "newOwner": { "userId": "uuid", "newRole": "OWNER" }
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | newOwnerId malformed UUID. |
+| 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
+| 400 | `INVALID_ROLE_CHANGE` | newOwnerId = callerId. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller không phải OWNER. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 404 | `GROUP_MEMBER_NOT_FOUND` | newOwnerId không phải member của conv. |
+| 429 | `RATE_LIMITED` | Vượt quota. |
+| 500 | `INTERNAL_ERROR` | Lỗi server. |
+
+**Broadcast**: fire `OWNER_TRANSFERRED` event (FE dùng để update UI + sidebar owner indicator). Xem SOCKET_EVENTS.md §3.10.
+
+**Notes**:
+- Transaction boundary: `SELECT ... FOR UPDATE` cả 2 rows (current OWNER + newOwnerId) → UPDATE cả 2 role → UPDATE `conversations.owner_id = newOwnerId` → publish event. Tất cả 1 `@Transactional`.
+- Khác với `/leave` + auto-transfer: `/transfer-owner` giữ OWNER cũ trong group (downgrade thành ADMIN). `/leave` sẽ remove OWNER.
+
+---
+
+### Appendix — Group Chat Authorization Matrix (W7)
+
+| Action | OWNER | ADMIN | MEMBER |
+|--------|-------|-------|--------|
+| Create group (POST /conversations type=GROUP) | N/A (caller becomes OWNER) | - | - |
+| Rename group / Change avatar (PATCH /{id}) | ✓ | ✓ | ✗ |
+| Delete group (DELETE /{id}) | ✓ | ✗ | ✗ |
+| Add members (POST /{id}/members) | ✓ | ✓ | ✗ |
+| Remove MEMBER (DELETE /{id}/members/{uid}) | ✓ | ✓ | ✗ |
+| Remove ADMIN (DELETE /{id}/members/{uid}) | ✓ | ✗ | ✗ |
+| Remove OWNER via kick | ✗ (use `/leave`) | ✗ | ✗ |
+| Change role ADMIN↔MEMBER (PATCH /{id}/members/{uid}/role) | ✓ | ✗ | ✗ |
+| Transfer ownership (POST /{id}/transfer-owner) | ✓ | ✗ | ✗ |
+| Leave group (POST /{id}/leave) | ✓* | ✓ | ✓ |
+| View members (GET /{id}) | ✓ | ✓ | ✓ |
+| Send/Edit/Delete own messages | ✓ | ✓ | ✓ |
+
+\* OWNER leave triggers auto-transfer (oldest-ADMIN → oldest-MEMBER → NULL if alone).
+
+**BE implementation note**: Role enum PHẢI embed permission methods để tránh scatter if-else khắp service layer:
+
+```java
+public enum MemberRole {
+    OWNER, ADMIN, MEMBER;
+
+    public boolean canRename() { return this != MEMBER; }
+    public boolean canDeleteGroup() { return this == OWNER; }
+    public boolean canAddMembers() { return this != MEMBER; }
+    public boolean canRemoveMember(MemberRole targetRole) {
+        if (this == OWNER) return targetRole != OWNER; // OWNER không remove OWNER (self)
+        if (this == ADMIN) return targetRole == MEMBER; // ADMIN chỉ remove MEMBER
+        return false;
+    }
+    public boolean canChangeRole() { return this == OWNER; }
+    public boolean canTransferOwnership() { return this == OWNER; }
+}
+```
+
+FE dùng TypeScript tương đương (tính các boolean này từ `members[].role` sau khi fetch conv detail) để disable/hide actions trong UI dropdown.
 
 ---
 
@@ -1120,6 +1603,7 @@ Field rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-21 | v1.0.0-w7 | **W7-D1 Group Chat backfill** (major bump — W3 spec gốc yêu cầu group chat + role management nhưng đã skip, W7 backfill). Schema V7 migration (`V7__add_group_chat.sql`): CREATE TYPE `member_role` ENUM ('OWNER','ADMIN','MEMBER'); ALTER `conversation_members` ADD role + joined_at; ALTER `conversations` ADD name + avatar_file_id (FK → files) + owner_id (FK → users, ON DELETE SET NULL); CHECK constraint `chk_group_metadata` (GROUP phải có name+owner, ONE_ON_ONE phải cả 2 NULL); indexes conv+role, conv+joined_at, owner (partial). `POST /api/conversations` update payload: ONE_ON_ONE dùng `targetUserId` (backward-compat với memberIds[0]); GROUP bắt buộc `name` (1-100) + `memberIds` (2-49) + `avatarFileId` optional. Response shape thêm `owner: {userId, username, fullName} | null`. 7 endpoints mới: PATCH /{id} (rename/avatar, OWNER+ADMIN), DELETE /{id} (soft delete, OWNER only), POST /{id}/members (add batch ≤10, OWNER+ADMIN), DELETE /{id}/members/{uid} (kick, role matrix), POST /{id}/leave (any member, OWNER triggers auto-transfer), PATCH /{id}/members/{uid}/role (ADMIN↔MEMBER, OWNER only), POST /{id}/transfer-owner (OWNER only, atomic 2-way swap). Auto-transfer rule khi OWNER leave: oldest-ADMIN → oldest-MEMBER → NULL (empty group preserved V1, monitoring alert >7d). Error codes mới (15): GROUP_NAME_REQUIRED, GROUP_MEMBERS_MIN, GROUP_MEMBERS_MAX, GROUP_MEMBER_NOT_FOUND, GROUP_AVATAR_NOT_OWNED, GROUP_AVATAR_NOT_IMAGE, GROUP_MEMBER_ALREADY_IN, GROUP_FULL, NOT_GROUP, INSUFFICIENT_PERMISSION, CANNOT_REMOVE_OWNER, CANNOT_REMOVE_SELF, INVALID_ROLE_CHANGE. Appendix Authorization Matrix. ADR-020 (Group Chat Architecture). WARNINGS W7-1/2/3 (auto-transfer race, empty group edge case, max-50 enforcement with FOR UPDATE lock). |
 | 2026-04-21 | v0.9.5-files-extended | **W6-D4-extend**: Mở rộng MIME whitelist từ 5 type (image jpeg/png/webp/gif + pdf) sang 14 type chia 2 group: Group A (images, gallery 1–5/message) + Group B (non-image: pdf, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z — exactly 1/message). Documented blacklist (executables, scripts, XSS vectors svg/html). Mixing rules formalized: Group A only OR exactly 1 Group B; trộn → `MSG_ATTACHMENTS_MIXED`; 2+ Group B → `MSG_ATTACHMENTS_MIXED`. Thêm field `iconType` vào `FileDto`: enum `IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC` server-computed từ MIME (FE dùng để chọn icon, không bind MIME trực tiếp → dễ extend whitelist sau). Thumbnail endpoint vẫn chỉ phục vụ Group A images; Group B trả 404 (FE fallback `iconType` icon static). Update `MSG_ATTACHMENTS_TOO_MANY` chỉ cho >5 images; >1 Group B fall vào `MSG_ATTACHMENTS_MIXED`. WARNINGS thêm office macro risk + blacklist maintenance cycle. |
 | 2026-04-20 | v0.9.0-files | **W6-D1**: Thêm Files Management section với `FileDto` shape dùng chung (id, mime, name, size, url, thumbUrl, expiresAt). 3 endpoints: `POST /api/files/upload` (multipart, 20MB max, rate limit 20/phút, MIME whitelist jpeg/png/webp/gif/pdf, MIME verify qua Apache Tika magic bytes — khác `Content-Type` header → `MIME_MISMATCH`), `GET /api/files/{id}` (auth = uploader OR member của conv chứa attachment, 404 merge cho expired + not-found + forbidden, Content-Disposition inline + X-Content-Type-Options nosniff), `GET /api/files/{id}/thumb` (image 200×200 JPEG lazy-generate cache, PDF/non-image trả 404). Update `MessageDto` thêm `attachments: FileDto[]` (luôn là array, không null), `content` nullable khi có attachments. Validation SEND+EDIT với attachments: phải có content HOẶC attachments (`MSG_NO_CONTENT`), images 1-5 OR pdf đúng 1, không trộn (`MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`), per-file check `MSG_ATTACHMENT_NOT_OWNED/ALREADY_USED/NOT_FOUND/EXPIRED`. EDIT KHÔNG sửa attachments V1 (chỉ sửa content). Error codes mới: `FILE_TOO_LARGE` (413), `FILE_TYPE_NOT_ALLOWED` (415), `FILE_EMPTY` (400), `MIME_MISMATCH` (415), `STORAGE_FAILED` (500), và 7 MSG_* codes ở trên. Soft-delete message strip cả `content=null` + `attachments=[]` (W5-D3 mở rộng cho W6). ADR-019 quyết local disk + StorageService interface, migration V7 thêm `files` + `message_attachments`. |
 | 2026-04-20 | v0.6.2-messages-after-param | **W5-D4**: GET /api/conversations/{convId}/messages thêm `after` param (forward pagination, ORDER ASC, include deleted). `cursor` và `after` mutually exclusive (400 nếu dùng cùng nhau). `ReplyPreviewDto` thêm field `deletedAt` (null nếu source chưa bị xóa, ISO8601 nếu đã bị xóa) và `contentPreview` = null khi source deleted. STOMP `SendMessagePayload` thêm `replyToMessageId` (nullable UUID) với validation: source phải thuộc cùng conversation, quoting deleted source allowed. |

@@ -48,10 +48,33 @@ public class Conversation {
     private String name;
 
     /**
-     * Avatar nhóm — NULL cho 1-1 chat.
+     * Avatar nhóm (legacy TEXT column từ V3) — NULL cho 1-1 chat.
+     * W7+: source of truth là avatar_file_id (xem bên dưới). Trường này giữ cho backward-compat
+     * nhưng không còn ghi khi tạo group — response avatar compute từ file_id.
      */
     @Column(name = "avatar_url", columnDefinition = "TEXT")
     private String avatarUrl;
+
+    /**
+     * FK tới files(id) cho group avatar (W7-D1, ADR-020). NULL cho ONE_ON_ONE và group chưa có avatar.
+     * ON DELETE SET NULL: file bị xoá → avatar reset.
+     */
+    @Column(name = "avatar_file_id")
+    private UUID avatarFileId;
+
+    /**
+     * OWNER của GROUP (W7-D1). NULL cho ONE_ON_ONE và khi OWNER bị xoá account (ON DELETE SET NULL).
+     */
+    @Column(name = "owner_id")
+    private UUID ownerId;
+
+    /**
+     * Soft-delete timestamp (W7-D1). NULL = active.
+     * Chỉ OWNER mới có thể soft-delete GROUP qua DELETE /api/conversations/{id}.
+     * Tất cả endpoint list/read PHẢI filter deleted_at IS NULL.
+     */
+    @Column(name = "deleted_at")
+    private OffsetDateTime deletedAt;
 
     /**
      * User tạo conversation. ON DELETE SET NULL nên có thể null nếu user bị xóa.
@@ -113,5 +136,19 @@ public class Conversation {
         if (this.lastMessageAt == null || messageTime.isAfter(this.lastMessageAt)) {
             this.lastMessageAt = messageTime;
         }
+    }
+
+    /**
+     * Soft-delete group. Chỉ set deletedAt, không xoá row. Caller (ConversationService)
+     * vẫn cần hard-delete rows conversation_members và detach avatar.
+     */
+    public void markDeleted() {
+        if (this.deletedAt == null) {
+            this.deletedAt = OffsetDateTime.now();
+        }
+    }
+
+    public boolean isDeleted() {
+        return this.deletedAt != null;
     }
 }

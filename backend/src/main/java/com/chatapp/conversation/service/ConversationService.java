@@ -5,14 +5,19 @@ import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.entity.ConversationMember;
 import com.chatapp.conversation.enums.ConversationType;
 import com.chatapp.conversation.enums.MemberRole;
+import com.chatapp.conversation.event.ConversationUpdatedEvent;
+import com.chatapp.conversation.event.GroupDeletedEvent;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
+import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -20,6 +25,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -32,8 +40,14 @@ public class ConversationService {
     private final ConversationRepository conversationRepository;
     private final ConversationMemberRepository memberRepository;
     private final UserRepository userRepository;
+    private final FileRecordRepository fileRecordRepository;
     private final EntityManager entityManager;
     private final StringRedisTemplate redisTemplate;
+    private final ApplicationEventPublisher eventPublisher;
+
+    private static final Set<String> IMAGE_MIMES = Set.of(
+            "image/jpeg", "image/png", "image/webp", "image/gif"
+    );
 
 
     // =========================================================================
@@ -75,27 +89,37 @@ public class ConversationService {
     }
 
     private ConversationDto createOneOnOne(User currentUser, CreateConversationRequest req) {
-        // Validate: phải đúng 1 member
-        if (req.memberIds() == null || req.memberIds().size() != 1) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
-                    "ONE_ON_ONE phải có đúng 1 memberIds",
-                    Map.of("fields", Map.of("memberIds", "ONE_ON_ONE phải có đúng 1 thành viên")));
+        // W7 backward-compat: accept targetUserId (new) hoặc memberIds[0] (legacy V3-V6).
+        UUID targetUserId = req.targetUserId();
+        if (targetUserId == null) {
+            if (req.memberIds() == null || req.memberIds().size() != 1) {
+                throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                        "ONE_ON_ONE yêu cầu targetUserId (mới) hoặc memberIds=[uuid] (deprecated)",
+                        Map.of("fields", Map.of("targetUserId", "ONE_ON_ONE phải có targetUserId")));
+            }
+            targetUserId = req.memberIds().get(0);
         }
 
-        UUID targetUserId = req.memberIds().get(0);
+        // W7: name không được set cho ONE_ON_ONE
+        if (req.name() != null) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "ONE_ON_ONE không được có name",
+                    Map.of("fields", Map.of("name", "ONE_ON_ONE không có tên")));
+        }
 
         // Validate: không được chat với chính mình
         if (currentUser.getId().equals(targetUserId)) {
             throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
                     "Không thể tạo conversation với chính mình",
-                    Map.of("fields", Map.of("memberIds", "memberIds không được chứa ID của chính bạn")));
+                    Map.of("fields", Map.of("targetUserId", "targetUserId không được là chính bạn")));
         }
 
         // Validate: target user tồn tại
+        final UUID finalTargetUserId = targetUserId;
         User targetUser = userRepository.findById(targetUserId)
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_MEMBER_NOT_FOUND",
                         "Người dùng không tồn tại",
-                        Map.of("missingIds", List.of(targetUserId))));
+                        Map.of("missingIds", List.of(finalTargetUserId))));
 
         // Check existing ONE_ON_ONE (native query returns String to handle H2/PG UUID differences)
         Optional<String> existing = conversationRepository.findExistingOneOnOne(
@@ -106,7 +130,7 @@ public class ConversationService {
                     Map.of("conversationId", existing.get()));
         }
 
-        // Tạo conversation mới
+        // Tạo conversation mới (ONE_ON_ONE — KHÔNG set name/owner_id để pass CHECK constraint)
         Conversation conversation = Conversation.builder()
                 .type(ConversationType.ONE_ON_ONE)
                 .createdBy(currentUser)
@@ -132,14 +156,21 @@ public class ConversationService {
         entityManager.clear();
         Conversation saved = conversationRepository.findByIdWithMembers(conversation.getId())
                 .orElseThrow();
-        return ConversationDto.from(saved);
+        return ConversationDto.from(saved, this::resolveUser);
     }
 
     private ConversationDto createGroup(User currentUser, CreateConversationRequest req) {
-        // Validate: name required 1-100 chars
+        // Validate: targetUserId KHÔNG được set cho GROUP
+        if (req.targetUserId() != null) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "GROUP không dùng targetUserId — dùng memberIds",
+                    Map.of("fields", Map.of("targetUserId", "GROUP dùng memberIds")));
+        }
+
+        // Validate: name required 1-100 chars sau trim
         String name = req.name();
         if (name == null || name.isBlank()) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+            throw new AppException(HttpStatus.BAD_REQUEST, "GROUP_NAME_REQUIRED",
                     "Tên nhóm là bắt buộc cho GROUP",
                     Map.of("fields", Map.of("name", "Tên nhóm không được để trống")));
         }
@@ -152,7 +183,7 @@ public class ConversationService {
 
         // Validate: memberIds not null
         if (req.memberIds() == null) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+            throw new AppException(HttpStatus.BAD_REQUEST, "GROUP_MEMBERS_MIN",
                     "GROUP phải có ít nhất 2 memberIds",
                     Map.of("fields", Map.of("memberIds", "GROUP cần ít nhất 2 thành viên (không tính bạn)")));
         }
@@ -169,15 +200,15 @@ public class ConversationService {
 
         // Validate: >= 2 unique other members
         if (uniqueMemberIds.size() < 2) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
-                    "GROUP phải có ít nhất 2 memberIds",
+            throw new AppException(HttpStatus.BAD_REQUEST, "GROUP_MEMBERS_MIN",
+                    "GROUP phải có ít nhất 2 memberIds unique",
                     Map.of("fields", Map.of("memberIds", "GROUP cần ít nhất 2 thành viên (không tính bạn)")));
         }
 
         // Validate: max 49 other members (total = 50 including caller)
         if (uniqueMemberIds.size() > 49) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
-                    "Group cannot have more than 50 members",
+            throw new AppException(HttpStatus.BAD_REQUEST, "GROUP_MEMBERS_MAX",
+                    "Nhóm không được có quá 50 thành viên",
                     Map.of("fields", Map.of("memberIds", "Nhóm không được có quá 50 thành viên (bao gồm bạn)")));
         }
 
@@ -191,18 +222,32 @@ public class ConversationService {
             );
         }
         if (!missingIds.isEmpty()) {
-            throw new AppException(HttpStatus.NOT_FOUND, "CONV_MEMBER_NOT_FOUND",
+            throw new AppException(HttpStatus.NOT_FOUND, "GROUP_MEMBER_NOT_FOUND",
                     "Một hoặc nhiều memberIds không tồn tại",
                     Map.of("missingIds", missingIds));
+        }
+
+        // Validate avatar (optional) — trước khi persist conversation
+        FileRecord avatarFile = null;
+        if (req.avatarFileId() != null) {
+            avatarFile = validateGroupAvatar(req.avatarFileId(), currentUser.getId());
         }
 
         // Tạo conversation
         Conversation conversation = Conversation.builder()
                 .type(ConversationType.GROUP)
                 .name(name)
+                .ownerId(currentUser.getId())
+                .avatarFileId(avatarFile != null ? avatarFile.getId() : null)
                 .createdBy(currentUser)
                 .build();
         conversation = conversationRepository.save(conversation);
+
+        // Attach avatar file (mark attached_at để tránh orphan cleanup)
+        if (avatarFile != null) {
+            avatarFile.markAttached();
+            fileRecordRepository.save(avatarFile);
+        }
 
         // Tạo members: currentUser = OWNER
         ConversationMember ownerMember = ConversationMember.builder()
@@ -226,7 +271,7 @@ public class ConversationService {
         entityManager.clear();
         Conversation saved = conversationRepository.findByIdWithMembers(conversation.getId())
                 .orElseThrow();
-        return ConversationDto.from(saved);
+        return ConversationDto.from(saved, this::resolveUser);
     }
 
     // =========================================================================
@@ -361,11 +406,174 @@ public class ConversationService {
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
                         "Conversation không tồn tại hoặc bạn không phải thành viên"));
 
-        Conversation conversation = conversationRepository.findByIdWithMembers(conversationId)
+        // Filter soft-deleted — trả 404 nếu group đã delete (anti-enumeration)
+        Conversation conversation = conversationRepository.findActiveByIdWithMembers(conversationId)
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
                         "Conversation không tồn tại"));
 
-        return ConversationDto.from(conversation);
+        return ConversationDto.from(conversation, this::resolveUser);
+    }
+
+    // =========================================================================
+    // W7-D1: updateGroupInfo — PATCH /api/conversations/{id}
+    // =========================================================================
+
+    @Transactional
+    public ConversationDto updateGroupInfo(UUID currentUserId, UUID conversationId, UpdateGroupRequest req) {
+        // Validate: phải có ít nhất 1 field
+        if (req.isEmpty()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "Cần ít nhất 1 field (name hoặc avatarFileId)",
+                    Map.of("fields", Map.of("_", "Body không được rỗng")));
+        }
+
+        // Load membership — anti-enumeration (404 cho non-member hoặc conv không tồn tại)
+        ConversationMember member = memberRepository
+                .findByConversation_IdAndUser_Id(conversationId, currentUserId)
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
+                        "Conversation không tồn tại hoặc bạn không phải thành viên"));
+
+        // Load active conversation (filter soft-deleted)
+        Conversation conv = conversationRepository.findActiveById(conversationId)
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
+                        "Conversation không tồn tại"));
+
+        // Shape check: PATCH chỉ cho GROUP
+        if (!conv.isGroup()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "NOT_GROUP",
+                    "PATCH chỉ áp dụng cho GROUP conversation");
+        }
+
+        // Authorization: OWNER hoặc ADMIN mới được rename/đổi avatar
+        if (!member.getRole().canRename()) {
+            throw new AppException(HttpStatus.FORBIDDEN, "INSUFFICIENT_PERMISSION",
+                    "Chỉ OWNER hoặc ADMIN mới được sửa thông tin nhóm");
+        }
+
+        // Build changes map + apply updates
+        Map<String, Object> changes = new LinkedHashMap<>();
+
+        if (req.hasName()) {
+            String newName = req.getName();
+            if (newName == null || newName.isBlank()) {
+                throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                        "Tên nhóm không được rỗng",
+                        Map.of("fields", Map.of("name", "name không được để trống")));
+            }
+            String trimmed = newName.trim();
+            if (trimmed.length() > 100) {
+                throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                        "Tên nhóm quá dài",
+                        Map.of("fields", Map.of("name", "Tên nhóm tối đa 100 ký tự")));
+            }
+            if (!trimmed.equals(conv.getName())) {
+                conv.setName(trimmed);
+                changes.put("name", trimmed);
+            }
+        }
+
+        if (req.hasAvatarFileId()) {
+            if (req.isRemoveAvatar()) {
+                // Remove avatar — không xoá FileRecord, chỉ detach
+                if (conv.getAvatarFileId() != null) {
+                    conv.setAvatarFileId(null);
+                    changes.put("avatarUrl", null);
+                }
+            } else {
+                UUID newAvatarId = req.getAvatarFileId();
+                if (newAvatarId == null) {
+                    throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                            "avatarFileId không hợp lệ",
+                            Map.of("fields", Map.of("avatarFileId", "UUID không hợp lệ")));
+                }
+                FileRecord avatarFile = validateGroupAvatar(newAvatarId, currentUserId);
+                avatarFile.markAttached();
+                fileRecordRepository.save(avatarFile);
+
+                conv.setAvatarFileId(newAvatarId);
+                changes.put("avatarUrl", "/api/files/" + newAvatarId);
+            }
+        }
+
+        if (changes.isEmpty()) {
+            // Field có mặt nhưng giá trị trùng cũ — trả response hiện tại, không broadcast
+            entityManager.flush();
+            entityManager.clear();
+            Conversation reloaded = conversationRepository.findActiveByIdWithMembers(conversationId)
+                    .orElseThrow();
+            return ConversationDto.from(reloaded, this::resolveUser);
+        }
+
+        conversationRepository.save(conv);
+
+        // Publish event — broadcaster fire AFTER_COMMIT qua /topic/conv.{id}
+        User actor = userRepository.findById(currentUserId).orElse(null);
+        String actorFullName = actor != null ? actor.getFullName() : "Unknown";
+        eventPublisher.publishEvent(new ConversationUpdatedEvent(
+                conversationId,
+                changes,
+                currentUserId,
+                actorFullName,
+                Instant.now()
+        ));
+
+        entityManager.flush();
+        entityManager.clear();
+        Conversation reloaded = conversationRepository.findActiveByIdWithMembers(conversationId)
+                .orElseThrow();
+        return ConversationDto.from(reloaded, this::resolveUser);
+    }
+
+    // =========================================================================
+    // W7-D1: deleteGroup — DELETE /api/conversations/{id}
+    // =========================================================================
+
+    @Transactional
+    public void deleteGroup(UUID currentUserId, UUID conversationId) {
+        // Anti-enumeration: 404 cho non-member
+        ConversationMember member = memberRepository
+                .findByConversation_IdAndUser_Id(conversationId, currentUserId)
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
+                        "Conversation không tồn tại hoặc bạn không phải thành viên"));
+
+        Conversation conv = conversationRepository.findActiveById(conversationId)
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
+                        "Conversation không tồn tại"));
+
+        if (!conv.isGroup()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "NOT_GROUP",
+                    "DELETE chỉ áp dụng cho GROUP conversation");
+        }
+
+        // Authorization: chỉ OWNER
+        if (!member.getRole().canDeleteGroup()) {
+            throw new AppException(HttpStatus.FORBIDDEN, "INSUFFICIENT_PERMISSION",
+                    "Chỉ OWNER mới được xoá nhóm");
+        }
+
+        // Side effect ordering theo contract:
+        // 1) Set deleted_at
+        // 2) Detach avatar (conversations.avatar_file_id = NULL)
+        // 3) Hard-delete conversation_members
+        // 4) Publish event — broadcaster fire AFTER_COMMIT (members đã hard-deleted
+        //    nhưng subscription active vẫn nhận frame cuối).
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        conv.setDeletedAt(now);
+        conv.setAvatarFileId(null); // detach avatar
+        conversationRepository.save(conv);
+
+        // Hard-delete all members
+        memberRepository.deleteByConversation_Id(conversationId);
+
+        // Publish event
+        User actor = userRepository.findById(currentUserId).orElse(null);
+        String actorFullName = actor != null ? actor.getFullName() : "Unknown";
+        eventPublisher.publishEvent(new GroupDeletedEvent(
+                conversationId,
+                currentUserId,
+                actorFullName,
+                now.toInstant()
+        ));
     }
 
     // =========================================================================
@@ -409,5 +617,53 @@ public class ConversationService {
                 .toList();
     }
 
-    
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
+
+    /**
+     * Validate avatar file cho GROUP (dùng chung giữa createGroup và updateGroupInfo).
+     * Rule:
+     *  - File tồn tại (else GROUP_AVATAR_NOT_OWNED — merge anti-enum với "not owned").
+     *  - File.uploader_id == callerId (else GROUP_AVATAR_NOT_OWNED).
+     *  - File MIME trong whitelist image/jpeg|png|webp|gif (else GROUP_AVATAR_NOT_IMAGE).
+     *  - File chưa expired.
+     *
+     * @return FileRecord entity đã được verify (caller có thể set attached_at sau).
+     */
+    private FileRecord validateGroupAvatar(UUID avatarFileId, UUID callerId) {
+        FileRecord file = fileRecordRepository.findById(avatarFileId)
+                .orElseThrow(() -> new AppException(HttpStatus.FORBIDDEN, "GROUP_AVATAR_NOT_OWNED",
+                        "File avatar không tồn tại hoặc bạn không có quyền sử dụng"));
+
+        // Anti-enum: trả cùng code cho "not owned" và "not found"
+        if (!callerId.equals(file.getUploaderId())) {
+            throw new AppException(HttpStatus.FORBIDDEN, "GROUP_AVATAR_NOT_OWNED",
+                    "File avatar không tồn tại hoặc bạn không có quyền sử dụng");
+        }
+
+        if (file.isExpired()) {
+            throw new AppException(HttpStatus.FORBIDDEN, "GROUP_AVATAR_NOT_OWNED",
+                    "File avatar đã hết hạn hoặc không có quyền sử dụng");
+        }
+
+        String mime = file.getMime();
+        if (mime == null || !IMAGE_MIMES.contains(mime.toLowerCase())) {
+            throw new AppException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "GROUP_AVATAR_NOT_IMAGE",
+                    "Avatar phải là ảnh (jpeg/png/webp/gif)",
+                    Map.of("actualMime", mime != null ? mime : "unknown"));
+        }
+
+        return file;
+    }
+
+    /**
+     * Resolve User entity cho ownerResolver của ConversationDto.from.
+     * Trả null nếu không tìm thấy (V1 edge case khi OWNER bị xoá — owner_id = NULL sau cascade).
+     */
+    private User resolveUser(UUID userId) {
+        if (userId == null) return null;
+        return userRepository.findById(userId).orElse(null);
+    }
+
 }
