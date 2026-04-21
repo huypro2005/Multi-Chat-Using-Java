@@ -53,6 +53,7 @@ class MessageBroadcasterTest {
                 sender,
                 MessageType.TEXT,
                 "Hello",
+                java.util.Collections.emptyList(),   // attachments (W6-D1)
                 null,
                 null,
                 OffsetDateTime.now(ZoneOffset.UTC),

@@ -116,6 +116,13 @@
             <version>2.9.1</version>
         </dependency>
 
+        <!-- ===== Thumbnailator — image thumbnail generation (W6-D2) ===== -->
+        <dependency>
+            <groupId>net.coobird</groupId>
+            <artifactId>thumbnailator</artifactId>
+            <version>0.4.20</version>
+        </dependency>
+
         <!-- ===== Testing ===== -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

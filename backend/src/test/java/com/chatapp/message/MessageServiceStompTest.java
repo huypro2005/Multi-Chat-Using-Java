@@ -4,6 +4,8 @@ import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
+import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.entity.MessageAttachment;
 import com.chatapp.message.dto.AckPayload;
 import com.chatapp.message.dto.MessageDto;
 import com.chatapp.message.dto.SendMessagePayload;
@@ -35,6 +37,9 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -72,6 +77,8 @@ class MessageServiceStompTest {
     @Mock private MessageMapper messageMapper;
     @Mock private ApplicationEventPublisher eventPublisher;
     @Mock private SimpMessagingTemplate messagingTemplate;
+    @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
+    @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
 
     private MessageService messageService;
 
@@ -86,7 +93,8 @@ class MessageServiceStompTest {
     void setUp() {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
-                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate
+                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
+                fileRecordRepository, messageAttachmentRepository
         );
 
         userId = UUID.randomUUID();
@@ -117,7 +125,8 @@ class MessageServiceStompTest {
         SenderDto senderDto = new SenderDto(userId, "testuser", "Test User", null);
         mockDto = new MessageDto(
                 savedMsgId, convId, senderDto, MessageType.TEXT,
-                "Hello", null, null, OffsetDateTime.now(ZoneOffset.UTC),
+                "Hello", java.util.Collections.emptyList(),
+                null, null, OffsetDateTime.now(ZoneOffset.UTC),
                 null, null
         );
 
@@ -130,7 +139,7 @@ class MessageServiceStompTest {
     // =========================================================================
 
     private SendMessagePayload validPayload(String tempId) {
-        return new SendMessagePayload(tempId, "Hello", "TEXT", null);
+        return new SendMessagePayload(tempId, "Hello", "TEXT", null, null);
     }
 
     // =========================================================================
@@ -195,7 +204,7 @@ class MessageServiceStompTest {
     void sendViaStomp_contentTooLong_throwsMsgContentTooLong() {
         String tempId = UUID.randomUUID().toString();
         String longContent = "A".repeat(5001);
-        SendMessagePayload payload = new SendMessagePayload(tempId, longContent, "TEXT", null);
+        SendMessagePayload payload = new SendMessagePayload(tempId, longContent, "TEXT", null, null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -211,14 +220,15 @@ class MessageServiceStompTest {
     // =========================================================================
 
     @Test
-    void sendViaStomp_blankContent_throwsValidationFailed() {
+    void sendViaStomp_blankContentNoAttachments_throwsMsgNoContent() {
+        // W6-D1: blank content without attachments → MSG_NO_CONTENT (was VALIDATION_FAILED pre-W6).
         String tempId = UUID.randomUUID().toString();
-        SendMessagePayload payload = new SendMessagePayload(tempId, "   ", "TEXT", null);
+        SendMessagePayload payload = new SendMessagePayload(tempId, "   ", "TEXT", null, null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
 
-        assertEquals("VALIDATION_FAILED", ex.getErrorCode());
+        assertEquals("MSG_NO_CONTENT", ex.getErrorCode());
         assertThat(ex.getDetails()).isInstanceOfSatisfying(java.util.Map.class,
                 map -> assertThat(map.get("tempId")).isEqualTo(tempId));
     }
@@ -229,7 +239,7 @@ class MessageServiceStompTest {
 
     @Test
     void sendViaStomp_invalidTempId_throwsValidationFailed() {
-        SendMessagePayload payload = new SendMessagePayload("not-a-uuid", "Hello", "TEXT", null);
+        SendMessagePayload payload = new SendMessagePayload("not-a-uuid", "Hello", "TEXT", null, null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -358,7 +368,7 @@ class MessageServiceStompTest {
 
     @Test
     void sendViaStomp_nullTempId_throwsValidationFailedWithUnknown() {
-        SendMessagePayload payload = new SendMessagePayload(null, "Hello", "TEXT", null);
+        SendMessagePayload payload = new SendMessagePayload(null, "Hello", "TEXT", null, null);
 
         AppException ex = assertThrows(AppException.class,
                 () -> messageService.sendViaStomp(convId, userId, payload));
@@ -367,5 +377,255 @@ class MessageServiceStompTest {
         // echoed tempId should be "unknown" when null
         assertThat(ex.getDetails()).isInstanceOfSatisfying(java.util.Map.class,
                 map -> assertThat(map.get("tempId")).isEqualTo("unknown"));
+    }
+
+    // =========================================================================
+    // W6-D2: Attachment tests (VIỆC 3)
+    // =========================================================================
+
+    /**
+     * Helper — setup mocks cho happy-path persist (member, rate-limit, dedup, save).
+     * Caller chỉ cần stub thêm phần fileRecordRepository.findAllById hoặc mock attachments.
+     */
+    private void stubHappyPathPersist() {
+        when(memberRepository.existsByConversation_IdAndUser_Id(convId, userId)).thenReturn(true);
+        when(valueOps.increment(startsWith("rate:msg:"))).thenReturn(1L);
+        when(redisTemplate.expire(anyString(), anyLong(), any())).thenReturn(true);
+        when(valueOps.setIfAbsent(anyString(), eq("PENDING"), any(Duration.class))).thenReturn(true);
+        when(userRepository.getReferenceById(userId)).thenReturn(mockUser);
+        when(conversationRepository.getReferenceById(convId)).thenReturn(mockConv);
+        when(messageRepository.save(any(Message.class))).thenReturn(mockSavedMessage);
+        when(conversationRepository.findById(convId)).thenReturn(Optional.of(mockConv));
+        when(messageRepository.findById(any(UUID.class))).thenReturn(Optional.of(mockSavedMessage));
+        when(messageMapper.toDto(mockSavedMessage)).thenReturn(mockDto);
+    }
+
+    private FileRecord mockFile(UUID id, String mime, UUID uploaderId) {
+        return FileRecord.builder()
+                .id(id)
+                .uploaderId(uploaderId)
+                .originalName("file." + (mime.equals("application/pdf") ? "pdf" : "jpg"))
+                .mime(mime)
+                .sizeBytes(1024L)
+                .storagePath("2026/04/" + id + ".bin")
+                .createdAt(OffsetDateTime.now(ZoneOffset.UTC))
+                .expiresAt(OffsetDateTime.now(ZoneOffset.UTC).plusDays(30))
+                .expired(false)
+                .build();
+    }
+
+    // W6-T01: SEND với 1 image attachment → save thành công
+    @Test
+    void sendViaStomp_withSingleImageAttachment_persistsAttachment() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        FileRecord img = mockFile(fileId, "image/jpeg", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(img));
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(img));
+        when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, "check this out", "TEXT",
+                null, List.of(fileId));
+
+        assertDoesNotThrow(() -> messageService.sendViaStomp(convId, userId, payload));
+
+        verify(messageAttachmentRepository).save(any(MessageAttachment.class));
+        verify(fileRecordRepository, atLeastOnce()).save(img);  // markAttached
+    }
+
+    // W6-T02: SEND với 5 images → OK
+    @Test
+    void sendViaStomp_with5Images_ok() {
+        String tempId = UUID.randomUUID().toString();
+        List<UUID> ids = Arrays.asList(UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        List<FileRecord> files = ids.stream()
+                .map(id -> mockFile(id, "image/png", userId))
+                .toList();
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(ids)).thenReturn(files);
+        // For deriveMessageType — first file lookup
+        when(fileRecordRepository.findById(ids.get(0))).thenReturn(Optional.of(files.get(0)));
+        for (UUID fileId : ids) {
+            when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(false);
+        }
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, ids);
+
+        assertDoesNotThrow(() -> messageService.sendViaStomp(convId, userId, payload));
+
+        verify(messageAttachmentRepository, times(5)).save(any(MessageAttachment.class));
+    }
+
+    // W6-T03: 6 images → MSG_ATTACHMENTS_TOO_MANY
+    @Test
+    void sendViaStomp_with6Images_rejectedTooMany() {
+        String tempId = UUID.randomUUID().toString();
+        List<UUID> ids = Arrays.asList(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+
+        when(memberRepository.existsByConversation_IdAndUser_Id(convId, userId)).thenReturn(true);
+        when(valueOps.increment(startsWith("rate:msg:"))).thenReturn(1L);
+        when(redisTemplate.expire(anyString(), anyLong(), any())).thenReturn(true);
+        when(valueOps.setIfAbsent(anyString(), eq("PENDING"), any(Duration.class))).thenReturn(true);
+        when(userRepository.getReferenceById(userId)).thenReturn(mockUser);
+        when(conversationRepository.getReferenceById(convId)).thenReturn(mockConv);
+        when(messageRepository.save(any(Message.class))).thenReturn(mockSavedMessage);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, ids);
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENTS_TOO_MANY", ex.getErrorCode());
+    }
+
+    // W6-T04: 1 PDF → OK
+    @Test
+    void sendViaStomp_with1Pdf_ok() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        FileRecord pdf = mockFile(fileId, "application/pdf", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(pdf));
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(pdf));
+        when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, "see doc", "TEXT",
+                null, List.of(fileId));
+
+        assertDoesNotThrow(() -> messageService.sendViaStomp(convId, userId, payload));
+
+        verify(messageAttachmentRepository).save(any(MessageAttachment.class));
+    }
+
+    // W6-T05: 2 PDFs → MSG_ATTACHMENTS_MIXED (count OK ≤5 nhưng rule group reject)
+    @Test
+    void sendViaStomp_with2Pdfs_rejectedMixed() {
+        String tempId = UUID.randomUUID().toString();
+        UUID id1 = UUID.randomUUID(), id2 = UUID.randomUUID();
+        FileRecord pdf1 = mockFile(id1, "application/pdf", userId);
+        FileRecord pdf2 = mockFile(id2, "application/pdf", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(id1, id2))).thenReturn(List.of(pdf1, pdf2));
+        when(fileRecordRepository.findById(id1)).thenReturn(Optional.of(pdf1));
+        when(messageAttachmentRepository.existsByIdFileId(any())).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, "docs", "TEXT",
+                null, List.of(id1, id2));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENTS_MIXED", ex.getErrorCode());
+    }
+
+    // W6-T06: 1 PDF + 1 image → MSG_ATTACHMENTS_MIXED
+    @Test
+    void sendViaStomp_pdfPlusImage_rejectedMixed() {
+        String tempId = UUID.randomUUID().toString();
+        UUID pdfId = UUID.randomUUID(), imgId = UUID.randomUUID();
+        FileRecord pdf = mockFile(pdfId, "application/pdf", userId);
+        FileRecord img = mockFile(imgId, "image/jpeg", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(pdfId, imgId))).thenReturn(List.of(pdf, img));
+        when(fileRecordRepository.findById(pdfId)).thenReturn(Optional.of(pdf));
+        when(messageAttachmentRepository.existsByIdFileId(any())).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT",
+                null, List.of(pdfId, imgId));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENTS_MIXED", ex.getErrorCode());
+    }
+
+    // W6-T07: attach file của user khác → MSG_ATTACHMENT_NOT_OWNED
+    @Test
+    void sendViaStomp_attachOtherUsersFile_rejected() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        UUID otherUserId = UUID.randomUUID();
+        FileRecord img = mockFile(fileId, "image/jpeg", otherUserId); // uploaded by someone else
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(img));
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(img));
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, List.of(fileId));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENT_NOT_OWNED", ex.getErrorCode());
+    }
+
+    // W6-T08: attach file đã dùng trong message khác → MSG_ATTACHMENT_ALREADY_USED
+    @Test
+    void sendViaStomp_attachAlreadyUsedFile_rejected() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        FileRecord img = mockFile(fileId, "image/jpeg", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(img));
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(img));
+        // File đã được dùng trong message khác
+        when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(true);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, List.of(fileId));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENT_ALREADY_USED", ex.getErrorCode());
+    }
+
+    // W6-T09: empty content + no attachments → MSG_NO_CONTENT
+    @Test
+    void sendViaStomp_emptyContentNoAttachments_rejectedNoContent() {
+        String tempId = UUID.randomUUID().toString();
+        SendMessagePayload payload = new SendMessagePayload(tempId, "", "TEXT", null, null);
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_NO_CONTENT", ex.getErrorCode());
+    }
+
+    // W6-T10: null content + 1 image → OK (caption optional)
+    @Test
+    void sendViaStomp_nullContentWithImage_ok() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+        FileRecord img = mockFile(fileId, "image/webp", userId);
+
+        stubHappyPathPersist();
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(List.of(img));
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.of(img));
+        when(messageAttachmentRepository.existsByIdFileId(fileId)).thenReturn(false);
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, List.of(fileId));
+
+        assertDoesNotThrow(() -> messageService.sendViaStomp(convId, userId, payload));
+    }
+
+    // W6-T11: attach non-existent fileId → MSG_ATTACHMENT_NOT_FOUND
+    @Test
+    void sendViaStomp_attachNonExistentFile_rejected() {
+        String tempId = UUID.randomUUID().toString();
+        UUID fileId = UUID.randomUUID();
+
+        stubHappyPathPersist();
+        // findAllById returns empty (file doesn't exist)
+        when(fileRecordRepository.findAllById(List.of(fileId))).thenReturn(Collections.emptyList());
+        when(fileRecordRepository.findById(fileId)).thenReturn(Optional.empty());
+
+        SendMessagePayload payload = new SendMessagePayload(tempId, null, "TEXT", null, List.of(fileId));
+
+        AppException ex = assertThrows(AppException.class,
+                () -> messageService.sendViaStomp(convId, userId, payload));
+        assertEquals("MSG_ATTACHMENT_NOT_FOUND", ex.getErrorCode());
     }
 }

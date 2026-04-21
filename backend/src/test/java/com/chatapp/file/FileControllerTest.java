@@ -1,5 +1,20 @@
 package com.chatapp.file;
 
+import com.chatapp.conversation.entity.Conversation;
+import com.chatapp.conversation.entity.ConversationMember;
+import com.chatapp.conversation.enums.ConversationType;
+import com.chatapp.conversation.enums.MemberRole;
+import com.chatapp.conversation.repository.ConversationMemberRepository;
+import com.chatapp.conversation.repository.ConversationRepository;
+import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.entity.MessageAttachment;
+import com.chatapp.file.entity.MessageAttachmentId;
+import com.chatapp.file.repository.FileRecordRepository;
+import com.chatapp.file.repository.MessageAttachmentRepository;
+import com.chatapp.message.entity.Message;
+import com.chatapp.message.enums.MessageType;
+import com.chatapp.message.repository.MessageRepository;
+import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +34,11 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +87,21 @@ class FileControllerTest {
     @Autowired
     private UserAuthProviderRepository userAuthProviderRepository;
 
+    @Autowired
+    private FileRecordRepository fileRecordRepository;
+
+    @Autowired
+    private MessageAttachmentRepository messageAttachmentRepository;
+
+    @Autowired
+    private MessageRepository messageRepository;
+
+    @Autowired
+    private ConversationRepository conversationRepository;
+
+    @Autowired
+    private ConversationMemberRepository conversationMemberRepository;
+
     @MockBean
     private StringRedisTemplate redisTemplate;
 
@@ -79,7 +114,11 @@ class FileControllerTest {
     @SuppressWarnings("unchecked")
     private ValueOperations<String, String> valueOps;
 
-    // JPEG magic bytes: FF D8 FF E0 + JFIF
+    // Valid 10x10 JPEG bytes — generated via ImageIO so Thumbnailator có thể đọc.
+    // Dùng cho các test cần trigger thumbnail generation thực sự.
+    private static final byte[] JPEG_REAL = realJpegBytes(10, 10);
+
+    // JPEG magic bytes only — dùng cho test nơi chỉ cần Tika detect (fail-open thumbnail OK)
     private static final byte[] JPEG_MAGIC = new byte[]{
             (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0,
             0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01,
@@ -89,9 +128,30 @@ class FileControllerTest {
     // PDF magic bytes
     private static final byte[] PDF_MAGIC = "%PDF-1.4\n%âãÏÓ\n".getBytes();
 
+    private static byte[] realJpegBytes(int w, int h) {
+        try {
+            BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            for (int x = 0; x < w; x++) {
+                for (int y = 0; y < h; y++) {
+                    img.setRGB(x, y, 0xAA5533);
+                }
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(img, "jpg", baos);
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Không generate được JPEG test bytes", e);
+        }
+    }
+
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
+        messageAttachmentRepository.deleteAll();
+        messageRepository.deleteAll();
+        conversationMemberRepository.deleteAll();
+        conversationRepository.deleteAll();
+        fileRecordRepository.deleteAll();
         userAuthProviderRepository.deleteAll();
         userRepository.deleteAll();
 
@@ -138,7 +198,7 @@ class FileControllerTest {
         String token = registerAndGetToken("f01_upload@test.com", "f01upload");
 
         MockMultipartFile file = new MockMultipartFile(
-                "file", "photo.jpg", "image/jpeg", JPEG_MAGIC);
+                "file", "photo.jpg", "image/jpeg", JPEG_REAL);
 
         MvcResult result = mockMvc.perform(multipart("/api/files/upload")
                         .file(file)
@@ -147,7 +207,7 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.id").isNotEmpty())
                 .andExpect(jsonPath("$.mime").value("image/jpeg"))
                 .andExpect(jsonPath("$.name").value("photo.jpg"))
-                .andExpect(jsonPath("$.size").value(JPEG_MAGIC.length))
+                .andExpect(jsonPath("$.size").value(JPEG_REAL.length))
                 .andExpect(jsonPath("$.url").isNotEmpty())
                 .andExpect(jsonPath("$.thumbUrl").isNotEmpty())
                 .andExpect(jsonPath("$.expiresAt").isNotEmpty())
@@ -284,7 +344,7 @@ class FileControllerTest {
 
         // Upload first
         MockMultipartFile file = new MockMultipartFile(
-                "file", "photo.jpg", "image/jpeg", JPEG_MAGIC);
+                "file", "photo.jpg", "image/jpeg", JPEG_REAL);
         MvcResult uploadResult = mockMvc.perform(multipart("/api/files/upload")
                         .file(file)
                         .header("Authorization", "Bearer " + token))
@@ -341,6 +401,238 @@ class FileControllerTest {
         // B tries to download A's file → 404 (anti-enumeration: không leak 403)
         mockMvc.perform(get("/api/files/{id}", fileId)
                         .header("Authorization", "Bearer " + tokenB))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    // =========================================================================
+    // W6-D2 — VIỆC 1: Thumbnail generation + GET /thumb
+    // =========================================================================
+
+    /**
+     * F11 (W6-D2): Upload JPEG → thumbnail_internal_path được set trong DB.
+     */
+    @Test
+    void upload_jpeg_generatesThumbnailPathInDb() throws Exception {
+        String token = registerAndGetToken("f11_thumb@test.com", "f11thumb");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "photo.jpg", "image/jpeg", JPEG_REAL);
+        MvcResult result = mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                result.getResponse().getContentAsString()).get("id").asText();
+
+        FileRecord record = fileRecordRepository.findById(UUID.fromString(fileId)).orElseThrow();
+        assertNotNull(record.getThumbnailInternalPath(),
+                "thumbnailInternalPath phải non-null sau upload JPEG thành công");
+        assertTrue(record.getThumbnailInternalPath().contains("_thumb"),
+                "Thumbnail path phải chứa '_thumb' suffix");
+    }
+
+    /**
+     * F12 (W6-D2): Upload PDF → thumbnail_internal_path là null (PDF không generate thumbnail V1).
+     */
+    @Test
+    void upload_pdf_thumbnailPathIsNull() throws Exception {
+        String token = registerAndGetToken("f12_pdf@test.com", "f12pdf");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "doc.pdf", "application/pdf", PDF_MAGIC);
+        MvcResult result = mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                result.getResponse().getContentAsString()).get("id").asText();
+
+        FileRecord record = fileRecordRepository.findById(UUID.fromString(fileId)).orElseThrow();
+        assertNull(record.getThumbnailInternalPath(),
+                "thumbnailInternalPath phải null cho PDF");
+    }
+
+    /**
+     * F13 (W6-D2): GET /thumb valid image → 200 + Content-Type image/*.
+     */
+    @Test
+    void downloadThumb_validImage_returns200() throws Exception {
+        String token = registerAndGetToken("f13_thumbdl@test.com", "f13thumbdl");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "photo.jpg", "image/jpeg", JPEG_REAL);
+        MvcResult result = mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                result.getResponse().getContentAsString()).get("id").asText();
+
+        mockMvc.perform(get("/api/files/{id}/thumb", fileId)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", "image/jpeg"))
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                .andExpect(header().string("ETag", "\"" + fileId + "-thumb\""));
+    }
+
+    /**
+     * F14 (W6-D2): GET /thumb cho PDF file → 404 (không có thumbnail).
+     */
+    @Test
+    void downloadThumb_pdfFile_returns404() throws Exception {
+        String token = registerAndGetToken("f14_thumbpdf@test.com", "f14thumbpdf");
+
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "doc.pdf", "application/pdf", PDF_MAGIC);
+        MvcResult result = mockMvc.perform(multipart("/api/files/upload")
+                        .file(file)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                result.getResponse().getContentAsString()).get("id").asText();
+
+        mockMvc.perform(get("/api/files/{id}/thumb", fileId)
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    /**
+     * F15 (W6-D2): GET /thumb không có JWT → 401 AUTH_REQUIRED.
+     */
+    @Test
+    void downloadThumb_noJwt_returns401() throws Exception {
+        String fakeId = UUID.randomUUID().toString();
+        mockMvc.perform(get("/api/files/{id}/thumb", fakeId))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("AUTH_REQUIRED"));
+    }
+
+    // =========================================================================
+    // W6-D2 — VIỆC 2: Download authorization via FileAuthService
+    // =========================================================================
+
+    /**
+     * F16 (W6-D2): Conv-member download file được attach vào message trong conv → 200.
+     */
+    @Test
+    void download_convMemberWithAttachment_returns200() throws Exception {
+        String tokenA = registerAndGetToken("f16_a@test.com", "f16a");
+        String tokenB = registerAndGetToken("f16_b@test.com", "f16b");
+
+        User userA = userRepository.findByEmail("f16_a@test.com").orElseThrow();
+        User userB = userRepository.findByEmail("f16_b@test.com").orElseThrow();
+
+        // A uploads
+        MockMultipartFile uploadFile = new MockMultipartFile(
+                "file", "shared.jpg", "image/jpeg", JPEG_MAGIC);
+        MvcResult uploadResult = mockMvc.perform(multipart("/api/files/upload")
+                        .file(uploadFile)
+                        .header("Authorization", "Bearer " + tokenA))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                uploadResult.getResponse().getContentAsString()).get("id").asText();
+
+        // Create conv A+B via repository (avoids REST rate limit / additional complexity)
+        Conversation conv = conversationRepository.save(Conversation.builder()
+                .type(ConversationType.ONE_ON_ONE)
+                .createdBy(userA)
+                .build());
+        conversationMemberRepository.save(ConversationMember.builder()
+                .conversation(conv).user(userA).role(MemberRole.OWNER).build());
+        conversationMemberRepository.save(ConversationMember.builder()
+                .conversation(conv).user(userB).role(MemberRole.MEMBER).build());
+
+        // A sends a message with attachment (construct directly via repositories)
+        Message msg = messageRepository.save(Message.builder()
+                .conversation(conv).sender(userA).type(MessageType.IMAGE).content("photo")
+                .build());
+        messageAttachmentRepository.save(MessageAttachment.builder()
+                .id(new MessageAttachmentId(msg.getId(), UUID.fromString(fileId)))
+                .displayOrder((short) 0)
+                .build());
+
+        // B (member) should be able to download
+        mockMvc.perform(get("/api/files/{id}", fileId)
+                        .header("Authorization", "Bearer " + tokenB))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", "image/jpeg"));
+    }
+
+    /**
+     * F17 (W6-D2): Non-member (không phải uploader, không phải member của conv
+     * chứa attachment) → 404 NOT_FOUND.
+     */
+    @Test
+    void download_nonMemberNonUploader_returns404() throws Exception {
+        String tokenA = registerAndGetToken("f17_a@test.com", "f17a");
+        String tokenB = registerAndGetToken("f17_b@test.com", "f17b");
+        String tokenC = registerAndGetToken("f17_c@test.com", "f17c");
+
+        User userA = userRepository.findByEmail("f17_a@test.com").orElseThrow();
+        User userB = userRepository.findByEmail("f17_b@test.com").orElseThrow();
+
+        // A uploads + attaches to conv(A,B)
+        MockMultipartFile uploadFile = new MockMultipartFile(
+                "file", "private.jpg", "image/jpeg", JPEG_MAGIC);
+        MvcResult uploadResult = mockMvc.perform(multipart("/api/files/upload")
+                        .file(uploadFile)
+                        .header("Authorization", "Bearer " + tokenA))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String fileId = objectMapper.readTree(
+                uploadResult.getResponse().getContentAsString()).get("id").asText();
+
+        Conversation conv = conversationRepository.save(Conversation.builder()
+                .type(ConversationType.ONE_ON_ONE).createdBy(userA).build());
+        conversationMemberRepository.save(ConversationMember.builder()
+                .conversation(conv).user(userA).role(MemberRole.OWNER).build());
+        conversationMemberRepository.save(ConversationMember.builder()
+                .conversation(conv).user(userB).role(MemberRole.MEMBER).build());
+
+        Message msg = messageRepository.save(Message.builder()
+                .conversation(conv).sender(userA).type(MessageType.IMAGE).content("photo").build());
+        messageAttachmentRepository.save(MessageAttachment.builder()
+                .id(new MessageAttachmentId(msg.getId(), UUID.fromString(fileId)))
+                .displayOrder((short) 0)
+                .build());
+
+        // C không phải uploader, không phải member của conv chứa attachment → 404
+        mockMvc.perform(get("/api/files/{id}", fileId)
+                        .header("Authorization", "Bearer " + tokenC))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    /**
+     * F18 (W6-D2): File đã expire (expires_at < now) → 404 NOT_FOUND.
+     */
+    @Test
+    void download_expiredFile_returns404() throws Exception {
+        String token = registerAndGetToken("f18_exp@test.com", "f18exp");
+        User user = userRepository.findByEmail("f18_exp@test.com").orElseThrow();
+
+        // Create a FileRecord that's already expired (set expires_at in the past)
+        FileRecord expired = fileRecordRepository.save(FileRecord.builder()
+                .uploaderId(user.getId())
+                .originalName("old.jpg")
+                .mime("image/jpeg")
+                .sizeBytes(100L)
+                .storagePath("2020/01/fake.jpg")
+                .createdAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(60))
+                .expiresAt(OffsetDateTime.now(ZoneOffset.UTC).minusDays(30))
+                .expired(false)
+                .build());
+
+        mockMvc.perform(get("/api/files/{id}", expired.getId())
+                        .header("Authorization", "Bearer " + token))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("NOT_FOUND"));
     }

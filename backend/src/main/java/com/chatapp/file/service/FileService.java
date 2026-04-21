@@ -47,6 +47,7 @@ public class FileService {
 
     private final FileValidationService validationService;
     private final StorageService storageService;
+    private final ThumbnailService thumbnailService;
     private final FileRecordRepository fileRecordRepository;
     private final StringRedisTemplate redisTemplate;
 
@@ -99,7 +100,21 @@ public class FileService {
         log.info("File uploaded: id={}, uploader={}, mime={}, size={}B, storagePath={}",
                 record.getId(), userId, detectedMime, file.getSize(), storagePath);
 
-        // Step 6: DTO
+        // Step 6: Generate thumbnail (fail-open — thumbnail failure không fail upload).
+        if (thumbnailService.supportsThumbnail(detectedMime)) {
+            try {
+                String thumbPath = thumbnailService.generate(record.getStoragePath(), detectedMime);
+                record.setThumbnailInternalPath(thumbPath);
+                record = fileRecordRepository.save(record);
+                log.debug("Thumbnail persisted for fileId={}, thumbPath={}", record.getId(), thumbPath);
+            } catch (Exception e) {
+                // Fail-open: upload đã succeed, chỉ thumb lỗi → DB field vẫn null, GET /thumb trả 404.
+                log.warn("Failed to generate thumbnail for file {} (mime={}): {}",
+                        record.getId(), detectedMime, e.getMessage());
+            }
+        }
+
+        // Step 7: DTO
         return toDto(record);
     }
 
@@ -152,13 +167,34 @@ public class FileService {
         }
     }
 
+    /**
+     * Mở InputStream cho thumbnail của file (W6-D2). Caller đã check
+     * {@code record.getThumbnailInternalPath() != null}.
+     */
+    public InputStream openThumbnailStream(FileRecord record) {
+        String thumbPath = record.getThumbnailInternalPath();
+        if (thumbPath == null) {
+            throw new IllegalStateException("File không có thumbnail: " + record.getId());
+        }
+        try {
+            return storageService.retrieve(thumbPath);
+        } catch (IOException e) {
+            log.error("Storage I/O error khi đọc thumbnail (id={}, path={}): {}",
+                    record.getId(), thumbPath, e.getMessage(), e);
+            throw new StorageException("Không thể đọc thumbnail", e);
+        }
+    }
+
     // =========================================================================
     // Mapping
     // =========================================================================
 
     public FileDto toDto(FileRecord record) {
         String url = "/api/files/" + record.getId();
-        String thumbUrl = record.isImage() ? url + "/thumb" : null;
+        // W6-D2: thumbUrl chỉ non-null khi đã generate được thumbnail thành công.
+        // Trước W6-D2 dùng record.isImage() nhưng client có thể gặp 404 nếu thumbnail generation fail —
+        // giờ align với thực tế: nếu thumbnailInternalPath null thì không expose URL.
+        String thumbUrl = record.getThumbnailInternalPath() != null ? url + "/thumb" : null;
         return new FileDto(
                 record.getId(),
                 record.getMime(),

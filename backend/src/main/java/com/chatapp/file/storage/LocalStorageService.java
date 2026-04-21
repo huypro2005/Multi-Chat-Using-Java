@@ -99,6 +99,29 @@ public class LocalStorageService implements StorageService {
     }
 
     /**
+     * W6-D2: resolve internal path → absolute Path với canonical prefix check.
+     *
+     * Throw {@link SecurityException} (khác với {@link IllegalArgumentException} của
+     * {@link #resolveAndValidate}) để caller phân biệt "path traversal attempt" với
+     * "args invalid" — ThumbnailService rethrow SecurityException như attack signal.
+     *
+     * <p>Không check file tồn tại — caller decides (ThumbnailService thao tác file
+     * sẽ tạo mới, download endpoint cần file tồn tại).
+     */
+    @Override
+    public Path resolveAbsolute(String internalPath) throws SecurityException {
+        if (internalPath == null || internalPath.isBlank()) {
+            throw new SecurityException("internalPath rỗng");
+        }
+        Path candidate = basePath.resolve(internalPath).normalize().toAbsolutePath();
+        if (!candidate.startsWith(basePath)) {
+            throw new SecurityException(
+                    "Path traversal detected — target nằm ngoài basePath: " + candidate);
+        }
+        return candidate;
+    }
+
+    /**
      * Resolve storagePath (relative) thành absolute path và verify nằm trong basePath.
      * Throw IllegalArgumentException nếu phát hiện path traversal attempt.
      *

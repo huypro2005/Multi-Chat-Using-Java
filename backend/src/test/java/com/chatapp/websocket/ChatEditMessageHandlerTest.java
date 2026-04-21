@@ -75,6 +75,8 @@ class ChatEditMessageHandlerTest {
     @Mock private MessageMapper messageMapper;
     @Mock private ApplicationEventPublisher eventPublisher;
     @Mock private SimpMessagingTemplate messagingTemplate;
+    @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
+    @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
 
     private MessageService messageService;
     private ChatEditMessageHandler handler;
@@ -93,7 +95,8 @@ class ChatEditMessageHandlerTest {
     void setUp() {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
-                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate
+                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
+                fileRecordRepository, messageAttachmentRepository
         );
         handler = new ChatEditMessageHandler(messageService, messagingTemplate);
 
@@ -129,7 +132,8 @@ class ChatEditMessageHandlerTest {
         SenderDto senderDto = new SenderDto(userId, "testuser", "Test User", null);
         mockDto = new MessageDto(
                 messageId, convId, senderDto, MessageType.TEXT,
-                "Updated content", null, OffsetDateTime.now(ZoneOffset.UTC),
+                "Updated content", java.util.Collections.emptyList(),
+                null, OffsetDateTime.now(ZoneOffset.UTC),
                 mockMessage.getCreatedAt(), null, null
         );
 

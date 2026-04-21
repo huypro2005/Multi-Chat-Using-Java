@@ -1,6 +1,6 @@
 # WARNINGS — Chat App V1
 
-_Last updated: 2026-04-21 (W6-D1 Phase B file upload foundation review)_
+_Last updated: 2026-04-21 (W6-D2 thumbnail + file auth + wire attachments review)_
 
 > Tổng hợp mọi warning / TODO / tech debt đã biết trong codebase. Mỗi TODO trong code phải map 1 ID hoặc có plan cụ thể.
 >
@@ -55,6 +55,11 @@ Phải resolve trước deploy V1 public. Effort: XS <30p · S 0.5d · M 1d · L
 - **AD-20** `MessageMapper.toDto` khi `message.deletedAt != null` — strip cả `content = null` (W5-D3 pattern đã có) VÀ `attachments = []` (W6-D1 mở rộng). Lý do: attachment cũng là "content" đã xoá, không leak URL sau delete. Applied nhất quán ở REST list + WS broadcast + ACK.
 - **AD-21** Thumbnail lazy-generate lần đầu GET `/api/files/{id}/thumb` → latency cao request đầu (~100-300ms cho Thumbnailator resize 20MB image). V1 acceptable (1 lần/file), lần sau cache disk. V2 pre-generate async khi upload (worker queue) để request đầu nhanh.
 - **AD-22** SimpleBroker broadcast payload khi message có 5 attachments + content dài: mỗi FileDto ~200 bytes → 5 × 200 = 1KB + content 5KB + reply preview ~200 bytes = ~6.5KB. Vẫn xa giới hạn 64KB STOMP frame. Monitor nếu group lớn (50+ member) × nhiều attachment bắt đầu chậm.
+- **AD-23** Thumbnail format giữ extension gốc (jpg/png/webp/gif) thay vì luôn JPEG như contract §GET /thumb note dòng 947 nói. Lý do chọn: đơn giản, giữ aspect ratio alpha (PNG/webp transparent), avoid re-encode loss. Trade-off: size thumbnail webp/png lớn hơn JPEG ~30% cho ảnh chụp. Contract drift → sync bằng cách update contract §947 nói "thumbnail giữ MIME gốc" thay vì đổi code. Documented trong `ThumbnailService.java` javadoc. V2 nếu cần tối ưu size → force JPEG + xử lý alpha.
+- **AD-24** Thumbnail endpoint `GET /api/files/{id}/thumb` KHÔNG set `Content-Disposition` (download endpoint `{id}` có set). Acceptable vì thumb chỉ dùng cho `<img src>` render inline, không cần hint "download as". Nếu FE lỡ dùng thumb URL cho download button → browser có thể fallback auto-name "thumb". Minor UX, V1 acceptable.
+- **AD-25** Thumbnail endpoint Content-Type trả theo `record.mime` (có thể là `image/png|webp|gif|jpeg`). Nếu thumbnail format thực tế mismatch record.mime (không xảy ra V1 vì code giữ ext gốc) → browser render lỗi. Nếu AD-23 fix sang JPEG thì PHẢI override Content-Type thành `image/jpeg`. Note để future-self.
+- **AD-26** `MessageMapper.loadAttachmentDtos` silent-skip (filter `Objects::nonNull`) khi FileRecord không tìm thấy — scenario hiếm (file bị hard-delete nhưng message_attachments row vẫn còn). V1 OK vì ON DELETE CASCADE từ files → không xảy ra. Defensive code giữ.
+- **AD-27** `FileService.upload` thumbnail step 6 gọi `fileRecordRepository.save(record)` lần 2 trong cùng `@Transactional` — JPA dirty tracking sẽ UPDATE khi commit, save() là no-op đắt (1 EntityManager merge). Non-blocking V1. V2 dùng `entityManager.flush()` hoặc remove save() redundant.
 - **W3-BE-2** `Conversation.createdBy` DB `ON DELETE SET NULL` là dead code V1 (soft-delete pattern). Future-proof V2.
 - **W3-BE-4** N+1 query risk khi list conversations. Traffic V1 <1000 users + index có sẵn. Optimize tuần 4-5 nếu query plan nóng.
 - **W3-BE-5 (schema)** `conversation_members` không có `updated_at` + trigger BEFORE UPDATE. `joined_at` immutable + `last_read_message_id` tự track. V1 đủ.
@@ -156,3 +161,4 @@ Outside scope V1, ghi nhận để future consideration.
 - **W4-D1**: Thêm W4-BE-1 (V5 schema conflict), AD-11 (lastMessageAt no lock), AD-12 (reply soft-delete), AD-13 (N+1 list messages).
 - **W5-D3 consolidation (2026-04-20)**: Restructure 4 section (Pre-production / Acceptable V1 / Cleanup / V2 Enhancement / Resolved). Thêm AD-14 clock skew, AD-15 dedup TTL reset, AD-16 reply deleted message, AD-17 catch-up limit, AD-18 timerRegistry fail-open. Thêm W5-D3 cleanup items (status tick, timeout toast, typing userRepo load, rate limit metric, defensive check log). Mark resolved W5-D1/D2/D3-post-W5D5 items.
 - **W6-D1 (2026-04-20)**: Thêm 4 pre-production items cho File upload — W6-1 (path traversal: originalName không dùng làm path), W6-2 (MIME spoofing: verify qua Apache Tika magic bytes, không trust Content-Type header), W6-3 (disk quota V1 không có, V2 enforce), W6-4 (orphan file cleanup 1h). Thêm 4 AD items documented — AD-19 (N+1 load attachments trong list messages), AD-20 (soft-delete strip cả content lẫn attachments), AD-21 (thumbnail lazy-generate latency request đầu), AD-22 (SimpleBroker frame size với multiple attachments).
+- **W6-D2 (2026-04-21)**: Thêm 5 AD items — AD-23 thumbnail format giữ ext gốc (contract drift vs §947, update contract), AD-24 thumb endpoint không set Content-Disposition, AD-25 Content-Type của thumb bám record.mime (sync với AD-23 nếu đổi JPEG), AD-26 MessageMapper silent-skip file not-found, AD-27 FileService save() lần 2 redundant. 0 BLOCKING. 191/191 tests pass.

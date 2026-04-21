@@ -4,6 +4,11 @@ import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
+import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.entity.MessageAttachment;
+import com.chatapp.file.entity.MessageAttachmentId;
+import com.chatapp.file.repository.FileRecordRepository;
+import com.chatapp.file.repository.MessageAttachmentRepository;
 import com.chatapp.message.dto.*;
 import com.chatapp.message.entity.Message;
 import com.chatapp.message.enums.MessageType;
@@ -34,9 +39,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -47,6 +54,8 @@ public class MessageService {
     private static final int EDIT_RATE_LIMIT_PER_MINUTE = 10;
     private static final int DELETE_RATE_LIMIT_PER_MINUTE = 10;
     private static final int CONTENT_MAX_LENGTH = 5000;
+    private static final int MAX_IMAGE_ATTACHMENTS = 5;
+    private static final int MAX_PDF_ATTACHMENTS = 1;
     private static final long EDIT_WINDOW_SECONDS = 300; // 5 minutes
     private static final Duration DEDUP_TTL = Duration.ofSeconds(60);
     private static final Pattern UUID_PATTERN =
@@ -61,6 +70,8 @@ public class MessageService {
     private final MessageMapper messageMapper;
     private final ApplicationEventPublisher eventPublisher;
     private final SimpMessagingTemplate messagingTemplate;
+    private final FileRecordRepository fileRecordRepository;
+    private final MessageAttachmentRepository messageAttachmentRepository;
 
     // =========================================================================
     // sendMessage
@@ -201,11 +212,21 @@ public class MessageService {
         User sender = userRepository.getReferenceById(userId);
         Conversation conversation = conversationRepository.getReferenceById(convId);
 
+        // Content: trim non-null; if attachments-only message, persist empty string
+        // (DB column NOT NULL). Mapper không strip content=empty, FE dùng attachments để render.
+        String rawContent = payload.content();
+        String trimmedContent = (rawContent != null && !rawContent.trim().isEmpty())
+                ? rawContent.trim() : "";
+
+        // Derive message type from attachments (W6-D1 ADR-019)
+        List<UUID> attachmentIds = payload.attachmentIds();
+        MessageType derivedType = deriveMessageType(attachmentIds);
+
         Message message = Message.builder()
                 .conversation(conversation)
                 .sender(sender)
-                .type(MessageType.TEXT)
-                .content(payload.content().trim())
+                .type(derivedType)
+                .content(trimmedContent)
                 .build();
 
         // Set replyToMessage if provided
@@ -215,6 +236,12 @@ public class MessageService {
         }
 
         message = messageRepository.save(message);
+
+        // W6-D1: Validate + persist attachments after message is saved.
+        // This throws MSG_ATTACHMENTS_* errors (caught by exception handler → ERROR frame).
+        if (attachmentIds != null && !attachmentIds.isEmpty()) {
+            validateAndAttachFiles(message, attachmentIds, userId, tempId);
+        }
         // log.info("[STOMP] Message saved for userId={}, convId={}, tempId={}, messageId={}",
         //         userId, convId, tempId, message.getId());
 
@@ -369,6 +396,10 @@ public class MessageService {
      *  7. Update message in @Transactional + update dedup value to messageId
      *  8. Publish MessageUpdatedEvent → broadcaster sends MESSAGE_UPDATED AFTER_COMMIT
      *  9. Send ACK to /user/queue/acks {operation:"EDIT", clientId, message} AFTER_COMMIT
+     *
+     * <p>W6-D1 note: EDIT chỉ sửa content (V1). Attachments immutable sau khi gửi —
+     * payload nếu có attachmentIds sẽ bị bỏ qua (không persist thay đổi). V2 sẽ
+     * support thay attachments khi edit.
      */
     @Transactional
     public void editViaStomp(UUID convId, UUID userId, EditMessagePayload payload) {
@@ -599,8 +630,19 @@ public class MessageService {
     }
 
     /**
-     * Validate tempId (UUID format) and content (non-blank, 1..5000 chars).
-     * Throws AppException with details.tempId set so exception handler can echo it.
+     * Validate tempId (UUID format) and content / attachments presence (W6-D1).
+     *
+     * <p>Rules:
+     * <ul>
+     *   <li>tempId must be UUID v4 format → {@code VALIDATION_FAILED}.</li>
+     *   <li>Must have non-empty content OR non-empty attachmentIds (W6-D1 XOR check) → {@code MSG_NO_CONTENT}.</li>
+     *   <li>Content (if present) max 5000 chars after trim → {@code MSG_CONTENT_TOO_LONG}.</li>
+     * </ul>
+     *
+     * <p>Detailed attachment validation (count, ownership, mix, expiry) performed later
+     * in {@link #validateAndAttachFiles} after membership + dedup checks.
+     *
+     * @throws AppException with details.tempId set so exception handler can echo it.
      */
     private void validateStompPayload(SendMessagePayload payload, String tempId) {
         if (tempId == null || !UUID_PATTERN.matcher(tempId).matches()) {
@@ -611,18 +653,153 @@ public class MessageService {
         }
 
         String content = payload.content();
-        if (content == null || content.isBlank()) {
-            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
-                    "Nội dung tin nhắn không được để trống",
-                    Map.of("tempId", tempId, "field", "content", "error", "Must not be blank"));
+        boolean hasContent = content != null && !content.trim().isEmpty();
+        List<UUID> attachmentIds = payload.attachmentIds();
+        boolean hasAttachments = attachmentIds != null && !attachmentIds.isEmpty();
+
+        // W6-D1: Must have content OR attachments (both empty → MSG_NO_CONTENT).
+        if (!hasContent && !hasAttachments) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "MSG_NO_CONTENT",
+                    "Tin nhắn phải có nội dung hoặc tệp đính kèm",
+                    Map.of("tempId", tempId));
         }
 
-        if (content.trim().length() > CONTENT_MAX_LENGTH) {
+        // Content length check (only if content provided).
+        if (hasContent && content.trim().length() > CONTENT_MAX_LENGTH) {
             throw new AppException(HttpStatus.BAD_REQUEST, "MSG_CONTENT_TOO_LONG",
                     "Tin nhắn quá dài (tối đa 5000 ký tự)",
                     Map.of("tempId", tempId, "maxLength", CONTENT_MAX_LENGTH,
                             "actualLength", content.trim().length()));
         }
+    }
+
+    // =========================================================================
+    // Attachment validation + persistence (W6-D1)
+    // =========================================================================
+
+    /**
+     * Derive {@link MessageType} từ attachmentIds (W6-D1 ADR-019):
+     *  - null / empty → TEXT
+     *  - all images → IMAGE
+     *  - 1 PDF → FILE
+     *  - mixed / invalid: validation sẽ throw sau, fallback TEXT để save không crash
+     *    (nhưng validateAndAttachFiles sẽ throw MSG_ATTACHMENTS_MIXED trước khi commit).
+     *
+     * <p>Chỉ lookup type từ 1 file đầu (images có cùng MIME loại; PDF đúng 1 cái).
+     */
+    private MessageType deriveMessageType(List<UUID> attachmentIds) {
+        if (attachmentIds == null || attachmentIds.isEmpty()) {
+            return MessageType.TEXT;
+        }
+        // Lookup first file to decide IMAGE vs FILE; rely on validateAndAttachFiles for integrity.
+        FileRecord first = fileRecordRepository.findById(attachmentIds.get(0)).orElse(null);
+        if (first == null) {
+            return MessageType.FILE;   // will fail validateAndAttachFiles anyway
+        }
+        return first.getMime() != null && first.getMime().startsWith("image/")
+                ? MessageType.IMAGE : MessageType.FILE;
+    }
+
+    /**
+     * Validate + persist attachments cho message vừa save. Gọi trong cùng {@code @Transactional}
+     * với save message — bất kỳ throw nào sẽ rollback cả message.
+     *
+     * <p>Order validation (fail-fast):
+     * <ol>
+     *   <li>Count: {@code > 5} images hoặc {@code > 1} PDF → {@code MSG_ATTACHMENTS_TOO_MANY}.</li>
+     *   <li>Existence: bất kỳ fileId nào không tìm thấy → {@code MSG_ATTACHMENT_NOT_FOUND}.</li>
+     *   <li>Ownership: uploader != sender → {@code MSG_ATTACHMENT_NOT_OWNED}.</li>
+     *   <li>Expiry: file đã qua {@code expires_at} → {@code MSG_ATTACHMENT_EXPIRED}.</li>
+     *   <li>Unique: file đã attach vào message khác → {@code MSG_ATTACHMENT_ALREADY_USED}.</li>
+     *   <li>Group type: không mix image + PDF → {@code MSG_ATTACHMENTS_MIXED}.
+     *       Images: 1-5 OK. PDF: đúng 1 item (đã check count rule 1).</li>
+     * </ol>
+     *
+     * <p>Sau khi pass tất cả rule, INSERT {@code message_attachments} rows + set
+     * {@code files.attached_at = now()} (markAttached domain method).
+     *
+     * @param message đã được save, có id thật.
+     * @param attachmentIds non-empty list (caller đã check).
+     * @param userId sender user id.
+     * @param tempId từ payload — echo vào error.details cho exception handler.
+     */
+    private void validateAndAttachFiles(Message message, List<UUID> attachmentIds,
+                                         UUID userId, String tempId) {
+        // Rule 1: Count — pre-check trước khi load DB để fail-fast.
+        // Image/PDF mix hạn chế khác nhau; check tổng > 5 trước (upper bound tuyệt đối).
+        if (attachmentIds.size() > MAX_IMAGE_ATTACHMENTS) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "MSG_ATTACHMENTS_TOO_MANY",
+                    "Tối đa " + MAX_IMAGE_ATTACHMENTS + " ảnh hoặc 1 file PDF trong một tin nhắn",
+                    Map.of("tempId", tempId, "maxItems", MAX_IMAGE_ATTACHMENTS,
+                            "actualCount", attachmentIds.size()));
+        }
+
+        // Rule 2: Load all files + check existence (findAllById returns only matching).
+        List<FileRecord> files = fileRecordRepository.findAllById(attachmentIds);
+        if (files.size() != attachmentIds.size()) {
+            throw new AppException(HttpStatus.NOT_FOUND, "MSG_ATTACHMENT_NOT_FOUND",
+                    "Một hoặc nhiều tệp đính kèm không tồn tại",
+                    Map.of("tempId", tempId));
+        }
+
+        // Rule 3 + 4: Per-file ownership + expiry check.
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        for (FileRecord file : files) {
+            if (file.getUploaderId() == null || !file.getUploaderId().equals(userId)) {
+                throw new AppException(HttpStatus.FORBIDDEN, "MSG_ATTACHMENT_NOT_OWNED",
+                        "Không thể đính kèm tệp của người khác",
+                        Map.of("tempId", tempId, "fileId", file.getId().toString()));
+            }
+            if (file.getExpiresAt() != null && file.getExpiresAt().isBefore(now)) {
+                throw new AppException(HttpStatus.GONE, "MSG_ATTACHMENT_EXPIRED",
+                        "Tệp đính kèm đã hết hạn, vui lòng upload lại",
+                        Map.of("tempId", tempId, "fileId", file.getId().toString()));
+            }
+        }
+
+        // Rule 5: Unique — file chưa attach vào message khác.
+        // (DB UNIQUE composite PK enforce theo (message_id, file_id); nhưng ta không muốn
+        //  1 file xuất hiện ở nhiều message khác nhau → service-level check bằng file_id.)
+        for (UUID fileId : attachmentIds) {
+            if (messageAttachmentRepository.existsByIdFileId(fileId)) {
+                throw new AppException(HttpStatus.CONFLICT, "MSG_ATTACHMENT_ALREADY_USED",
+                        "Tệp đính kèm đã được dùng trong tin nhắn khác",
+                        Map.of("tempId", tempId, "fileId", fileId.toString()));
+            }
+        }
+
+        // Rule 6: Group type — all images OR exactly 1 PDF.
+        Set<String> mimes = files.stream()
+                .map(FileRecord::getMime)
+                .collect(Collectors.toSet());
+        boolean allImages = mimes.stream().allMatch(m -> m != null && m.startsWith("image/"));
+        boolean singlePdf = files.size() == MAX_PDF_ATTACHMENTS
+                && mimes.size() == 1
+                && mimes.contains("application/pdf");
+
+        if (!allImages && !singlePdf) {
+            // Covers: mixed images+PDF, multiple PDFs, non-image-non-PDF (không xảy ra do whitelist upload).
+            throw new AppException(HttpStatus.BAD_REQUEST, "MSG_ATTACHMENTS_MIXED",
+                    "Chỉ được gửi 1 PDF hoặc 1-5 ảnh trong một tin nhắn",
+                    Map.of("tempId", tempId));
+        }
+
+        // Passed all checks — insert attachments + mark files as attached.
+        for (int i = 0; i < attachmentIds.size(); i++) {
+            UUID fileId = attachmentIds.get(i);
+            MessageAttachment ma = MessageAttachment.builder()
+                    .id(new MessageAttachmentId(message.getId(), fileId))
+                    .displayOrder((short) i)
+                    .build();
+            messageAttachmentRepository.save(ma);
+        }
+        for (FileRecord file : files) {
+            file.markAttached();
+            fileRecordRepository.save(file);
+        }
+
+        log.info("[ATTACH] {} attachments linked to messageId={} for userId={}",
+                attachmentIds.size(), message.getId(), userId);
     }
 
     /**

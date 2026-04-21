@@ -329,6 +329,24 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### File Upload W6-D2 — Thumbnail + Auth + Attachments
+
+- **FileAuthService pattern**: `findAccessibleById(fileId, userId)` trả `Optional<FileRecord>` — rule (1) uploader, (2) member của conv chứa message attach file này. Merge 404 cho mọi case fail (not-found / expired / non-accessible) — anti-enumeration (API_CONTRACT §Files Management). JPQL: `SELECT COUNT(ma) > 0 FROM MessageAttachment ma JOIN Message m ON ma.id.messageId = m.id JOIN ConversationMember cm ON cm.conversation.id = m.conversation.id WHERE ma.id.fileId = :fileId AND cm.user.id = :userId`.
+- **ThumbnailService pattern** (W6-D2): generate 200×200 image thumbnail qua Thumbnailator (0.4.20). Fail-open — thumbnail lỗi KHÔNG fail upload; DB field `thumbnail_internal_path` giữ null, GET `/thumb` trả 404. Path layout `{uuid}_thumb.{ext}` cùng thư mục với original. `FileDto.thumbUrl` chỉ non-null khi `record.thumbnailInternalPath != null` (KHÔNG dựa vào mime check — align với file thực tế trên disk).
+- **Test pattern cho Thumbnailator**: dùng `ImageIO.write(bufferedImage, "jpg", baos)` để generate valid JPEG bytes cho test (20-byte `JPEG_MAGIC` magic-only sẽ fail Thumbnailator "Not a JPEG file: starts with 0xff 0xd9"). Giữ `JPEG_MAGIC` cho test chỉ validate Tika detection.
+- **StorageService.resolveAbsolute(internalPath)**: W6-D2 thêm vào interface. Throw `SecurityException` (không `IllegalArgumentException`) khi path traversal — caller phân biệt attack signal vs args invalid. Dùng trong `ThumbnailService.generate()` (cần Path object cho Thumbnailator.toFile).
+- **validateAndAttachFiles validation order** (W6-D1 STOMP attachments): (1) count > 5 → `MSG_ATTACHMENTS_TOO_MANY`; (2) existence qua `findAllById` size mismatch → `MSG_ATTACHMENT_NOT_FOUND`; (3) uploader != sender → `MSG_ATTACHMENT_NOT_OWNED`; (4) `expires_at < now()` → `MSG_ATTACHMENT_EXPIRED`; (5) file đã attach message khác (`existsByIdFileId`) → `MSG_ATTACHMENT_ALREADY_USED`; (6) group check (all images OR 1 PDF) → `MSG_ATTACHMENTS_MIXED`. Fail-fast, trong cùng `@Transactional` với message save — rollback message nếu attach fail.
+- **MessageDto.attachments** (W6-D1): luôn `List<FileDto>` (không null). Mapper strip thành `Collections.emptyList()` khi deleted. Sử dụng `Collections.emptyList()` trong mapper thay vì `null` → FE không phải check null.
+- **MessageMapper N+1 warning**: `toDto()` mỗi message → 1 query `findByIdMessageIdOrderByDisplayOrderAsc` + N query `findById` mỗi file. Page 50 messages worst-case ~51+50×N_attach queries. V2 optimize với `@EntityGraph` hoặc JOIN query trả Message+attachments+files batch. Documented trong class javadoc.
+- **SendMessagePayload record** (W6-D1): thêm 5th field `List<UUID> attachmentIds` (nullable). BREAKING record constructor — grep-and-fix các `new SendMessagePayload(...)` call sites (5 spots trong test).
+- **MessageDto record constructor order** (W6-D1): `(id, conversationId, sender, type, content, attachments, replyToMessage, editedAt, createdAt, deletedAt, deletedBy)`. `attachments` chèn sau `content`, TRƯỚC `replyToMessage`. Breaking change — grep `new MessageDto(` update tất cả.
+- **MessageService constructor args** (W6-D1): +2 new deps `FileRecordRepository`, `MessageAttachmentRepository` → tăng từ 8 → 10 args. Update test constructor calls (3 tests: Stomp, Edit, Delete handlers).
+- **Content XOR Attachments rule**: SEND blank content + empty attachments → `MSG_NO_CONTENT` (was `VALIDATION_FAILED` pre-W6). Content-only vẫn OK (text message); attachments-only OK (caption optional); cả hai rỗng REJECT. Check trong `validateStompPayload` trước rate-limit/dedup.
+- **Content DB NOT NULL constraint pitfall**: attachments-only message có `payload.content = null`, nhưng column `messages.content` là NOT NULL. Fix: persist empty string `""` thay vì null khi attachments-only — mapper không strip empty content, FE dùng `attachments.length > 0` để render bubble.
+- **Edit immutable attachments** (W6-D1 V1): edit message chỉ sửa content, KHÔNG thay attachments. Comment trong `editViaStomp` javadoc. V2 xem xét cho phép.
+
+---
+
 ### File Upload Foundation (W6-D1)
 
 - Package: `com.chatapp.file.{entity,repository,dto,service,controller,exception,storage}`.
@@ -352,6 +370,7 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ## Changelog file này
 
+- 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.
 - 2026-04-21 W6D1: Thêm File Upload Foundation pattern (Tika MIME detect, LocalStorageService path traversal defense, MIME→ext cố định, 6 exception class, anti-enumeration 404 cho download, MultipartFile test pattern). Migration V7 dùng UUID FK (không BIGINT như task spec).
 - 2026-04-20 W5D4: Thêm Forward Pagination Pattern (after param), ReplyPreviewDto deletedAt field, STOMP reply validation pattern.
 - 2026-04-20 W5D3: Thêm Soft Delete Pattern (Message), content strip tại mapper, DELETE ACK minimal map, Map.of() null pitfall.

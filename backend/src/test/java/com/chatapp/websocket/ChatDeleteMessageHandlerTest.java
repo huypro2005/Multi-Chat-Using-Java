@@ -75,6 +75,8 @@ class ChatDeleteMessageHandlerTest {
     @Mock private MessageMapper messageMapper;
     @Mock private ApplicationEventPublisher eventPublisher;
     @Mock private SimpMessagingTemplate messagingTemplate;
+    @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
+    @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
 
     private MessageService messageService;
     private ChatDeleteMessageHandler handler;
@@ -92,7 +94,8 @@ class ChatDeleteMessageHandlerTest {
     void setUp() {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
-                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate
+                userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
+                fileRecordRepository, messageAttachmentRepository
         );
         handler = new ChatDeleteMessageHandler(messageService, messagingTemplate);
 
@@ -359,8 +362,10 @@ class ChatDeleteMessageHandlerTest {
 
     @Test
     void messageMapper_stripsContentWhenDeleted() {
-        // Use a REAL MessageMapper (not a mock) to test the strip logic
-        MessageMapper realMapper = new MessageMapper();
+        // Use a REAL MessageMapper (not a mock) to test the strip logic.
+        // W6-D1: MessageMapper now depends on MessageAttachmentRepository + FileRecordRepository,
+        // but deleted messages strip attachments to empty list without querying — safe to pass nulls.
+        MessageMapper realMapper = new MessageMapper(null, null);
 
         // Build a deleted message
         Message deletedMsg = Message.builder()
@@ -381,6 +386,9 @@ class ChatDeleteMessageHandlerTest {
         assertThat(dto.deletedAt()).isNotNull();
         // deletedBy must be the userId string
         assertThat(dto.deletedBy()).isEqualTo(userId.toString());
+        // W6-D1: attachments must be empty list when deleted (strip)
+        assertThat(dto.attachments()).isNotNull();
+        assertThat(dto.attachments()).isEmpty();
     }
 
     // =========================================================================

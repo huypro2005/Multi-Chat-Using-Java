@@ -206,6 +206,55 @@
   - `useAckErrorSubscription` dùng `switch(operation)` routing — case `SEND` cho tempId lifecycle, case `EDIT` cho edit lifecycle (tab-awareness qua `editTimerRegistry.get(clientId)`).
 - **Ngày**: 2026-04-20 (Tuần 5, Ngày 2 — W5-D2)
 
+### ADR-019: FileAuthService pattern — uploader OR conv-member, anti-enum 404 (W6-D2)
+- **Quyết định**: Tách riêng `FileAuthService.findAccessibleById(fileId, userId)` khỏi `FileService.loadForDownload`. Rule: uploader luôn pass; else JOIN `message_attachments → messages → conversation_members` check membership. Mọi fail-branch (not-found / not-accessible / expired / cleanup-deleted) → `Optional.empty()` để controller throw **404 NOT_FOUND** (không 403, không 410 Gone).
+- **Bối cảnh**: W6-D1 stub chỉ uploader download được. W6-D2 cần mở cho conv-member (để B download ảnh A gửi trong chat). Nhưng không được leak "file tồn tại nhưng bạn không có quyền" → merge với "file không tồn tại".
+- **Lý do**:
+  - Anti-enumeration: attacker duyệt UUID không biết file có tồn tại hay không.
+  - Separate service → FileController không tự query repo, FileService không lo auth logic.
+  - Return `Optional` thay vì throw → caller quyết định error code (download endpoint trả 404, thumbnail endpoint reuse cùng service).
+  - JOIN query JPQL `existsByFileIdAndConvMemberUserId` — COUNT > 0 để tránh load entity thừa.
+- **Trade-off**:
+  - JPQL JOIN chạy cho MỌI request download — N+1 nếu user scroll chat với 50 images × 50 download = 50 queries. V1 acceptable vì images cache browser (Cache-Control 7d, ETag) → chỉ fire 1 lần. Nếu contention cao → V2 cache `(fileId, userId) → bool` Redis 5min.
+  - Expired file vẫn trả 404 (không 410 Gone) — user không biết "file từng tồn tại nhưng expire" vs "chưa bao giờ có". Acceptable privacy trade-off.
+- **Ngày**: 2026-04-21 (W6-D2)
+
+### ADR-020: Thumbnail fail-open khi generate fail — upload success dù thumb lỗi
+- **Quyết định**: `FileService.upload()` step 6 call `thumbnailService.generate()` trong try-catch **ngoài** flow chính. Thumbnail fail (Thumbnailator exception, disk I/O, OOM) → log WARN + continue. DB column `thumbnail_internal_path` = null → `FileDto.thumbUrl` = null → `GET /thumb` trả 404.
+- **Bối cảnh**: Thumbnailator có thể fail vì: (1) image corrupt/truncated, (2) exotic format Tika chấp nhận nhưng ImageIO không đọc được, (3) disk full tạm thời, (4) OOM với image 20MB.
+- **Lý do**:
+  - Upload flow chính (validate → store → persist) đã succeed → user expect file đã upload. Thumbnail là feature phụ, không đáng rollback cả upload.
+  - DB path null → serialization (FileDto) tự động set `thumbUrl=null` → FE fallback hiển thị full-size hoặc placeholder.
+  - Alternative (throw → rollback upload) worse UX: user upload 20MB xong thấy lỗi, phải upload lại.
+- **Trade-off**:
+  - Silent partial failure: user không biết thumb fail (chỉ log server). V2 thêm metric `thumbnail.generate.failed` để ops monitor spike.
+  - Nếu thumb fail PHẢI consistent cross-request: lần sau GET /thumb vẫn 404 (không retry lazy-gen). Chấp nhận vì V1 eager gen upload-time, không lazy.
+- **Applied pattern**: tương tự "fail-open rate limit Redis down" (ADR-005) — feature phụ không block hot path.
+- **Ngày**: 2026-04-21 (W6-D2)
+
+### ADR-021: Content XOR Attachments — message phải có 1 trong 2 (W6-D1/W6-D2)
+- **Quyết định**: `validateStompPayload` check `hasContent || hasAttachments` — cả 2 rỗng → `MSG_NO_CONTENT`. Content trimmed non-blank hoặc attachmentIds non-empty. Không cho gửi "tin nhắn rỗng".
+- **Bối cảnh**: Pre-W6 content required 1-5000 chars. W6 mở `content=null` khi có attachments → FE có thể gửi `{content: null, attachmentIds: [uuid]}` cho image-only message. Nhưng cũng có thể gửi `{content: "", attachmentIds: []}` (UI bug) → DB row vô nghĩa.
+- **Lý do**:
+  - 1 invariant rõ ràng: mọi message hiển thị được phải có content hoặc attachment.
+  - DB column `content` NOT NULL (V5 migration) — service trim+persist empty string "" khi attachments-only (FE dùng attachments render, content="" không visible).
+  - Error code `MSG_NO_CONTENT` riêng (không dùng VALIDATION_FAILED generic) → FE hiển thị toast cụ thể.
+- **Trade-off**:
+  - Message với attachments rỗng content → DB lưu content="" (waste 1 row byte). Alternative: đổi content schema NULL + check invariant ở service. V1 giữ NOT NULL vì migration cost > benefit.
+- **Applied**: `MessageService.sendViaStomp` step 1 validate. FE cần guard trước khi submit (double-check).
+- **Ngày**: 2026-04-21 (W6-D1 contract + W6-D2 review confirmed)
+
+### ADR-022: Soft-deleted message strip content + attachments (privacy, W5-D3 + W6-D1)
+- **Quyết định**: `MessageMapper.toDto` khi `message.deletedAt != null` → content=null + attachments=[]. Applied **nhất quán** cho REST list, REST get, STOMP broadcast, STOMP ACK (bất kỳ path nào serialize MessageDto).
+- **Bối cảnh**: W5-D3 đã strip content cho soft-delete. W6-D1 thêm attachments → PHẢI strip cả attachments (không để lộ URL file). Lý do: nếu giữ attachments, receiver đã nhận broadcast MESSAGE_DELETED nhưng vẫn có URL thumbnail trong cache → click thumb vẫn download được file (FileAuthService cho conv-member).
+- **Lý do**:
+  - Defense-in-depth: strip ở mapper = strip ở TẤT CẢ output path (không sót). Nếu strip ở từng endpoint → dễ quên 1 path.
+  - Privacy parity: content đã stripped, attachments phải cùng → user xóa tin nhắn = xóa cả văn bản lẫn file.
+- **Trade-off**:
+  - Receiver có tab đang mở (cache message pre-delete) → vẫn có URL trong React Query cache. Mitigation: broadcast MESSAGE_DELETED → FE invalidate/patch → cache update. Tuy nhiên, browser có thể đã cache thumbnail binary (Cache-Control 7d) → thumb vẫn render từ cache HTTP cho đến khi cache expire.
+  - Giữ `attachments = []` (non-null) thay vì field mất — FE render consistent `message.attachments.length === 0` check OK.
+- **Ngày**: 2026-04-21 (W6-D2 formalized, merge với AD-20 trong WARNINGS.md)
+
 ### ADR-018: Delete message window không giới hạn thời gian (khác Edit 5 phút)
 - **Quyết định**: `deleteViaStomp` KHÔNG có edit-window check (không giống `editViaStomp` có 300s limit). Owner có thể xoá tin nhắn của mình bất cứ lúc nào, không giới hạn thời gian kể từ khi gửi. Anti-enum vẫn apply: non-owner → `MSG_NOT_FOUND` (không `FORBIDDEN`).
 - **Bối cảnh**: W5-D3 implement delete message. So sánh với edit: edit có 5 phút window để giảm rối conversation history (user edit tin cũ gây confusion). Delete thì logic khác — user có thể muốn xoá tin nhắn gửi nhầm từ lâu (embarrassing content, tin nhắn riêng tư hỏi về mật khẩu, v.v.).
@@ -312,6 +361,11 @@
 ## Approved patterns (pattern đã review và OK, khuyên dùng)
 
 ### BE patterns
+- **FileAuth service tách riêng khỏi FileService (W6-D2 APPROVED)**: `FileAuthService.findAccessibleById(fileId, userId)` trả `Optional<FileRecord>` — controller quyết định error code. Rule: uploader OR conv-member (JPQL `existsByFileIdAndConvMemberUserId` JOIN `message_attachments → messages → conversation_members`). Anti-enum: mọi not-access/not-found/expired/cleanup-deleted → empty → 404. Pattern này tách auth rule khỏi business logic, reuse giữa `GET /api/files/{id}` và `GET /api/files/{id}/thumb`. Xem `FileAuthService.java` + `MessageAttachmentRepository.existsByFileIdAndConvMemberUserId` (W6-D2).
+- **Fail-open thumbnail (W6-D2 APPROVED)**: Upload flow try-catch BỌC quanh `thumbnailService.generate()` — thumb fail log WARN, `thumbnail_internal_path=null`, upload vẫn 201. FileDto.thumbUrl = null → FE hiện full-size hoặc placeholder. Rule pattern: feature phụ (thumb, rate-limit, blacklist) KHÔNG được block hot-path khi fail. Xem ADR-020 + `FileService.upload` step 6.
+- **N+1 MessageMapper + V2 note (W6-D2 documented)**: `MessageMapper.loadAttachmentDtos` query 1 JOIN + N query `findById` per file. Cho page 50 message × 5 attach = 250 queries worst-case. V1 acceptable (traffic thấp + Hibernate 2nd cache + list-message không phải hot path). V2 optimize: `@EntityGraph(attributePaths="attachments")` trên repo method hoặc JOIN FETCH query. **Reviewer rule**: khi thấy N+1 trong mapper → DOCUMENT trên class javadoc + AD-item trong WARNINGS.md với V2 plan, không BLOCKING nếu không phải hot path.
+- **Content XOR Attachments (W6-D1 + W6-D2 APPROVED)**: `validateStompPayload` check `hasContent || hasAttachments` — cả 2 rỗng → `MSG_NO_CONTENT`. DB column `content` NOT NULL → service persist empty string khi attachment-only message. FE dùng `attachments.length > 0` render image bubble, content="" không visible. Xem ADR-021 + `MessageService.validateStompPayload`.
+- **Soft-delete strip content + attachments (W5-D3 + W6-D1 APPROVED)**: `MessageMapper.toDto` khi `deletedAt != null` → content=null + `attachments=[]`. Applied trung tâm ở mapper → REST + ACK + broadcast TẤT CẢ path đều strip. Receiver thấy placeholder "🚫 Tin nhắn đã bị xóa", không còn URL attachment trong DTO → không trigger thumb download từ cache. Xem ADR-022 + `MessageMapper.toDto` line 77.
 - `validateTokenDetailed()` trả enum VALID/EXPIRED/INVALID thay vì boolean. Tách biệt expired vs invalid để trả error code đúng cho FE.
 - `GlobalExceptionHandler` + `AppException` — business exception pattern. Mọi business error throw `AppException(HttpStatus, errorCode, message)`, handler convert sang `ErrorResponse`.
 - **Refresh token SHA-256 hash vào Redis (W2D2 APPROVED)**: `hashToken()` dùng MessageDigest SHA-256 + Base64. Lưu hash chứ không raw token vào Redis key `refresh:{userId}:{jti}`. Lý do: nếu Redis bị compromise, hash không dùng để forge. Khi /refresh, compare bằng cách hash lại token FE gửi và so sánh.

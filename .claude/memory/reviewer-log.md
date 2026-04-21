@@ -17,6 +17,65 @@ Contract: ...
 
 ---
 
+## [W6-D2] Thumbnail + File Auth + Wire Attachments — APPROVE WITH COMMENTS
+
+Blocking: 0. Tests 191/191 BE pass (172 cũ + 19 mới).
+
+Key findings (VIỆC 1 — Thumbnail):
+- `ThumbnailService.generate` dùng Thumbnailator `size(200, 200)` + outputQuality 0.85, giữ extension gốc. Path layout `{base}/yyyy/MM/{uuid}_thumb.{ext}` — cùng folder source.
+- `StorageService.resolveAbsolute(internalPath)` → canonical prefix check qua `startsWith(basePath)`, throw SecurityException khi detect path traversal (tách với IllegalArgumentException để phân biệt attack signal vs args invalid). ThumbnailService delegate qua storage layer, KHÔNG tự resolve Path.
+- `FileService.upload` step 6 thumbnail fail-open: try-catch WRAP quanh generate() — thumb fail → WARN log + `thumbnail_internal_path=null` → FileDto.thumbUrl=null. Upload vẫn 201. Không rollback toàn file vì feature phụ.
+- `FileController.downloadThumb`: auth qua `FileAuthService.findAccessibleById(id, user.getId())` (uploader OR conv-member) + `.filter(r -> r.getThumbnailInternalPath() != null)` → anti-enum 404 NOT_FOUND cho mọi case (no-thumb/not-access/expired).
+- Cache-Control: `CacheControl.maxAge(Duration.ofDays(7)).cachePrivate()` = 7 ngày. ETag `"{id}-thumb"`. X-Content-Type-Options nosniff.
+- F11-F15 tests: upload JPEG → thumbnail_internal_path DB non-null; PDF → null; GET /thumb returns 200 + image/jpeg header; PDF GET /thumb → 404; no-JWT → 401.
+
+Key findings (VIỆC 2 — Authorization):
+- `FileAuthService` tách riêng khỏi `FileService` — Optional return thay vì throw, caller quyết định error code. JPQL `existsByFileIdAndConvMemberUserId` dùng COUNT > 0 (không load entity thừa). JOIN path `message_attachments → Message → ConversationMember`.
+- Anti-enum 404 nhất quán: not-found, non-access, expired (expires_at < now), cleanup-deleted (expired=true) — ALL return Optional.empty() → 404 NOT_FOUND (không 403, không 410 Gone).
+- Controller `sanitizeForHeader`: strip CRLF + `"` + non-ASCII cho Content-Disposition filename (chống header injection). Unicode filename mất dấu — V1 trade-off đơn giản, V2 cân nhắc RFC 5987 `filename*=UTF-8''encoded`.
+- F16-F18 tests: conv-member download → 200; non-member non-uploader → 404 NOT_FOUND; expired file → 404 (không 410).
+
+Key findings (VIỆC 3 — Wire attachments):
+- `SendMessagePayload` thêm `attachmentIds: List<UUID>` (nullable/empty OK). `MessageDto` thêm `attachments: List<FileDto>` (LUÔN non-null, empty list thay null).
+- `validateStompPayload` XOR check: `hasContent || hasAttachments` — cả 2 rỗng → `MSG_NO_CONTENT`. Content length check CHỈ khi hasContent (không apply max với attachment-only).
+- `validateAndAttachFiles` flow order (RẺ → ĐẮT): (1) Count > MAX_IMAGE_ATTACHMENTS (pre-check pre-DB), (2) findAllById → size mismatch → `MSG_ATTACHMENT_NOT_FOUND`, (3) per-file ownership `uploaderId == userId` → `MSG_ATTACHMENT_NOT_OWNED` (403), (4) per-file expiry → `MSG_ATTACHMENT_EXPIRED` (410 GONE), (5) unique `existsByIdFileId` → `MSG_ATTACHMENT_ALREADY_USED` (409), (6) group type check (all images OR 1 PDF) → `MSG_ATTACHMENTS_MIXED`. Sau pass: INSERT message_attachments rows + `file.markAttached()`.
+- `validateAndAttachFiles` chạy SAU `messageRepository.save(message)` trong cùng `@Transactional` → throw sẽ rollback CẢ message save (confirmed: service method `@Transactional` at line 160). Atomic guarantee: nếu attachment fail → message không được save.
+- `MessageMapper.toDto` strip attachments khi deletedAt != null: `isDeleted ? Collections.emptyList() : loadAttachmentDtos(message)`. Applied TRUNG TÂM cho REST + ACK + broadcast. Privacy consistent với content strip (W5-D3).
+- Edit (`editViaStomp`) KHÔNG process attachmentIds — contract §3c đã ghi "EDIT constraint V1: KHÔNG cho sửa attachments". Confirmed bằng đọc source — `editViaStomp` chỉ touch content + editedAt, không load attachments.
+- `deriveMessageType` từ `attachmentIds.get(0)`: image → IMAGE, else FILE (PDF). TEXT khi attachments null/empty. Validation sau catch mixed case.
+- N+1 risk trong `MessageMapper.loadAttachmentDtos` (JOIN + N findById per file) → documented trên class javadoc (lines 38-42) + AD-19 trong WARNINGS.md với V2 plan `@EntityGraph`.
+
+Regression:
+- 191/191 tests pass (confirmed via mvn test output: AuthControllerTest 33, ChatAppApplicationTests 1, AuthChannelInterceptorTest 10, ConversationControllerTest 20, FileControllerTest 18, FileValidationServiceTest 10, LocalStorageServiceTest 7, MessageBroadcasterTest 2, MessageControllerTest 21, MessageServiceStompTest 21, JwtTokenProviderTest 10, SecurityConfigTest 6, ChatDeleteMessageHandlerTest 10, ChatEditMessageHandlerTest 12, ChatTypingHandlerTest 4, WebSocketIntegrationTest 6).
+- `MessageDto.attachments` field mới — FE BREAKING cho mọi path consume MessageDto (list, send ACK, edit ACK, delete ACK minimal không ảnh hưởng, broadcast). FE sẽ break tạm cho đến W6-D4 khi FE component render attachments.
+
+Contract compliance:
+- API §Files Management POST /upload, GET /{id}, GET /{id}/thumb khớp.
+- SOCKET §3.1 SEND payload `attachmentIds` khớp.
+- Error codes tuân theo mapping contract: `MSG_NO_CONTENT` 400, `MSG_ATTACHMENTS_TOO_MANY` 400, `MSG_ATTACHMENTS_MIXED` 400, `MSG_ATTACHMENT_NOT_FOUND` 404, `MSG_ATTACHMENT_EXPIRED` 410, `MSG_ATTACHMENT_NOT_OWNED` 403, `MSG_ATTACHMENT_ALREADY_USED` 409.
+- **Contract drift (minor, documented AD-23)**: §GET /thumb dòng 947 nói "Content-Type: image/jpeg (luôn JPEG)" — code giữ extension gốc (png/webp/gif/jpg) theo `record.getMime()`. ThumbnailService javadoc ghi rõ lý do (alpha preserve, avoid re-encode loss). Fix đề xuất: update contract thay vì đổi code.
+
+Patterns confirmed (knowledge update):
+- **FileAuthService pattern (ADR-019)**: uploader OR conv-member, Optional return, anti-enum 404. Tách auth rule khỏi business logic, reuse giữa download + thumb endpoints.
+- **Fail-open thumbnail (ADR-020)**: upload vẫn 201 dù thumb fail. Feature phụ KHÔNG block hot-path. Log WARN, FE fallback với thumbUrl=null.
+- **Content XOR Attachments (ADR-021)**: message phải có content hoặc attachments (cả 2 rỗng → MSG_NO_CONTENT). DB content NOT NULL → service trim+persist empty string khi attachment-only.
+- **Soft-delete strip attachments (ADR-022, + W5-D3 extend)**: MessageMapper strip cả content + attachments khi deletedAt != null. Applied trung tâm ở mapper cho TẤT CẢ serialization path.
+- **Validation order rẻ → đắt**: count → existence → ownership → expiry → unique → group. Fail-fast minimize DB hit.
+
+Warnings (non-blocking):
+1. Contract §947 "thumbnail luôn JPEG" vs code giữ ext gốc → AD-23. Fix contract.
+2. Thumb endpoint không set Content-Disposition → AD-24. Minor UX.
+3. Content-Type trả theo `record.mime` → nếu AD-23 fix sang JPEG PHẢI update → AD-25.
+4. `MessageMapper.loadAttachmentDtos` silent-skip khi FileRecord not-found → AD-26. ON DELETE CASCADE từ files → không xảy ra V1.
+5. `FileService.upload` step 6 `fileRecordRepository.save(record)` lần 2 redundant với JPA dirty tracking → AD-27. Non-blocking.
+6. `sanitizeForHeader` strip non-ASCII filename → Unicode tên file mất dấu khi download. V1 acceptable. V2 RFC 5987 `filename*=UTF-8''encoded`.
+7. GIF animated thumbnail chỉ lấy frame đầu (Thumbnailator default) — acceptable V1 per contract §964.
+8. `existsByFileIdAndConvMemberUserId` JPQL — dùng index `idx_msg_attach_file(file_id)` đã có trong V7 migration. ConversationMember có index `(conversation_id, user_id)` từ V3. Query plan OK.
+
+Kết luận: APPROVE WITH COMMENTS. 0 BLOCKING. 8 non-blocking warnings (đa số là contract sync + V2 items). Core logic + auth + validation + mapper strip đều đúng pattern. Tests coverage tốt (F01-F18 cover happy + edge). ADR-019/020/021/022 thêm vào knowledge.
+
+---
+
 ## [W5-D4] Reconnect catch-up + Reply UI — APPROVE WITH COMMENTS
 
 Blocking: 0. Tests 145/145 BE pass, FE tsc + eslint 0 errors.

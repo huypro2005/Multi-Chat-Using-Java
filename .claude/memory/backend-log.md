@@ -16,6 +16,43 @@
 
 ---
 
+## [W6-D2] feat: Thumbnail + FileAuthService + STOMP attachments
+
+**Files changed:**
+- `backend/pom.xml` — thêm `net.coobird:thumbnailator:0.4.20`.
+- `backend/src/main/resources/db/migration/V8__add_thumbnail_path.sql` — ALTER TABLE files ADD COLUMN `thumbnail_internal_path VARCHAR(1024) NULL`.
+- `com.chatapp.file.entity.FileRecord` — thêm field `thumbnailInternalPath`.
+- `com.chatapp.file.storage.StorageService` — thêm method `resolveAbsolute(String) throws SecurityException` vào interface.
+- `com.chatapp.file.storage.LocalStorageService` — implement `resolveAbsolute` với canonical prefix check, throw SecurityException khi traversal.
+- `com.chatapp.file.service.ThumbnailService` — mới. 200×200 fit-in-box + 0.85 quality JPEG-style output (giữ format gốc), suffix `_thumb`. Fail-open — upload thành công dù thumbnail fail.
+- `com.chatapp.file.service.FileService` — inject ThumbnailService, sau save FileRecord gọi generate (fail-open). `toDto` đổi `thumbUrl` check sang `thumbnailInternalPath != null` thay vì `isImage()`. Thêm `openThumbnailStream(record)`.
+- `com.chatapp.file.service.FileAuthService` — mới. `findAccessibleById(fileId, userId)` rule uploader OR conv-member, merge 404 cho mọi fail case (expired, not-accessible, not-found).
+- `com.chatapp.file.repository.MessageAttachmentRepository` — thêm `existsByIdFileId(UUID)` + `existsByFileIdAndConvMemberUserId(UUID, UUID)` JPQL JOIN query.
+- `com.chatapp.file.controller.FileController` — thay `loadForDownload` bằng `fileAuthService.findAccessibleById`. Thêm endpoint `GET /{id}/thumb` (200 với Cache-Control 7d + ETag `{id}-thumb` + nosniff). Sanitize filename header (strip CRLF + non-ASCII).
+- `com.chatapp.message.dto.SendMessagePayload` — thêm field `List<UUID> attachmentIds` (nullable).
+- `com.chatapp.message.dto.MessageDto` — thêm field `List<FileDto> attachments` (chèn sau content, trước replyToMessage).
+- `com.chatapp.message.service.MessageMapper` — inject MessageAttachmentRepository + FileRecordRepository, load attachments qua JOIN ORDER BY display_order, strip thành emptyList khi deleted.
+- `com.chatapp.message.service.MessageService` — inject FileRecordRepository + MessageAttachmentRepository (+2 args). `validateStompPayload` thêm XOR rule content/attachments → `MSG_NO_CONTENT`. `sendViaStomp` derive MessageType (TEXT/IMAGE/FILE) + gọi `validateAndAttachFiles` sau save message. Content NOT NULL pitfall → persist `""` thay vì null cho attachments-only message. Edit giữ nguyên, thêm javadoc note attachments immutable V1.
+
+**Tests:**
+- `FileControllerTest` thêm 8 tests (F11–F18): thumbnail path DB, PDF null thumb, GET /thumb 200, PDF /thumb 404, no-JWT 401, conv-member download OK, non-member 404, expired 404. Update F01/F08 dùng valid JPEG bytes (ImageIO) thay vì 20-byte magic để thumbnail generate thành công.
+- `MessageServiceStompTest` thêm 11 tests (W6-T01–T11): 1 image, 5 images, 6 images rejected, 1 PDF, 2 PDFs mixed, PDF+image mixed, other-user file rejected, already-used file rejected, empty content+no-attach → MSG_NO_CONTENT, null content+1 image OK, non-existent file rejected. T-STOMP-04 blank content test: đổi expect từ VALIDATION_FAILED → MSG_NO_CONTENT.
+- `ChatDeleteMessageHandlerTest.messageMapper_stripsContentWhenDeleted` thêm assertion `attachments` empty list khi deleted. Constructor call `new MessageMapper(null, null)` — deleted path không query repos.
+- Update 3 test `new MessageService(...)` constructor calls (ChatEdit, ChatDelete, MessageServiceStomp) thêm 2 mocks FileRecordRepository + MessageAttachmentRepository.
+- Update 4 `new MessageDto(...)` call sites để thêm `attachments=Collections.emptyList()` vào vị trí 6.
+- Update 5 `new SendMessagePayload(...)` call sites thêm `null` cho attachmentIds.
+
+**Test count**: 191 pass (172 baseline + 19 new: 5 thumbnail + 3 auth + 11 attachments).
+
+**Key decisions:**
+- Thumbnail Content-Type giữ MIME gốc (image/jpeg/png/webp/gif) thay vì always JPEG như contract nói → align với Thumbnailator default behavior + tránh phải map Content-Type riêng. Contract note "thumbnail always JPEG" là V2 concern.
+- Content DB column NOT NULL giữ nguyên V1 → persist empty string cho attachment-only message. V2 có thể migrate cho nullable nếu cần rõ ràng hơn.
+- Validation order: count → existence → ownership → expiry → unique → group. Count trước để fail-fast không load DB thừa. Group check cuối vì cần load đủ file records.
+
+**Git**: chưa commit, user sẽ commit thủ công.
+
+---
+
 ## [W6-D1] feat: File Upload Foundation (upload + download stub)
 
 **Files changed (new unless noted):**

@@ -3,6 +3,7 @@ package com.chatapp.file.controller;
 import com.chatapp.exception.AppException;
 import com.chatapp.file.dto.FileDto;
 import com.chatapp.file.entity.FileRecord;
+import com.chatapp.file.service.FileAuthService;
 import com.chatapp.file.service.FileService;
 import com.chatapp.user.entity.User;
 import lombok.RequiredArgsConstructor;
@@ -42,6 +43,7 @@ import java.util.UUID;
 public class FileController {
 
     private final FileService fileService;
+    private final FileAuthService fileAuthService;
 
     /**
      * POST /api/files/upload
@@ -61,10 +63,7 @@ public class FileController {
 
     /**
      * GET /api/files/{id}
-     * Stream file content cho uploader xem/download.
-     *
-     * W6-D1 scope: chỉ uploader download được. W6-D2 sẽ mở rộng cho conv member
-     * (uploader OR member of conversation containing message with this attachment).
+     * Stream file content — uploader hoặc conv-member (W6-D2 dùng FileAuthService).
      *
      * Response headers (theo API_CONTRACT.md):
      *  - Content-Type: MIME thật của file.
@@ -78,18 +77,15 @@ public class FileController {
             @PathVariable UUID id,
             @AuthenticationPrincipal User user) {
 
-        FileRecord record = fileService.loadForDownload(id, user.getId());
-        if (record == null) {
-            // Anti-enumeration: 404 cho cả not-found, not-owner, expired
-            throw new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND",
-                    "Không tìm thấy file");
-        }
+        FileRecord record = fileAuthService.findAccessibleById(id, user.getId())
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND",
+                        "Không tìm thấy file"));
 
         InputStream stream = fileService.openStream(record);
         InputStreamResource resource = new InputStreamResource(stream);
 
-        // Content-Disposition: inline cho browser render (image/PDF). Escape quotes in filename.
-        String safeFilename = record.getOriginalName().replace("\"", "");
+        // Content-Disposition: inline cho browser render (image/PDF). Sanitize tránh header injection.
+        String safeFilename = sanitizeForHeader(record.getOriginalName());
         String contentDisposition = "inline; filename=\"" + safeFilename + "\"";
 
         return ResponseEntity.ok()
@@ -100,5 +96,50 @@ public class FileController {
                 .eTag("\"" + record.getId() + "\"")
                 .cacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePrivate())
                 .body(resource);
+    }
+
+    /**
+     * GET /api/files/{id}/thumb
+     * Stream thumbnail 200x200 của image (W6-D2).
+     *
+     * Auth: dùng {@link com.chatapp.file.service.FileAuthService} — uploader OR
+     * member của conv chứa message attach file này. Anti-enumeration: mọi case
+     * (not-found / not-accessible / expired / không có thumb) → 404 FILE_NOT_FOUND.
+     *
+     * Response:
+     *  - Content-Type: MIME của file (thumbnail giữ cùng format với source: jpg/png/webp/gif).
+     *  - Cache-Control: private, max-age=604800 (7 ngày) — thumbnail immutable.
+     *  - ETag: "{id}-thumb".
+     *  - X-Content-Type-Options: nosniff.
+     */
+    @GetMapping("/{id}/thumb")
+    public ResponseEntity<Resource> downloadThumb(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal User user) {
+
+        FileRecord record = fileAuthService.findAccessibleById(id, user.getId())
+                .filter(r -> r.getThumbnailInternalPath() != null)
+                .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND",
+                        "Không tìm thấy thumbnail"));
+
+        InputStream stream = fileService.openThumbnailStream(record);
+        InputStreamResource resource = new InputStreamResource(stream);
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(record.getMime()))
+                .header("X-Content-Type-Options", "nosniff")
+                .eTag("\"" + record.getId() + "-thumb\"")
+                .cacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePrivate())
+                .body(resource);
+    }
+
+    /**
+     * Sanitize filename cho Content-Disposition header — strip CRLF (chống header injection)
+     * + non-ASCII (tránh encoding corner-case với RFC 5987). Giữ ký tự printable ASCII.
+     */
+    private String sanitizeForHeader(String name) {
+        if (name == null) return "file";
+        return name.replaceAll("[\\r\\n\"]", "")
+                .replaceAll("[^\\x20-\\x7E]", "_");
     }
 }

@@ -2,6 +2,7 @@ package com.chatapp.file.storage;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 
 /**
  * Abstraction cho file storage — V1 dùng local disk (LocalStorageService),
@@ -34,4 +35,22 @@ public interface StorageService {
      * Dùng trong cleanup job (W6-D3) khi file expire hoặc orphan.
      */
     void delete(String storagePath) throws IOException;
+
+    /**
+     * Resolve internal (relative) path thành absolute {@link Path}, kèm canonical
+     * prefix check — throw {@link SecurityException} nếu phát hiện path traversal
+     * (path cố nằm ngoài basePath).
+     *
+     * <p>Dùng trong {@code ThumbnailService.generate()} và các tác vụ đọc/ghi
+     * trực tiếp filesystem (cần {@code Path} object, không phải {@code InputStream}).
+     *
+     * <p>V1 local disk: trả absolute path trong basePath. V2 S3: sẽ throw
+     * {@code UnsupportedOperationException} hoặc trả {@link Path} tạm cục bộ sau khi
+     * download — tuỳ implementation khi migrate.
+     *
+     * @param internalPath path relative đã lưu trong DB (vd "2026/04/abc.jpg").
+     * @return absolute {@link Path} đã được canonicalize + validate.
+     * @throws SecurityException nếu internalPath escape basePath.
+     */
+    Path resolveAbsolute(String internalPath) throws SecurityException;
 }

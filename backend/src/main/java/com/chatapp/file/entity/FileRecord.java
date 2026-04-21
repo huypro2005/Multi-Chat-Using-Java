@@ -73,6 +73,13 @@ public class FileRecord {
     @Column(name = "attached_at")
     private OffsetDateTime attachedAt;
 
+    /**
+     * Internal path tới thumbnail 200x200 (W6-D2). NULL cho PDF/non-image hoặc thumbnail generation failed.
+     * Không expose ra API — URL thumbnail luôn là /api/files/{id}/thumb (server resolve path).
+     */
+    @Column(name = "thumbnail_internal_path", length = 1024)
+    private String thumbnailInternalPath;
+
     @PrePersist
     protected void onCreate() {
         if (id == null) id = UUID.randomUUID();
