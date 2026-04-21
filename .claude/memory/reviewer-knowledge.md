@@ -414,6 +414,26 @@
 
 ---
 
+## W6 Security Patterns (learned)
+
+*(Tóm tắt 7 pattern security/file-handling rút ra từ W6 audit. Mỗi pattern có 1-2 dòng, link đến file implementation và ADR liên quan.)*
+
+1. **Magic bytes MIME validation (Tika)**: `tika.detect(InputStream)` không trust `Content-Type` header. Tika chỉ đọc ~8KB magic. `text/plain` cần strip charset suffix `split(";")[0]`. Xem `FileValidationService.java` (W6-D1) + W6-2 RESOLVED.
+
+2. **ZIP→Office override**: DOCX/XLSX/PPTX là ZIP container → Tika có thể detect `application/zip`. Override MIME bằng extension hint CHỈ KHI Tika trả `application/zip` (không skip whitelist check sau đó). Xem `FileValidationService.validate()` step 3 (W6-D4-extend).
+
+3. **Path traversal defense**: `LocalStorageService` canonical path check (`normalize() + toAbsolutePath() + startsWith(basePath)`). Internal filename = UUID (không user-controlled). `sanitizeFilename` chỉ dùng cho `Content-Disposition`, không dùng cho storage path. Xem `LocalStorageService.assertWithinBase()` (W6-D1) + W6-1 RESOLVED + ADR-019.
+
+4. **FileAuthService anti-enumeration**: uploader OR conv-member, 404 cho tất cả non-access cases (not-found / expired / cleanup-deleted / non-member). Tách auth rule khỏi business logic, reuse cho download + thumb endpoints. Xem `FileAuthService.findAccessibleById()` (W6-D2) + ADR-019.
+
+5. **`useProtectedObjectUrl` (FE)**: `api.get({ responseType: 'blob', signal })` → blob URL. Cleanup: `controller.abort() + URL.revokeObjectURL(currentUrl)` trong useEffect return. Pattern: KHÔNG dùng `<img src>` trỏ thẳng `/api/files/...` (Bearer token không gửi qua browser native fetch). Xem `useProtectedObjectUrl.ts` (W6-D4) + AD-30 (V2 signed URLs).
+
+6. **stillAttached handling**: physical delete TRƯỚC, check attachment, set `expired=true` + save DB (KHÔNG hard delete record vì message history sẽ mất attachment ref → FE thấy "📎 [tệp đã hết hạn]" thay vì 500). Xem `FileCleanupJob.cleanupExpiredFiles()` (W6-D3) + W6-4 RESOLVED.
+
+7. **iconType server-computed**: MIME → iconType (8 enum values: IMAGE/PDF/WORD/EXCEL/POWERPOINT/TEXT/ARCHIVE/GENERIC) trong BE. FE không duplicate MIME → icon map (đỡ phải sửa 2 nơi khi extend). `GENERIC` là fallback an toàn (cover null + unknown). Xem `FileService.resolveIconType()` (W6-D4-extend).
+
+---
+
 ## Changelog contract
 
 *(Log mỗi lần thay đổi contract, ngắn gọn. Chi tiết đầy đủ ở cuối API_CONTRACT.md và SOCKET_EVENTS.md.)*
@@ -453,3 +473,4 @@
 - 2026-04-20 (Consolidation cuối W5-D3): Rotate `reviewer-log.md` 1407 → 467 dòng (giữ verdict + blocking + key decisions + patterns, bỏ file:line + checklist verify). Restructure `docs/WARNINGS.md` thành 4 section rõ (Pre-production / Acceptable V1 / Cleanup / V2 Enhancement + Resolved). Thêm AD-14 (clock skew), AD-15 (dedup TTL reset), AD-16 (reply deleted), AD-17 (catch-up limit), AD-18 (timerRegistry fail-open) + W5-D3 cleanup items. Thêm ADR-018 (Delete unlimited window) vào knowledge.
 - 2026-04-21 (W6-D3): Review `FileCleanupJob` (expired + orphan @Scheduled). APPROVE (0 BLOCKING). 197/197 tests pass. Thêm 3 approved patterns BE: (1) @Scheduled cleanup job pattern (6-field cron Spring 6, ConditionalOnProperty disable, batch page-0 loop, per-record try-catch); (2) stillAttached graceful flow (physical delete → DB mark expired → GET /files/{id} → StorageException → 404 graceful via FileController catch); (3) Multi-instance @Scheduled V2 note (Redis SETNX distributed lock pattern, reviewer rule mọi @Scheduled mới phải có note V2 trong WARNINGS.md). Recommend orchestrator gọi BE add 1 dòng V2 multi-instance lock vào `docs/WARNINGS.md` V2 Enhancement bucket (chưa có, đã document trong backend-knowledge và reviewer-knowledge).
 - 2026-04-21 (W6-D4): Review FE File Upload UI + Attachment Display. APPROVE (0 BLOCKING). Build clean (`npm run build` zero errors, 2 pre-existing warnings OK). 5 file FE modified + 1 folder mới `features/files/` (useUploadFile + validateFiles + 3 component PendingAttachmentItem/AttachmentGallery/PdfCard). 9/9 BLOCKING checklist PASS: AbortController native, revokeObjectURL 4 điểm (cancel/remove/clear/unmount via pendingRef), Content-Type undefined cho FormData, optimistic `attachments: []`, RetryButton truyền `attachmentIds: []`, guard uploading toast, send disable đúng (errors-only KHÔNG enable), DragLeave currentTarget.contains check, StompSendPayload.attachmentIds wired. ACK error handler thêm 7 attachment error codes khớp 100% SOCKET_EVENTS.md (MSG_ATTACHMENT_NOT_FOUND/NOT_OWNED/ALREADY_USED/EXPIRED, MSG_ATTACHMENTS_MIXED/TOO_MANY, MSG_NO_CONTENT). Thêm 3 FE approved patterns: Blob URL cleanup ref-based (avoid stale closure), FormData Content-Type undefined (axios + multipart), AbortController native (axios v1+ replace CancelToken). MessageItem render Messenger-style: attachment no-bubble + text caption bubble riêng. AttachmentGallery có lightbox + keyboard nav (←/→/Esc) + download. Contract unchanged (SOCKET v1.3-w5d2 + API v0.6.1).
+- 2026-04-21 (W6-D5): Security audit Tuần 6 toàn diện (18 items). APPROVED — 18/18 PASS, 0 BLOCKING, 0 warnings. Verified: path traversal defense (canonical prefix + UUID filename + sanitizeFilename chỉ cho Content-Disposition), Tika magic bytes MIME validation (charset strip, ZIP→Office override gated), FileAuthService 2 rules + anti-enum 404, validateAndAttachFiles 6-rule order rẻ→đắt, Content XOR Attachments (MSG_NO_CONTENT), stillAttached graceful flow, batch pagination loop, @ConditionalOnProperty test profile cron="-", useProtectedObjectUrl cleanup (abort + revoke), no raw `<img src=/api/files`, iconType 8-value coverage. WARNINGS.md: move 3 RESOLVED W6 (W6-1/2/4), expand V2 bucket (signed URLs / Office macro / per-user quota), add AD-30 (blob URL lifecycle V2 signed URLs). Append W6 Security Patterns section (7 patterns). Memory consolidate reviewer-log 689→313 dòng. Tests BE 210/210 + FE build clean.
