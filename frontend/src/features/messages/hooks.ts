@@ -121,7 +121,7 @@ export function useSendMessage(convId: string) {
   const user = useAuthStore((s) => s.user)
 
   const sendMessage = useCallback(
-    (content: string, replyToMessageId?: string): { tempId: string } => {
+    (content: string, replyToMessageId?: string, attachmentIds?: string[]): { tempId: string } => {
       const client = getStompClient()
       if (!client?.connected) {
         throw new Error('STOMP_NOT_CONNECTED')
@@ -143,6 +143,7 @@ export function useSendMessage(convId: string) {
         },
         type: 'TEXT',
         content,
+        attachments: [], // empty optimistic; ACK replaces with real AttachmentDto[]
         replyToMessage: null, // optimistic không có preview, server ACK sẽ có
         editedAt: null,
         deletedAt: null,
@@ -165,6 +166,7 @@ export function useSendMessage(convId: string) {
         content,
         type: 'TEXT',
         replyToMessageId: replyToMessageId ?? null,
+        attachmentIds: attachmentIds ?? [],
       })
 
       // 6. Start 10s timeout timer

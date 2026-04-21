@@ -249,6 +249,31 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 
 ---
 
+## File upload patterns (W6-D4)
+
+### useUploadFile — AbortController + onUploadProgress
+- `AbortController` thay `CancelToken` (axios v1+ deprecated CancelToken). `signal: controller.signal`.
+- `onUploadProgress: (e) => pct = Math.round(e.loaded / e.total * 100)` — track per file.
+- Cancel = `controller.abort()` → axios throws with `axios.isCancel(err)` → filter from list silently.
+- Revoke blob URLs pattern: `URL.revokeObjectURL(item.previewUrl)` trong `cancel`, `remove`, `clear` + useEffect cleanup khi unmount (dùng `useRef` để capture current state trong cleanup).
+
+### AttachmentGallery — Messenger-style (no bubble background for images)
+- Ảnh hiển thị KHÔNG có bubble background — chỉ render `<AttachmentGallery>` (grid thumbnail).
+- Text caption (nếu có) hiển thị PHÍA DƯỚI ảnh, trong bubble riêng.
+- Nếu chỉ có text: bubble như cũ. Nếu chỉ có ảnh: không có bubble.
+- PDF render qua `<PdfCard>` (link card) thay vì gallery.
+
+### validateFiles
+- Chỉ: all-images (tối đa 5 total) OR exactly 1 PDF alone (không mixed).
+- Check MIME + size (20MB max) per file.
+- Nhận `currentPendingCount` để check total khi user chọn nhiều lần.
+
+### Drag-drop pattern trong MessageInput
+- `onDragLeave`: chỉ clear `isDragging` khi `!e.currentTarget.contains(e.relatedTarget as Node)` — tránh flicker khi rời child element.
+- `isDragging` ring feedback: `ring-2 ring-indigo-400 bg-indigo-50/30` trên container.
+
+---
+
 ## Thư viện đã chọn
 
 | Library | Ghi chú |

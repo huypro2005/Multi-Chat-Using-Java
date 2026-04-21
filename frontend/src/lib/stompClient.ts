@@ -20,6 +20,7 @@ export interface StompSendPayload {
   content: string
   type: 'TEXT'
   replyToMessageId?: string | null
+  attachmentIds?: string[] // NEW — empty array OK, BE accepts
 }
 
 // ---------------------------------------------------------------------------

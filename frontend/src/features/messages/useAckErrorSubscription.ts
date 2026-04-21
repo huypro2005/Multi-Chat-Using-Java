@@ -17,6 +17,7 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import type { StompSubscription } from '@stomp/stompjs'
+import { toast } from 'sonner'
 import { getStompClient, onConnectionStateChange } from '@/lib/stompClient'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { timerRegistry } from './timerRegistry'
@@ -190,15 +191,43 @@ export function useAckErrorSubscription(): void {
 
           switch (operation) {
             case 'SEND': {
-              // Logic cũ: mark failed + handle auth errors
+              // Mark message as failed in cache
               markFailedByTempId(queryClient, clientId, error, code)
 
-              if (code === 'AUTH_REQUIRED' || code === 'AUTH_TOKEN_EXPIRED') {
-                void import('@/services/authService').then(({ authService }) =>
-                  authService.refresh().catch(() => {
-                    window.location.href = '/login'
-                  }),
-                )
+              // Attachment-specific error codes
+              switch (code) {
+                case 'MSG_ATTACHMENT_NOT_FOUND':
+                  toast.error('Tệp đính kèm không tồn tại')
+                  break
+                case 'MSG_ATTACHMENT_NOT_OWNED':
+                  toast.error('Lỗi xác thực tệp đính kèm')
+                  break
+                case 'MSG_ATTACHMENT_ALREADY_USED':
+                  toast.error('Tệp đã được sử dụng trong tin nhắn khác')
+                  break
+                case 'MSG_ATTACHMENTS_MIXED':
+                  toast.error('Không thể gửi lẫn PDF và ảnh cùng lúc')
+                  break
+                case 'MSG_ATTACHMENTS_TOO_MANY':
+                  toast.error('Vượt giới hạn số tệp đính kèm (tối đa 5)')
+                  break
+                case 'MSG_ATTACHMENT_EXPIRED':
+                  toast.error('Tệp đính kèm đã hết hạn, vui lòng upload lại')
+                  break
+                case 'MSG_NO_CONTENT':
+                  toast.error('Tin nhắn phải có nội dung hoặc tệp đính kèm')
+                  break
+                case 'AUTH_REQUIRED':
+                case 'AUTH_TOKEN_EXPIRED':
+                  void import('@/services/authService').then(({ authService }) =>
+                    authService.refresh().catch(() => {
+                      window.location.href = '/login'
+                    }),
+                  )
+                  break
+                default:
+                  // Other errors already reflected via message status='failed'
+                  break
               }
               break
             }

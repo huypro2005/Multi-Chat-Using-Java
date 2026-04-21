@@ -1,8 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Paperclip, Send, WifiOff } from 'lucide-react'
+import { toast } from 'sonner'
 import { useSendMessage } from '../hooks'
-import { getConnectionState } from '@/lib/stompClient'
-import { onConnectionStateChange } from '@/lib/stompClient'
+import { getConnectionState, onConnectionStateChange } from '@/lib/stompClient'
+import { useUploadFile } from '@/features/files/useUploadFile'
+import { validateFiles } from '@/features/files/validateFiles'
+import { PendingAttachmentItem } from '@/features/files/components/PendingAttachmentItem'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,6 +32,8 @@ const WARN_CHARS = 4500
  * Enter = gửi, Shift+Enter = xuống dòng.
  * Auto-resize textarea tối đa 5 dòng.
  * Disable send khi STOMP chưa connect.
+ * Hỗ trợ đính kèm ảnh (tối đa 5) hoặc 1 PDF.
+ * Hỗ trợ kéo thả file vào vùng nhập.
  */
 export function MessageInput({
   conversationId,
@@ -41,7 +46,9 @@ export function MessageInput({
   const [content, setContent] = useState('')
   const [charError, setCharError] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Track STOMP connection state để disable input khi mất kết nối
   const [isConnected, setIsConnected] = useState(() => getConnectionState() === 'CONNECTED')
@@ -54,6 +61,7 @@ export function MessageInput({
   }, [])
 
   const sendMessage = useSendMessage(conversationId)
+  const { pending, upload, cancel, remove, clear } = useUploadFile()
 
   // Auto-resize textarea height
   const autoResize = useCallback(() => {
@@ -72,20 +80,47 @@ export function MessageInput({
     onTypingStart?.()
   }
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    // Reset input value so selecting the same file again triggers onChange
+    e.target.value = ''
+    if (files.length === 0) return
+    const { ok, errors } = validateFiles(files, pending.length)
+    errors.forEach((err) => toast.error(err))
+    if (ok.length > 0) void upload(ok)
+  }
+
   const handleSend = useCallback(() => {
     const trimmed = content.trim()
-    if (!trimmed || disabled || !isConnected) return
+    const hasDoneAttachments = pending.some((p) => p.status === 'done')
+
+    // Guard: still uploading
+    if (pending.some((p) => p.status === 'uploading')) {
+      toast.error('Đang tải tệp...')
+      return
+    }
+
+    // Guard: nothing to send
+    if (!trimmed && !hasDoneAttachments) return
+
+    if (disabled || !isConnected) return
     if (trimmed.length > MAX_CHARS) {
       setCharError(true)
       return
     }
+
+    const attachmentIds = pending
+      .filter((p) => p.status === 'done' && p.result)
+      .map((p) => p.result!.id)
+
     try {
       onTypingStop?.()
-      sendMessage(trimmed, replyToMessageId ?? undefined)
+      sendMessage(trimmed, replyToMessageId ?? undefined, attachmentIds)
       onSent?.()
       setContent('')
       setCharError(false)
       setSendError(null)
+      clear()
       // Reset textarea height
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
@@ -95,7 +130,7 @@ export function MessageInput({
       const message = err instanceof Error ? err.message : 'Không thể gửi tin nhắn'
       setSendError(message === 'STOMP_NOT_CONNECTED' ? 'Mất kết nối, thử lại sau' : message)
     }
-  }, [content, disabled, isConnected, sendMessage, onTypingStop, replyToMessageId, onSent])
+  }, [content, disabled, isConnected, pending, sendMessage, onTypingStop, replyToMessageId, onSent, clear])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !disabled) {
@@ -104,17 +139,61 @@ export function MessageInput({
     }
   }
 
+  // Drag-drop handlers
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    // Only clear when leaving the container (not a child element)
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setIsDragging(false)
+    const files = Array.from(e.dataTransfer.files)
+    const { ok, errors } = validateFiles(files, pending.length)
+    errors.forEach((err) => toast.error(err))
+    if (ok.length > 0) void upload(ok)
+  }
+
   const showCounter = content.length > WARN_CHARS
   const isOverLimit = content.length > MAX_CHARS
   const isInputDisabled = disabled || !isConnected
+  const hasDoneAttachments = pending.some((p) => p.status === 'done')
 
   return (
-    <div className="px-4 py-3 border-t bg-white flex flex-col gap-1 flex-shrink-0">
+    <div
+      className={`px-4 py-3 border-t bg-white flex flex-col gap-1 flex-shrink-0
+        ${isDragging ? 'ring-2 ring-indigo-400 bg-indigo-50/30' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {/* Mất kết nối banner */}
       {!isConnected && (
         <div className="flex items-center gap-1.5 px-1 py-0.5">
           <WifiOff size={12} className="text-amber-500" />
           <span className="text-xs text-amber-600">Mất kết nối, đang thử lại…</span>
+        </div>
+      )}
+
+      {/* Pending attachments preview */}
+      {pending.length > 0 && (
+        <div className="flex gap-2 py-1 overflow-x-auto">
+          {pending.map((p) => (
+            <PendingAttachmentItem
+              key={p.localId}
+              pending={p}
+              onCancel={() =>
+                p.status === 'uploading' ? cancel(p.localId) : remove(p.localId)
+              }
+            />
+          ))}
         </div>
       )}
 
@@ -145,12 +224,24 @@ export function MessageInput({
       )}
 
       <div className="flex items-end gap-2">
-        {/* Attach button — disabled until Week 5 file upload */}
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
+        {/* Attach button — enabled */}
         <button
           type="button"
-          disabled
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isInputDisabled}
           aria-label="Đính kèm file"
-          className="p-2 text-gray-400 opacity-50 cursor-not-allowed flex-shrink-0"
+          className="p-2 text-gray-500 hover:text-indigo-600 transition-colors flex-shrink-0
+            disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <Paperclip size={20} />
         </button>
@@ -175,7 +266,11 @@ export function MessageInput({
         <button
           type="button"
           onClick={handleSend}
-          disabled={isInputDisabled || !content.trim() || isOverLimit}
+          disabled={
+            isInputDisabled ||
+            (!content.trim() && !hasDoneAttachments) ||
+            isOverLimit
+          }
           aria-label="Gửi tin nhắn"
           className="bg-indigo-600 text-white rounded-full p-2 disabled:opacity-40
             hover:bg-indigo-700 transition-colors flex-shrink-0"

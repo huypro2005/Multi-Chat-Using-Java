@@ -5,6 +5,21 @@
 
 ---
 
+[W6-D4] feat: file upload UI + attachment gallery + PDF card. Wire attachmentIds vào useSendMessage. [2026-04-21]
+- Tạo: src/features/files/ (thư mục mới)
+- Tạo: src/features/files/validateFiles.ts — validate MIME, size, max 5 ảnh / 1 PDF alone
+- Tạo: src/features/files/useUploadFile.ts — AbortController per file, onUploadProgress, cancel/remove/clear, URL.revokeObjectURL cleanup on unmount
+- Tạo: src/features/files/components/PendingAttachmentItem.tsx — preview thumbnail với progress bar + error overlay
+- Tạo: src/features/files/components/AttachmentGallery.tsx — grid 1-2 cols, lightbox với keyboard nav (arrow/esc) + download
+- Tạo: src/features/files/components/PdfCard.tsx — link card với tên file + size
+- Sửa: src/types/message.ts — thêm AttachmentDto interface + attachments: AttachmentDto[] vào MessageDto
+- Sửa: src/lib/stompClient.ts — StompSendPayload thêm attachmentIds?: string[]
+- Sửa: src/features/messages/hooks.ts — useSendMessage nhận attachmentIds?: string[], optimistic msg init attachments: []
+- Sửa: src/features/messages/components/MessageInput.tsx — enable Paperclip, hidden file input, drag-drop, pending attachments preview bar, guard uploading/no-content
+- Sửa: src/features/messages/components/MessageItem.tsx — render AttachmentGallery/PdfCard trước text caption, Messenger-style (ảnh không có bubble bg), RetryButton pass attachmentIds: []
+- Sửa: src/features/messages/useAckErrorSubscription.ts — add toast import + attachment error codes (MSG_ATTACHMENT_*)
+- Build: npm run build pass, zero TS errors
+
 [FE] feat(w5-d4): reconnect catch-up + reply UI [2026-04-20]
 - Tạo: src/features/messages/catchUp.ts — REST catch-up sau reconnect, GET /messages?after=<ts>&limit=100, merge+dedup, fallback invalidate
 - Sửa: src/features/messages/useConvSubscription.ts — wasDisconnectedRef track disconnect, gọi catchUpMissedMessages khi reconnect (không phải connect đầu)

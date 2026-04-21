@@ -26,12 +26,26 @@ export interface MessageSenderDto {
   avatarUrl: string | null
 }
 
+// ---------------------------------------------------------------------------
+// AttachmentDto — file/image attachment metadata returned by BE
+// ---------------------------------------------------------------------------
+export interface AttachmentDto {
+  id: string
+  mime: string
+  name: string
+  size: number
+  url: string
+  thumbUrl: string | null
+  expiresAt: string // ISO8601
+}
+
 export interface MessageDto {
   id: string
   conversationId: string
   sender: MessageSenderDto
   type: MessageType
-  content: string | null // null khi message đã bị soft-delete (deletedAt != null)
+  content: string | null // null khi message đã bị soft-delete (deletedAt != null) hoặc attachment-only
+  attachments: AttachmentDto[] // luôn array, không null (BE trả [] nếu không có)
   replyToMessage: ReplyPreviewDto | null
   editedAt: string | null // ISO8601
   createdAt: string // ISO8601

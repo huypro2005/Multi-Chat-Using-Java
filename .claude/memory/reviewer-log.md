@@ -17,6 +17,38 @@ Contract: ...
 
 ---
 
+## [W6-D4] FE File Upload UI + Attachment Display — APPROVE
+
+Blocking: 0. Build clean (`npm run build` zero errors, 2 pre-existing warnings là chunk size + dynamic import authService — không cần fix). Diff: 5 file FE modified + 1 folder mới (`features/files/` có 2 hook + 3 component).
+
+BLOCKING checklist 1-9 PASS hết:
+1. **AbortController native** — `useUploadFile.ts` line 50 `new AbortController()` + `signal: controller.signal` line 74. KHÔNG dùng axios.CancelToken (deprecated v1+).
+2. **revokeObjectURL 4 điểm** — VERIFIED tất cả: cancel (line 128), remove (line 136), clear loop (line 144), unmount cleanup useEffect via `pendingRef.current` (line 41). Pattern ref + cleanup đúng (state stale closure trap tránh được).
+3. **Content-Type undefined cho FormData** — line 73 `headers: { 'Content-Type': undefined }` — comment giải thích lý do (browser auto-set boundary). KHÔNG hardcode `multipart/form-data` thủ công.
+4. **`attachments: []` optimistic** — `hooks.ts:146` field present trong optimisticMsg, comment "ACK replaces with real AttachmentDto[]".
+5. **RetryButton `attachmentIds: []`** — `MessageItem.tsx:62` `sendMessage(message.content ?? '', undefined, [])` — đúng signature mới (3rd arg attachmentIds empty cho retry, không upload lại).
+6. **Guard uploading** — `MessageInput.tsx:88` `if (pending.some((p) => p.status === 'uploading'))` → `toast.error('Đang tải tệp...')` + return, BEFORE check disabled/connected.
+7. **Send disable đúng** — `MessageInput.tsx:269` `disabled={isInputDisabled || (!content.trim() && !hasDoneAttachments) || isOverLimit}` — chỉ enable khi có text HOẶC có attachment status='done' (errors-only KHÔNG enable).
+8. **DragLeave currentTarget.contains check** — `MessageInput.tsx:147` `if (!e.currentTarget.contains(e.relatedTarget as Node))` tránh flicker khi mouse di qua child elements.
+9. **StompSendPayload.attachmentIds wired** — `stompClient.ts:23` field added to interface; `hooks.ts:169` truyền `attachmentIds: attachmentIds ?? []`; `publishConversationMessage` JSON.stringify toàn bộ payload (no field omission risk).
+
+ACK error handler (W6-D4 bonus): `useAckErrorSubscription.ts` switch(code) thêm 7 attachment-specific error codes (MSG_ATTACHMENT_NOT_FOUND, MSG_ATTACHMENT_NOT_OWNED, MSG_ATTACHMENT_ALREADY_USED, MSG_ATTACHMENTS_MIXED, MSG_ATTACHMENTS_TOO_MANY, MSG_ATTACHMENT_EXPIRED, MSG_NO_CONTENT) → mỗi case `toast.error(...)` user-facing message tiếng Việt. AUTH refresh logic giữ nguyên trong cùng switch. Khớp 100% với SOCKET_EVENTS.md mục 305-311.
+
+Validation client-side `validateFiles.ts` đúng business rule: all-images max 5 OR exactly-1-PDF (mixed → error), MIME whitelist (jpeg/png/webp/gif/pdf), max 20 MB. Defense-in-depth với BE (BE vẫn validate, FE chỉ improve UX).
+
+MessageItem rendering: image-attachment + text caption tách riêng (Messenger pattern) — attachment KHÔNG có bubble bg, text bubble riêng dưới. PdfCard dùng cho 1 PDF, AttachmentGallery cho 1-5 images với lightbox + keyboard nav (←/→/Esc) + download button. Thumbnail fallback `att.thumbUrl ?? att.url` → fail-open khi BE thumb generate fail (ADR-020 consistency).
+
+Patterns confirmed:
+- **Cleanup blob URL ref-based pattern (FE)**: `pendingRef.current = pending` mỗi render → unmount useEffect đọc `pendingRef.current` (KHÔNG đọc `pending` state — sẽ stale closure). Forge pattern bắt buộc cho mọi cleanup `URL.createObjectURL` / EventSource / WebSocket có dynamic state. Reuse cho future audio/video preview.
+- **FormData Content-Type undefined**: axios + multipart MUST set `headers: { 'Content-Type': undefined }` — KHÔNG omit headers (interceptor có thể inject `application/json` default), KHÔNG hardcode `multipart/form-data` (thiếu boundary → BE parse fail). Comment giải thích trong code BẮT BUỘC.
+- **AbortController native, không CancelToken**: axios v1+ deprecated CancelToken. Mọi cancel-able request mới dùng `new AbortController()` + `signal: controller.signal`. Cancel: `controller.abort()` → catch `axios.isCancel(err)` filter silent (không hiện error toast).
+
+Contract: SOCKET_EVENTS.md v1.3-w5d2 unchanged. Attachment error codes đã có từ W6-D1 contract draft → FE consume khớp.
+
+Recommend: KHÔNG cần fix gì. Có thể commit + tag.
+
+---
+
 ## [W6-D3] File Cleanup Jobs (@Scheduled expired + orphan) — APPROVE
 
 Blocking: 0. Tests 197/197 BE pass (191 cũ + 6 mới CJ01-06).

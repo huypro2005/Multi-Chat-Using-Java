@@ -11,6 +11,8 @@ import { useDeleteMessage } from '../useDeleteMessage'
 import { MessageActions } from './MessageActions'
 import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
 import { ReplyQuote } from './ReplyQuote'
+import { AttachmentGallery } from '@/features/files/components/AttachmentGallery'
+import { PdfCard } from '@/features/files/components/PdfCard'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -57,8 +59,9 @@ function RetryButton({ message }: RetryButtonProps) {
     )
 
     // 2. Gửi lại với tempId MỚI (không reuse tempId cũ — contract mục 3b.4)
+    // attachmentIds empty khi retry (không upload lại file)
     try {
-      sendMessage(message.content ?? '')
+      sendMessage(message.content ?? '', undefined, [])
     } catch {
       // Nếu STOMP vẫn chưa connect → thông báo ngầm (không crash UI)
       // MessageInput sẽ disable send button khi mất kết nối
@@ -265,6 +268,9 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
 
   // --- Bubble sent by current user ---
   if (isOwn) {
+    const hasAttachments = !isDeleted && message.attachments && message.attachments.length > 0
+    const hasContent = !isDeleted && !!message.content
+
     return (
       <div className="flex flex-col items-end gap-0.5 group">
         <div className="flex justify-end items-end gap-1.5">
@@ -314,17 +320,33 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
                 onClose={handleCloseEdit}
               />
             ) : (
-              /* Normal bubble */
-              <div
-                className={`rounded-2xl rounded-br-sm px-4 py-2 text-sm whitespace-pre-wrap break-words
-                  ${isFailed ? 'bg-red-100 text-red-800 border border-red-200' : 'bg-indigo-600 text-white'}`}
-              >
-                {message.content}
-                {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
-                {message.editedAt && !isDeleted && (
-                  <span className="text-indigo-200 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+              /* Normal render: attachments (no bubble bg) + text caption (with bubble) */
+              <>
+                {/* Attachments — Messenger-style: no bubble background */}
+                {hasAttachments && (
+                  <div className="mb-1">
+                    {message.attachments![0].mime === 'application/pdf' ? (
+                      <PdfCard attachment={message.attachments![0]} />
+                    ) : (
+                      <AttachmentGallery attachments={message.attachments!} />
+                    )}
+                  </div>
                 )}
-              </div>
+
+                {/* Text content (caption) with bubble background */}
+                {hasContent && (
+                  <div
+                    className={`rounded-2xl rounded-br-sm px-4 py-2 text-sm whitespace-pre-wrap break-words
+                      ${isFailed ? 'bg-red-100 text-red-800 border border-red-200' : 'bg-indigo-600 text-white'}`}
+                  >
+                    {message.content}
+                    {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
+                    {message.editedAt && (
+                      <span className="text-indigo-200 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -378,16 +400,32 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
         {isDeleted ? (
           <DeletedMessagePlaceholder />
         ) : (
-          <div
-            className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm
-              px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
-          >
-            {message.content}
-            {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
-            {message.editedAt && !isDeleted && (
-              <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+          <>
+            {/* Attachments — Messenger-style: no bubble background */}
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="mb-1">
+                {message.attachments[0].mime === 'application/pdf' ? (
+                  <PdfCard attachment={message.attachments[0]} />
+                ) : (
+                  <AttachmentGallery attachments={message.attachments} />
+                )}
+              </div>
             )}
-          </div>
+
+            {/* Text content with bubble — only render when content exists */}
+            {message.content && (
+              <div
+                className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm
+                  px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
+              >
+                {message.content}
+                {/* "(đã chỉnh sửa)" badge */}
+                {message.editedAt && (
+                  <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 
