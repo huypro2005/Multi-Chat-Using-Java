@@ -289,3 +289,61 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 | @stomp/stompjs + sockjs-client | STOMP over WebSocket |
 | firebase | Google OAuth |
 | tailwindcss v4 + @tailwindcss/vite | CSS utility-first |
+
+---
+
+## Pattern: Auth-protected image loading (W6-D4 fix)
+
+### Bug context
+`<img src='/api/files/{id}/thumb'>` không gửi `Authorization` header vì browser native fetch không qua axios interceptor. BE yêu cầu JWT → trả 401 → ảnh broken.
+
+### Solution: useProtectedObjectUrl
+
+File: `src/features/files/hooks/useProtectedObjectUrl.ts`
+
+Fetch file qua `api.get({ responseType: 'blob', signal: controller.signal })` (có Bearer token) → `URL.createObjectURL` → return local blob URL cho `<img src>`.
+
+### Usage
+- `AttachmentGallery.tsx`: thumbnail grid + lightbox full-size
+- `PdfCard.tsx` (nếu cần preview): download blob rồi trigger `<a download>`
+- Tương lai: avatar, group avatar, mọi protected media
+
+### Critical implementation rules
+
+1. **AbortController bắt buộc** — cancel in-flight request khi unmount hoặc path đổi:
+   ```ts
+   const controller = new AbortController()
+   api.get(path, { responseType: 'blob', signal: controller.signal })
+   return () => { controller.abort(); URL.revokeObjectURL(currentUrl) }
+   ```
+
+2. **URL.revokeObjectURL trong cleanup return** — tránh memory leak:
+   ```ts
+   return () => {
+     controller.abort()
+     if (currentUrl) URL.revokeObjectURL(currentUrl)
+   }
+   ```
+
+3. **Dependency `[path]`** — re-fetch khi attachment id thay đổi.
+
+4. **Ignore abort error** — không setObjectUrl(null) khi err.name === 'CanceledError' (abort là expected, không phải lỗi thật).
+
+5. **Reset khi path = null** — `setObjectUrl(null)` khi path falsy để clear state.
+
+### Anti-patterns cấm
+- `<img src>` trỏ thẳng `/api/files/{id}` không qua hook → 401
+- Token trong query param `?token=xxx` → leak trong server logs + Referer header
+- `CancelToken` (deprecated axios v0.x) → dùng `AbortController` thay
+
+### V2 alternatives
+- Short-lived signed URL (HMAC + 15min expiry): BE generate, FE dùng trực tiếp, browser cache native. Tốt hơn về performance khi scale.
+- Service Worker: intercept fetch image, inject auth header. Phức tạp hơn.
+
+V1 blob URL đơn giản, secure, đủ cho demo/MVP.
+
+### Regression test
+- Upload ảnh → thumbnail hiện trong bubble (không broken icon)
+- Mở lightbox → full-size load
+- Refresh page → ảnh vẫn load (token restore qua authService.init)
+- Scroll nhanh qua 20+ ảnh → không memory leak (DevTools Memory tab flat)

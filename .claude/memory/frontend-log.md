@@ -5,6 +5,10 @@
 
 ---
 
+[W6-D4] fix: useProtectedObjectUrl add AbortController to cancel in-flight requests on unmount. docs: add auth-protected image pattern to knowledge. [2026-04-21]
+
+---
+
 [W6-D4] feat: file upload UI + attachment gallery + PDF card. Wire attachmentIds vào useSendMessage. [2026-04-21]
 - Tạo: src/features/files/ (thư mục mới)
 - Tạo: src/features/files/validateFiles.ts — validate MIME, size, max 5 ảnh / 1 PDF alone
