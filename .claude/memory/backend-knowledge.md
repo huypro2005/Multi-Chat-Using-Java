@@ -52,32 +52,14 @@
 
 ## Pattern đã dùng trong codebase
 
-*(Điền khi đã có code mẫu cho pattern đó, để các feature sau tuân theo.)*
-
-### Controller → Service → Repository
-- (chưa có)
-
-### Entity pattern
-- KHÔNG dùng `@Data` cho entity — gây vấn đề equals/hashCode với JPA lazy-loading.
-- Dùng `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`.
-- Entity có thể có domain method (vd `user.markAsDeleted()`) — không phải POJO chay.
-- `@PrePersist` / `@PreUpdate` để tự set createdAt/updatedAt thay vì Spring Auditing (giữ đơn giản).
-- `@ManyToOne(fetch = FetchType.LAZY)` — luôn LAZY, không bao giờ EAGER.
-
-### Package structure (đã dùng)
-- `com.chatapp.user.entity` — User, UserAuthProvider, UserBlock
-- `com.chatapp.user.repository` — UserRepository, UserAuthProviderRepository, UserBlockRepository
-- `com.chatapp.config` — SecurityConfig
-- `com.chatapp.controller` — HealthController
-- Pattern: `com.chatapp.<domain>.entity`, `com.chatapp.<domain>.repository`, `com.chatapp.<domain>.service`, `com.chatapp.<domain>.controller`
-
-### DTO vs Entity
-- (chưa có — sẽ có từ Ngày 4 khi implement auth endpoints)
+### Entity + Package
+- KHÔNG dùng `@Data` (equals/hashCode lazy-loading issue). Dùng `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`. Domain method OK (`user.markAsDeleted()`). `@PrePersist`/`@PreUpdate` cho timestamps. `@ManyToOne(fetch=LAZY)` luôn.
+- Package: `com.chatapp.<domain>.{entity,repository,service,controller}`. Áp dụng cho: user, conversation, message, file, auth.
 
 ### Error handling
-- `ErrorResponse` record: `{ error, message, timestamp, details }` với `@JsonInclude(NON_NULL)` để không serialize `details` khi null. Package: `com.chatapp.exception`. Ngày 3.
-- `AppException(HttpStatus, String errorCode, String message)` — business exception dùng chung, `GlobalExceptionHandler` bắt và convert. Ngày 3.
-- Test: `@SpringBootTest` KHÔNG có attribute `excludeAutoConfiguration` (đó là attribute của `@DataJpaTest`). Để exclude autoconfigure trong `@SpringBootTest`, dùng `properties = "spring.autoconfigure.exclude=..."`. Ngày 3.
+- `ErrorResponse` record: `{error, message, timestamp, details}` với `@JsonInclude(NON_NULL)`.
+- `AppException(HttpStatus, String errorCode, String message [, Object details])` — `GlobalExceptionHandler` bắt và convert.
+- Test: `@SpringBootTest` dùng `properties = "spring.autoconfigure.exclude=..."` (không phải attribute `excludeAutoConfiguration`).
 
 ---
 
@@ -464,8 +446,47 @@ V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-in
 
 ---
 
+### Member Management + Owner Transfer Pattern (W7-D2, v1.1.0-w7)
+
+**Race-safe lock H2/Postgres portable**:
+- Hibernate `@Lock(PESSIMISTIC_WRITE)` trên JPA repository method → emit `FOR NO KEY UPDATE` (Postgres-specific syntax), H2 90232 reject. Fix: native SQL `FOR UPDATE` — cả H2 lẫn Postgres đều parse được.
+- H2 từ chối `SELECT COUNT(*) ... FOR UPDATE` (90145: "FOR UPDATE is not allowed in DISTINCT or grouped select"). Postgres cho. Pattern portable: SELECT rows + count ở Java. Acceptable V1 vì group max 50 rows.
+- Native SQL trả UUID column → H2 trả `byte[]`, ConversionFailedException khi map `List<UUID>`. Dùng `CAST(col AS VARCHAR)` + trả `List<String>` (đã ghi từ W3, áp dụng lại W7-D2).
+
+**Role hierarchy encapsulation**:
+- `MemberRole.canRemoveMember(targetRole)` nhận 2 tham số — method trong enum tự check role hierarchy. Service dùng 1 dòng: `if (!actor.getRole().canRemoveMember(target.getRole())) throw FORBIDDEN`. Khi spec đổi (vd MODERATOR), chỉ sửa enum.
+- `canRename()`, `canAddMembers()`, `canChangeRole()`, `canDeleteGroup()`, `canTransferOwnership()` — full permission set trong enum, zero scatter.
+
+**Auto-transfer query (OWNER leave)**:
+- Native SQL vì JPQL CASE với fully-qualified enum literal không portable. Pattern: `ORDER BY CASE role WHEN 'ADMIN' THEN 0 WHEN 'MEMBER' THEN 1 ELSE 2 END ASC, joined_at ASC`. Trả List thay vì Optional để test coverage `List.get(0)` fallback path.
+- OWNER→ADMIN sau `/transfer-owner` (giữ quyền quản lý). OWNER→MEMBER chỉ xảy ra trong flow `/leave` (demote trước khi delete row — cho phép event `OWNER_TRANSFERRED` fire trước `MEMBER_REMOVED`).
+
+**Partial-success response (addMembers)**:
+- Shape `{added: List<MemberDto>, skipped: List<SkippedMemberDto{userId, reason}>}` với `@JsonInclude ALWAYS` để FE không null check. Skipped reasons: `ALREADY_MEMBER`, `USER_NOT_FOUND` (merge anti-enum with "non-active"), `BLOCKED` (V1 reserved).
+- MEMBER_LIMIT_EXCEEDED vẫn all-or-nothing (409) — tính trên validToAddCount (sau classify) TRƯỚC khi insert, tránh state nondeterministic.
+
+**@TransactionalEventListener với DB access**:
+- Listener fire AFTER_COMMIT → request transaction đã close → không có EntityManager active. Dùng `@Transactional(propagation=REQUIRES_NEW, readOnly=true)` kết hợp với `@TransactionalEventListener(phase=AFTER_COMMIT)` — Spring tạo transaction mới cho listener method.
+- Pitfall: thiếu REQUIRES_NEW → LazyInitializationException khi đọc entity fields.
+
+**Unified actor shape**:
+- `ActorSummaryDto{userId, username}` — response (RoleChangeResponse.changedBy, OwnerTransferResponse.newOwner).
+- Broadcast actor shape `{userId, username, fullName}` — FULLER (thêm fullName cho render). Build trực tiếp trong broadcaster qua LinkedHashMap, không reuse DTO (vì DTO khác nhau fields).
+- `PreviousOwnerDto{userId, username, newRole="ADMIN"}` — hardcode newRole để FE đọc cần. OwnerTransferResponse.previousOwner dùng shape này (khác ActorSummaryDto).
+
+**No-op idempotent (changeRole)**:
+- Same role → trả 200 OK, KHÔNG publish event → KHÔNG broadcast. FE double-click không gây noise. Test pattern: `reset(messagingTemplate)` trước no-op case để clear prior createGroup broadcasts.
+
+**User-specific destinations (W7-D2)**:
+- `/user/queue/conv-added`: SimpMessagingTemplate.convertAndSendToUser(addedUserIdString, "/queue/conv-added", ConversationSummaryDto). FE subscribe literal `/user/queue/conv-added` — Spring auto-resolve per-session.
+- `/user/queue/conv-removed`: CHỈ fire khi `reason="KICKED"` (LEFT không fire — user tự bấm leave, FE navigate rồi). Payload minimal `{conversationId, reason: "KICKED"}`.
+- Offline caveat (V1): SimpleBroker không persist — user offline khi add → frame drop. FE mitigate bằng GET /conversations sau reconnect. V2 dùng RabbitMQ persistent queue.
+
+---
+
 ## Changelog file này
 
+- 2026-04-21 W7D2: Thêm Member Management Pattern — race-safe lock H2-compatible (native FOR UPDATE + SELECT rows), role hierarchy encapsulation qua canRemoveMember(target), auto-transfer query native CASE, OWNER→ADMIN sau transfer, partial-success response shape, @TransactionalEventListener REQUIRES_NEW cho DB access, user-specific /queue/conv-added|conv-removed.
 - 2026-04-21 W7D1: Thêm Group Chat Schema + CRUD Pattern (ADR-020) — MemberRole permission methods, CHECK constraint shape, soft-delete filter, ON DELETE SET NULL cho owner_id, Tristate DTO qua @JsonAnySetter Map, LinkedHashMap cho broadcast null-tolerant, avatar attach flow (markAttached), Event Publisher broadcast, naming drift V7→V9, member sort role+joinedAt, targetUserId backward-compat, DataSource metadata cho column verification test.
 - 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.
 - 2026-04-21 W6D1: Thêm File Upload Foundation pattern (Tika MIME detect, LocalStorageService path traversal defense, MIME→ext cố định, 6 exception class, anti-enumeration 404 cho download, MultipartFile test pattern). Migration V7 dùng UUID FK (không BIGINT như task spec).

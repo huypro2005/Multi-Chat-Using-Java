@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.5-w7_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED)_
+_Version: v1.6-w7_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -55,16 +55,20 @@ _Owner: code-reviewer (architect)_
 | `/app/conv.{conversationId}.typing` | Typing indicator | SILENT_DROP | 1 event/2s/user/conv | Tuần 5 |
 | `/app/conv.{conversationId}.read` | Read receipt | SILENT_DROP | 1 event/5s/user/conv | Tuần 5 |
 
-### User queues (Server → Client, sender-only)
+### User queues (Server → Client, per-user targeted)
 
-Spring STOMP user destination — BE gửi bằng `SimpMessagingTemplate.convertAndSendToUser(principalName, destination, payload)`. Chỉ session của user đó mới nhận.
+Spring STOMP user destination — BE gửi bằng `SimpMessagingTemplate.convertAndSendToUser(principalName, destination, payload)`. Chỉ session(s) của user đó mới nhận. FE subscribe ở root (sau login + STOMP connected), không per-page.
 
-| Destination | Mô tả | Trigger |
-|------------|-------|---------|
-| `/user/queue/acks` | ACK khi gửi tin nhắn thành công | Sau khi `/app/conv.{id}.message` save xong |
-| `/user/queue/errors` | ERROR khi gửi tin nhắn thất bại | Khi `/app/conv.{id}.message` validation fail hoặc authorization fail |
+| Destination | Mô tả | Trigger | Phase |
+|------------|-------|---------|-------|
+| `/user/queue/acks` | ACK cho operation client-initiated (SEND/EDIT/DELETE) | Sau `/app/conv.{id}.message` hoặc `.edit` hoặc `.delete` save xong | Post-W4 / W5 |
+| `/user/queue/errors` | ERROR cho operation client-initiated | Validation/auth fail cho các `/app/conv.{id}.*` send | Post-W4 / W5 |
+| `/user/queue/conv-added` | User vừa được add vào group mới | Sau `POST /api/conversations/{id}/members` commit (per added user) | **W7-D2** |
+| `/user/queue/conv-removed` | User vừa bị kick khỏi group | Sau `DELETE /api/conversations/{id}/members/{userId}` commit | **W7-D2** |
 
-> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017). Presence/read giữ Tuần 5 về sau.
+> **FE subscription**: Spring STOMP prefix `/user` auto-resolved per-session — FE subscribe literal `/user/queue/conv-added` (không cần userId trong path). BE gửi với `convertAndSendToUser(userIdString, "/queue/conv-added", payload)`.
+
+> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017) + `/user/queue/conv-added`, `/user/queue/conv-removed` (W7-D2). Presence/read giữ Tuần 5 về sau.
 
 ---
 
@@ -255,63 +259,91 @@ TYPING_STOPPED shape giống hệt.
 3. Invalidate `['conversations']` list để sidebar refresh (name/avatar hiển thị chỗ khác).
 4. **System message** (OPTIONAL, placeholder W7-D4): BE có thể kèm `SYSTEM_MESSAGE` event insert vào conversation messages. Ngày 4 implement — Ngày 1 chỉ broadcast CONVERSATION_UPDATED, chưa có SYSTEM_MESSAGE.
 
-### 3.7 MEMBER_ADDED _(Tuần 7 — W7-D1)_
+### 3.7 MEMBER_ADDED _(Tuần 7 — W7-D1 + W7-D2 finalize)_
 
-**Trigger**: Sau khi `POST /api/conversations/{id}/members` commit thành công.
+**Trigger**: Sau khi `POST /api/conversations/{id}/members` commit thành công. **Per added user** — nếu batch add 5 user → 5 frames MEMBER_ADDED (không gộp array). Rationale: shape single-item đồng bộ với event khác (MEMBER_REMOVED/ROLE_CHANGED); FE dễ render animation per-user; skip users không sinh frame.
 
-**Destination**: `/topic/conv.{convId}` — broadcast tới toàn bộ members **bao gồm new members** (họ đã có row `conversation_members` trước khi broadcast fire, nên SUBSCRIBE member-check sẽ pass từ giây đó trở đi).
+**Destination(s)**:
+1. **Topic** `/topic/conv.{convId}` — broadcast tới members HIỆN HỮU trước thời điểm add. New members chưa kịp subscribe topic (join → subscribe có gap ms) → cần destination #2.
+2. **User-specific** `/user/queue/conv-added` — BE `convertAndSendToUser(newUserId, "/queue/conv-added", ConversationSummaryDto)` cho MỖI user vừa được add. FE nhận → thêm conv vào sidebar cache `['conversations']` + toast "Bạn đã được thêm vào nhóm {name}".
 
-**Envelope**:
+**Envelope (destination #1 — `/topic/conv.{id}`)**:
 
 ```json
 {
   "type": "MEMBER_ADDED",
   "payload": {
     "conversationId": "uuid",
-    "addedUsers": [
-      {
-        "userId": "uuid",
-        "username": "string",
-        "fullName": "string",
-        "avatarUrl": "string | null",
-        "role": "MEMBER",
-        "joinedAt": "ISO8601"
-      }
-    ],
+    "member": {
+      "userId": "uuid",
+      "username": "string",
+      "fullName": "string",
+      "avatarUrl": "string | null",
+      "role": "MEMBER",
+      "joinedAt": "ISO8601"
+    },
     "addedBy": {
       "userId": "uuid",
+      "username": "string",
       "fullName": "string"
     }
   }
 }
 ```
 
-**FE action**:
-1. Patch cache `['conversation', convId].members` — append `addedUsers` (giữ sort rule role DESC, joinedAt ASC).
-2. Invalidate `['conversations']` để sidebar refresh memberCount.
-3. Nếu current user nằm trong `addedUsers` (tức vừa bị add vào nhóm mới):
-   - Fetch conv detail nếu chưa có trong cache.
-   - Show toast "Bạn đã được thêm vào nhóm {conv.name} bởi {addedBy.fullName}".
-   - KHÔNG auto-navigate — user tự click từ sidebar (tránh disrupt flow đang làm).
+> **Shape change (v1.6-w7)**: v1.5-w7 dùng `addedUsers: [...]` (array trong 1 frame). v1.6-w7 đổi sang `member: {...}` (single object per frame, 1 frame per user). Lý do: consistency với MEMBER_REMOVED (single removedUserId) + simpler FE handler (không loop array). `addedBy` thêm `username` (nhất quán actor shape).
 
-**FE race caveat**: Current user vừa add vào nhóm nhưng `/topic/conv.{id}` subscription chưa có → miss broadcast này → user thấy conv xuất hiện trong sidebar (do `['conversations']` invalidate) nhưng không có toast. Acceptable V1 (user click conv sẽ load detail OK).
+**Payload (destination #2 — `/user/queue/conv-added`)**: `ConversationSummaryDto` (shape giống item trong `GET /api/conversations` list response).
 
-### 3.8 MEMBER_REMOVED _(Tuần 7 — W7-D1)_
+```json
+{
+  "id": "uuid",
+  "type": "GROUP",
+  "name": "string",
+  "avatarUrl": "string | null",
+  "lastMessageAt": "ISO8601 | null",
+  "lastMessagePreview": "string | null",
+  "unreadCount": 0,
+  "memberCount": 5,
+  "mutedUntil": null
+}
+```
 
-**Trigger**: Sau khi `DELETE /api/conversations/{id}/members/{userId}` (kick) hoặc `POST /api/conversations/{id}/leave` (self-leave) commit thành công.
+> FE dùng shape này để render sidebar item ngay, không cần extra GET call. Nếu FE muốn full conv detail (members list) → lazy fetch `GET /api/conversations/{id}` khi user click vào.
 
-**Destination**: `/topic/conv.{convId}` — broadcast TRƯỚC khi hard-delete row `conversation_members` (để user bị remove vẫn nhận được frame cuối). Sau broadcast → BE commit delete → client unsubscribe tự nhiên qua disconnect hoặc next SUBSCRIBE member-check.
+**FE action khi nhận MEMBER_ADDED (topic)**:
+1. Patch cache `['conversation', convId].members` — append `member` object vào list, giữ sort rule role DESC (OWNER→ADMIN→MEMBER) THEN joinedAt ASC.
+2. Invalidate `['conversations']` để sidebar refresh `memberCount`.
+3. Nếu `member.userId == currentUser.id` (edge case: user đã subscribe topic trước khi add — hiếm, chủ yếu là reconnect race): treat giống `/queue/conv-added` handler (add sidebar + toast). Dedupe sidebar insert nếu đã có.
 
-**Envelope**:
+**FE action khi nhận `/user/queue/conv-added`**:
+1. Add `ConversationSummaryDto` vào cache `['conversations']` list (ở vị trí đúng theo sort lastMessageAt DESC NULLS LAST). Dedupe nếu đã có conv trùng id.
+2. Show toast "Bạn đã được thêm vào nhóm {name}". KHÔNG auto-navigate — user tự click từ sidebar.
+3. KHÔNG fetch conv detail eagerly — chờ user click (tránh n+1 API call khi user được add hàng loạt).
+
+**Offline caveat** (v1.6-w7): `/user/queue/conv-added` dùng SimpleBroker (V1) — user offline khi add → frame bị drop, KHÔNG re-deliver khi reconnect. Mitigation V1: khi user reconnect/next page load, FE gọi `GET /api/conversations` → thấy conv mới trong list → add sidebar (không có toast "vừa được add" — UX loss nhỏ acceptable). V2: RabbitMQ persistent queue hoặc push notification. Xem WARNINGS W7-5.
+
+### 3.8 MEMBER_REMOVED _(Tuần 7 — W7-D1 + W7-D2 finalize)_
+
+**Trigger**: Sau khi:
+- `DELETE /api/conversations/{id}/members/{userId}` (kick) — `reason: "KICKED"` → plus `/user/{kickedUserId}/queue/conv-removed` notify riêng.
+- `POST /api/conversations/{id}/leave` (self-leave) — `reason: "LEFT"` → KHÔNG plus user-specific notify (user tự bấm leave, FE đã navigate).
+
+**Destination(s)**:
+1. **Topic** `/topic/conv.{convId}` — broadcast TRƯỚC khi hard-delete row `conversation_members` (để user bị remove vẫn nhận được frame cuối nếu còn subscribe). Sau broadcast → BE commit delete → client unsubscribe tự nhiên qua disconnect hoặc next SUBSCRIBE member-check.
+2. **User-specific (CHỈ khi KICKED)** `/user/queue/conv-removed` — BE `convertAndSendToUser(kickedUserId, "/queue/conv-removed", { conversationId, reason: "KICKED" })`. FE nhận → remove conv khỏi sidebar + toast "Bạn đã bị xoá khỏi nhóm {name} bởi {actor}" + navigate khỏi conv detail nếu đang mở. Dùng cho reliability: user có thể đã unsubscribe `/topic/conv.{id}` vì reconnect race, user queue vẫn đến.
+
+**Envelope (destination #1 — `/topic/conv.{id}`)**:
 
 ```json
 {
   "type": "MEMBER_REMOVED",
   "payload": {
     "conversationId": "uuid",
-    "removedUserId": "uuid",
+    "userId": "uuid (removed user id)",
     "removedBy": {
       "userId": "uuid",
+      "username": "string",
       "fullName": "string"
     },
     "reason": "KICKED" | "LEFT"
@@ -319,24 +351,54 @@ TYPING_STOPPED shape giống hệt.
 }
 ```
 
-**Field rules**:
-- `reason`:
-  - `"KICKED"`: removedBy ≠ removedUserId (admin hoặc owner kick).
-  - `"LEFT"`: removedBy == removedUserId (self-leave qua `/leave` endpoint).
-- `removedBy` luôn non-null. Với LEFT, `removedBy.userId == removedUserId`.
+**Field rules** (v1.6-w7):
+- `userId`: user bị remove (rename từ `removedUserId` của v1.5-w7 — ngắn hơn, FE pattern-match field name đã quen).
+- `removedBy`:
+  - **`reason: "KICKED"`** → non-null object `{userId, username, fullName}` (actor kick). `removedBy.userId != userId`.
+  - **`reason: "LEFT"`** → **`null`**. Khác v1.5-w7 (nói `removedBy.userId == removedUserId`). Lý do đổi: `null` rõ nghĩa semantic "tự leave", FE check `removedBy == null` đơn giản hơn so sánh 2 UUID equality. Actor trong case LEFT == chính user đó → thừa thông tin.
 
-**FE action**:
-1. Patch cache `['conversation', convId].members` — remove row `userId === removedUserId`.
+**Payload (destination #2 — `/user/queue/conv-removed`)**:
+
+```json
+{
+  "conversationId": "uuid",
+  "reason": "KICKED"
+}
+```
+
+> Payload minimal — FE không cần thông tin actor trên destination này (actor đã có trong topic broadcast #1 nếu FE còn subscribe). V1 chỉ fire cho KICKED (leave không cần — user tự bấm leave).
+
+**FE action khi nhận MEMBER_REMOVED (topic)**:
+1. Patch cache `['conversation', convId].members` — remove row `m.userId === payload.userId`.
 2. Invalidate `['conversations']` để sidebar refresh memberCount.
-3. Nếu `removedUserId == currentUser.id`:
-   - Toast theo reason: KICKED → "Bạn đã bị xoá khỏi nhóm {conv.name}"; LEFT → "Bạn đã rời nhóm" (confirm UX).
+3. Nếu `payload.userId == currentUser.id`:
+   - Toast theo reason: `KICKED` → "Bạn đã bị xoá khỏi nhóm {conv.name} bởi {removedBy.fullName}"; `LEFT` → UI có thể silent (user tự leave, đã có confirm dialog) hoặc nhẹ "Đã rời nhóm" (FE chọn UX).
    - Navigate khỏi conv nếu đang mở (`if (location.pathname.includes(convId)) navigate('/conversations')`).
-   - Remove conv khỏi sidebar cache `['conversations']` (không chỉ invalidate — explicit remove để tránh flash).
-4. **Ordering với ROLE_CHANGED (auto-transfer)**: Khi OWNER leave, BE fire ROLE_CHANGED (new owner promoted) TRƯỚC MEMBER_REMOVED (owner left). FE xử lý 2 event tuần tự — sau ROLE_CHANGED, cache member có new OWNER; sau MEMBER_REMOVED, remove old OWNER. UX: user thấy "X đã rời nhóm. Y là trưởng nhóm mới." (reorder FE render nếu cần).
+   - Remove conv khỏi sidebar cache `['conversations']` (explicit remove để tránh flash).
+4. **Idempotent với `/queue/conv-removed`** (v1.6-w7): user bị kick có thể nhận 2 frames — TOPIC MEMBER_REMOVED + USER QUEUE conv-removed, thứ tự không đảm bảo. FE handler cho cả 2 phải idempotent (remove conv đã remove → no-op). Xem WARNINGS W7-4.
 
-### 3.9 ROLE_CHANGED _(Tuần 7 — W7-D1)_
+**FE action khi nhận `/user/queue/conv-removed`** (only KICKED):
+1. Remove conv khỏi cache `['conversations']` (check existing trước để idempotent với topic frame).
+2. Remove cache `['conversation', convId]`.
+3. Navigate khỏi conv nếu đang mở + toast "Bạn đã bị xoá khỏi nhóm".
+4. Dedupe với topic handler bằng conversationId: nếu đã xử lý (sidebar không còn conv) → skip toast lần 2.
 
-**Trigger**: Sau khi `PATCH /api/conversations/{id}/members/{userId}/role` (promote ADMIN↔MEMBER) HOẶC auto-transfer trong `POST /leave` (OWNER leave) commit thành công. KHÔNG fire cho `POST /transfer-owner` (dùng OWNER_TRANSFERRED §3.10 riêng, gửi 2 sự kiện không gọn).
+**Ordering với OWNER_TRANSFERRED (auto-transfer khi OWNER leave)** (v1.6-w7 update):
+
+Khi OWNER leave → 2 events fire theo thứ tự:
+1. `OWNER_TRANSFERRED` (§3.10, với `autoTransferred: true`) — patch cache members với new OWNER.
+2. `MEMBER_REMOVED` (`reason: "LEFT"`, `removedBy: null`) — remove old OWNER khỏi members.
+
+FE xử lý tuần tự: sau #1 cache có new OWNER ở vị trí đầu, sau #2 old OWNER biến mất. UX: user thấy "X đã chuyển quyền cho Y và rời nhóm" (FE có thể merge 2 system messages nếu có timestamp gần nhau).
+
+> **Note (v1.5-w7 → v1.6-w7 change)**: v1.5-w7 dùng `ROLE_CHANGED` cho auto-transfer. v1.6-w7 đổi sang `OWNER_TRANSFERRED` (unified với `/transfer-owner` explicit). Xem §3.10 + WARNINGS W7-D2 section.
+
+### 3.9 ROLE_CHANGED _(Tuần 7 — W7-D1 + W7-D2 finalize)_
+
+**Trigger**: CHỈ fire cho `PATCH /api/conversations/{id}/members/{userId}/role` (promote ADMIN↔MEMBER). **KHÔNG fire khi**:
+- No-op (newRole == currentRole) → 200 OK idempotent silent (không broadcast — xem API_CONTRACT.md PATCH /role).
+- Auto-transfer trong `POST /leave` → dùng `OWNER_TRANSFERRED` §3.10 thay (v1.6-w7 change từ v1.5-w7; consistent với `/transfer-owner`).
+- Explicit `/transfer-owner` → dùng `OWNER_TRANSFERRED` (atomic 2-way swap, gửi 2 ROLE_CHANGED tạo "2 OWNER" flicker).
 
 **Destination**: `/topic/conv.{convId}` — broadcast toàn bộ members.
 
@@ -348,28 +410,32 @@ TYPING_STOPPED shape giống hệt.
   "payload": {
     "conversationId": "uuid",
     "userId": "uuid",
-    "oldRole": "OWNER" | "ADMIN" | "MEMBER",
-    "newRole": "OWNER" | "ADMIN" | "MEMBER",
+    "oldRole": "ADMIN" | "MEMBER",
+    "newRole": "ADMIN" | "MEMBER",
     "changedBy": {
       "userId": "uuid",
+      "username": "string",
       "fullName": "string"
     }
   }
 }
 ```
 
-**Field rules**:
-- `oldRole`, `newRole`: PHẢI khác nhau (no-op đã bị reject ở service layer với `INVALID_ROLE_CHANGE`).
-- `changedBy`: OWNER đã thực hiện PATCH. Với auto-transfer (OWNER leave), `changedBy == removed OWNER` (người đã leave triggered transfer). FE có thể render "Y được promote thành trưởng nhóm sau khi X rời" dựa trên ordering với MEMBER_REMOVED.
+**Field rules** (v1.6-w7):
+- `oldRole`, `newRole`: PHẢI khác nhau (no-op không broadcast). Giá trị enum CHỈ `ADMIN | MEMBER` trong V1 — `OWNER` không xuất hiện trong ROLE_CHANGED (OWNER changes đi qua OWNER_TRANSFERRED §3.10).
+- `changedBy`: OWNER đã thực hiện PATCH (actor). Shape `{userId, username, fullName}` — v1.6-w7 thêm `username` nhất quán với MEMBER_ADDED/REMOVED actor shape.
 
 **FE action**:
-1. Patch cache `['conversation', convId].members` — update `role` của `userId` từ `oldRole` → `newRole`. Re-sort theo rule role DESC (OWNER đầu, ADMIN giữa, MEMBER cuối).
-2. Nếu `userId == currentUser.id`: toast "Bạn đã được nâng cấp thành {newRoleLabel}" hoặc "Quyền của bạn đã đổi".
-3. Invalidate `['conversations']` nếu role affect sidebar hiển thị (V1 sidebar không show role badge → không cần).
+1. Patch cache `['conversation', convId].members` — update `role` của member có `userId === payload.userId` từ `oldRole` → `newRole`. Re-sort theo rule role DESC (OWNER đầu, ADMIN giữa, MEMBER cuối) THEN joinedAt ASC.
+2. Nếu `userId == currentUser.id`: toast "Bạn đã được đặt làm {roleLabel}" (ADMIN) hoặc "Quyền quản trị của bạn đã bị gỡ" (MEMBER). UX rõ action + subject.
+3. KHÔNG cần invalidate `['conversations']` — V1 sidebar không show role badge nên không affect. Nếu V2 thêm role badge → invalidate.
+4. **Idempotent**: nếu broadcast lặp lại (rare với SimpleBroker) → set role lần 2 cùng giá trị, no-op. Có thể dedupe bằng `cached.role === newRole` check skip toast lần 2.
 
-### 3.10 OWNER_TRANSFERRED _(Tuần 7 — W7-D1)_
+### 3.10 OWNER_TRANSFERRED _(Tuần 7 — W7-D1 + W7-D2 finalize)_
 
-**Trigger**: Sau khi `POST /api/conversations/{id}/transfer-owner` commit thành công.
+**Trigger** (v1.6-w7 expanded):
+1. **Explicit transfer**: `POST /api/conversations/{id}/transfer-owner` commit xong → `autoTransferred: false`. OWNER cũ → ADMIN, target → OWNER. OWNER cũ GIỮ trong group.
+2. **Auto-transfer khi OWNER leave**: `POST /api/conversations/{id}/leave` với caller là OWNER và có member khác → `autoTransferred: true`. OWNER cũ → MEMBER (sau đó delete row); oldest ADMIN (fallback oldest MEMBER) → OWNER. Fire TRƯỚC MEMBER_REMOVED (§3.8). OWNER cũ KHÔNG còn trong group sau event tiếp theo.
 
 **Destination**: `/topic/conv.{convId}` — broadcast toàn bộ members.
 
@@ -380,32 +446,45 @@ TYPING_STOPPED shape giống hệt.
   "type": "OWNER_TRANSFERRED",
   "payload": {
     "conversationId": "uuid",
-    "oldOwner": {
+    "previousOwner": {
       "userId": "uuid",
-      "fullName": "string"
+      "username": "string"
     },
     "newOwner": {
       "userId": "uuid",
+      "username": "string",
       "fullName": "string"
-    }
+    },
+    "autoTransferred": true | false
   }
 }
 ```
 
-**Khác gì ROLE_CHANGED?**: OWNER_TRANSFERRED là **atomic 2-way swap** (oldOwner → ADMIN, newOwner → OWNER cùng lúc). Nếu dùng 2 ROLE_CHANGED event riêng:
-- Frame ordering không đảm bảo → FE có thể thấy "2 OWNER" tạm thời giữa 2 frame.
-- UX phải tự synthesize: "X chuyển quyền cho Y" từ 2 event → phức tạp.
+**Field rules** (v1.6-w7):
+- `previousOwner`: OWNER cũ (rename từ `oldOwner` của v1.5-w7). Shape minimal `{userId, username}` — khi `autoTransferred: true`, user này sẽ bị remove ngay sau qua MEMBER_REMOVED, FE không cần fullName để render member list.
+- `newOwner`: OWNER mới. Shape fuller `{userId, username, fullName}` — FE cần fullName để render "X là trưởng nhóm mới" toast.
+- `autoTransferred` (**new in v1.6-w7**, BLOCKING cho FE branching):
+  - `true`: kích hoạt từ OWNER leave path. FE chuẩn bị: sau event này sẽ nhận MEMBER_REMOVED cho `previousOwner.userId`. Toast "Trưởng nhóm {previousOwner} đã rời. {newOwner.fullName} thay thế." (hoặc tách 2 toast — FE chọn).
+  - `false`: từ explicit `/transfer-owner`. OWNER cũ vẫn trong group với role ADMIN. Toast "{previousOwner.username} đã chuyển quyền cho {newOwner.fullName}".
 
-→ Dùng 1 event gộp, FE patch cả 2 members atomic.
+**Khác gì ROLE_CHANGED?**: OWNER_TRANSFERRED là **atomic 2-way swap** (previousOwner → ADMIN hoặc sắp remove; newOwner → OWNER cùng lúc). Nếu dùng 2 ROLE_CHANGED event riêng:
+- Frame ordering không đảm bảo → FE có thể thấy "2 OWNER" tạm thời giữa 2 frame (invariant violation UI).
+- UX phải tự synthesize: "X chuyển quyền cho Y" từ 2 event → phức tạp, FE logic scattered.
+
+→ Dùng 1 event gộp, FE patch cả 2 members atomic trong 1 callback.
 
 **FE action**:
 1. Patch cache `['conversation', convId].members`:
-   - Set member `userId === oldOwner.userId` → role = `'ADMIN'`.
+   - **Nếu `autoTransferred: false`** (explicit): set member `userId === previousOwner.userId` → role = `'ADMIN'`.
+   - **Nếu `autoTransferred: true`** (auto from leave): có 2 option FE:
+     - Option A (đơn giản): set previousOwner role = `'MEMBER'` (demote trước khi remove). MEMBER_REMOVED sau sẽ remove row.
+     - Option B (optimal UX): KHÔNG patch previousOwner role (để nguyên OWNER cho đến MEMBER_REMOVED) vì sắp biến mất luôn — tránh flash "OWNER → MEMBER → gone" trong <100ms.
+     - Reviewer recommend Option B (smoother); cả 2 đúng contract.
    - Set member `userId === newOwner.userId` → role = `'OWNER'`.
    - Re-sort members theo role DESC, joinedAt ASC (OWNER mới lên đầu).
-2. Patch cache `['conversation', convId].owner = {userId: newOwner.userId, ...}`.
-3. Toast trong conv detail: "{oldOwner.fullName} đã chuyển quyền cho {newOwner.fullName}".
-4. Nếu current user là oldOwner hoặc newOwner: toast riêng "Bạn {đã chuyển quyền|được chuyển quyền}".
+2. Patch cache `['conversation', convId].owner = {userId: newOwner.userId, username: newOwner.username, fullName: newOwner.fullName}`.
+3. Toast trong conv detail (xem field rules trên theo autoTransferred).
+4. Nếu current user là previousOwner hoặc newOwner: toast riêng (ví dụ "Bạn đã nhận quyền trưởng nhóm"). Khi `autoTransferred: true` và currentUser == previousOwner → FE có thể skip (user vừa bấm leave, biết rồi).
 
 ### 3.11 GROUP_DELETED _(Tuần 7 — W7-D1)_
 
@@ -1677,6 +1756,7 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 | 2026-04-20 | v1.1-w4 | **Path B (ADR-016)**: Chuyển send path từ REST → STOMP. Thêm inbound `/app/conv.{convId}.message` với payload `{tempId, content, type}`. Thêm 2 user queue `/user/queue/acks` (payload `{tempId, message}`) + `/user/queue/errors` (payload `{tempId, error, code}`). Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s atomic SET NX EX. FE tempId lifecycle state machine: optimistic → ACK/ERROR/timeout 10s. BE handler + `@MessageExceptionHandler` pattern. Rate limit 30/phút khớp REST. REST `POST /messages` không deprecated — giữ cho batch/bot/fallback. Error codes mới: MSG_CONTENT_TOO_LONG, MSG_RATE_LIMITED, FORBIDDEN, INTERNAL. Bỏ "draft" suffix vì contract đã được accept sau W4D4. |
 | 2026-04-20 | v1.2-w5d1 | **Destination-aware auth policy (W5-D1)**: Thêm mục 7.1 Destination Policy Table. `AuthChannelInterceptor.handleSend()` refactored với `DestinationPolicy` enum: `.message` → STRICT_MEMBER (throw FORBIDDEN), `.typing` + `.read` → SILENT_DROP (pass through, handler tự xử lý). Không còn throw FORBIDDEN cho `.typing` — fix spec mismatch (typing phải silent drop, không ERROR frame). |
 | 2026-04-20 | v1.3-w5d2 | **Edit Message via STOMP (W5-D2)** + **Unified ACK queue (ADR-017)**. Thêm inbound `/app/conv.{convId}.edit` với payload `{clientEditId, messageId, newContent}`. Fill §3.2 MESSAGE_UPDATED đầy đủ (trước đây là placeholder W6, nay dời sang W5). Thêm §3c toàn bộ spec: validation (UUID, 1-5000, 5 phút window, owner + not-found merge chống enumeration, no-change check, TEXT-only), ACK shape mới `{operation: "SEND"|"EDIT", clientId, message}` thay thế shape cũ `{tempId, message}` (breaking — BE + FE deploy đồng bộ), ERROR shape mới `{operation, clientId, error, code}`. Error codes mới: `MSG_NOT_FOUND`, `MSG_EDIT_WINDOW_EXPIRED`, `MSG_NO_CHANGE`. Dedup Redis key `msg:edit-dedup:{userId}:{clientEditId}` TTL 60s atomic SET NX EX (giống send). Rate limit 10 edit/phút/user (`rate:msg-edit:{userId}`). FE state machine idle → editing → saving → saved/error với timer 10s. Thêm row mới vào destinations table (§2) + §7.1 Destination Policy Table (STRICT_MEMBER cho `.edit`). Thêm limitation về clock skew edit window (FE disable sớm ở 4:50) + unified queue multi-session caveat. ADR-017 thêm vào §9. Broadcast MESSAGE_UPDATED giữ minimal payload (id + conversationId + content + editedAt) — không phải MessageDto đầy đủ. FE dedup broadcast theo `editedAt` timestamp. |
+| 2026-04-21 | v1.6-w7 | **W7-D2 finalize member-management events** + user-specific destinations. (1) **§2 Destinations**: thêm 2 user queue — `/user/queue/conv-added` (trigger: POST /members commit, payload `ConversationSummaryDto`, per added user) + `/user/queue/conv-removed` (trigger: DELETE /members/{uid} commit KICK, payload `{conversationId, reason: "KICKED"}`). FE subscribe ở root. (2) **§3.7 MEMBER_ADDED**: payload đổi từ `addedUsers: [...]` array sang `member: {...}` single-object; 1 frame per added user thay vì 1 frame batch. `addedBy` thêm `username`. Thêm destination #2 `/user/queue/conv-added` với ConversationSummaryDto cho reliability (new user chưa subscribe topic). (3) **§3.8 MEMBER_REMOVED**: field `removedUserId` → `userId` (ngắn). `removedBy: null` khi `reason: "LEFT"` (thay vì non-null với userId == removedUserId). `removedBy` thêm `username`. Thêm destination #2 `/user/queue/conv-removed` (CHỈ khi KICKED). FE ordering note cập nhật: OWNER leave auto-transfer → OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED (thay vì ROLE_CHANGED như v1.5-w7). (4) **§3.9 ROLE_CHANGED**: enum `oldRole`/`newRole` rút xuống CHỈ `ADMIN | MEMBER` (OWNER changes đi qua OWNER_TRANSFERRED). `changedBy` thêm `username`. Confirm KHÔNG fire cho no-op idempotent (PATCH /role với newRole == currentRole → silent). KHÔNG fire cho auto-transfer. (5) **§3.10 OWNER_TRANSFERRED**: field `oldOwner` → `previousOwner`. Thêm field `autoTransferred: boolean` (true = OWNER leave auto, false = explicit /transfer-owner) — BLOCKING cho FE branching UX. `newOwner` có fullName để render toast. (6) WARNINGS: W7-1 và W7-3 RESOLVED (FOR UPDATE lock applied). W7-4 mới (kick broadcast ordering: topic vs user queue không đảm bảo thứ tự — FE idempotent handling). W7-5 mới (`/queue/conv-added` offline delivery dùng SimpleBroker drop frame, mitigate qua next GET /conversations). KHÔNG thêm inbound STOMP destination — tất cả member management qua REST. |
 | 2026-04-21 | v1.5-w7 | **W7-D1 Group Chat events**. Thêm 6 event type mới trên `/topic/conv.{id}`: `CONVERSATION_UPDATED` (§3.6 — rename/avatar, payload `{conversationId, changes:{name?, avatarUrl?}, updatedBy}`), `MEMBER_ADDED` (§3.7 — batch add, `{conversationId, addedUsers[], addedBy}`), `MEMBER_REMOVED` (§3.8 — kick hoặc leave, `{conversationId, removedUserId, removedBy, reason: KICKED|LEFT}`), `ROLE_CHANGED` (§3.9 — ADMIN↔MEMBER hoặc auto-transfer on OWNER leave, `{conversationId, userId, oldRole, newRole, changedBy}`), `OWNER_TRANSFERRED` (§3.10 — atomic 2-way swap qua `/transfer-owner`, `{conversationId, oldOwner, newOwner}`), `GROUP_DELETED` (§3.11 — OWNER delete group, `{conversationId, deletedBy, deletedAt}`). Lý do `OWNER_TRANSFERRED` tách riêng ROLE_CHANGED: atomic swap tránh FE thấy "2 OWNER" tạm thời giữa 2 frame. `SYSTEM_MESSAGE` event placeholder §3.12 — dự kiến W7-D4 implement qua `MESSAGE_CREATED type=SYSTEM` (KHÔNG event mới). MEMBER_REMOVED + GROUP_DELETED broadcast TRƯỚC khi hard-delete row để member bị remove vẫn nhận frame cuối. Ordering note: OWNER leave fire ROLE_CHANGED trước MEMBER_REMOVED để FE patch newOwner rồi mới remove oldOwner. KHÔNG thêm inbound destinations — group actions đi qua REST (POST/PATCH/DELETE /api/conversations/{id}/...), broadcast là outbound-only. Không migrate shape MessageDto. |
 | 2026-04-20 | v1.4-w6 | **W6-D1 attachments for SEND** (ADR-019). §3b.1 payload thêm `attachmentIds?: string[]` (array UUID, 0-5 items). `content` nullable khi có attachments (1 trong 2 phải non-null). Validation rules chi tiết trong API_CONTRACT.md mục Files Management. Error codes mới trong bảng §3b.3: `MSG_NO_CONTENT`, `MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`, `MSG_ATTACHMENT_NOT_FOUND`, `MSG_ATTACHMENT_EXPIRED`, `MSG_ATTACHMENT_NOT_OWNED`, `MSG_ATTACHMENT_ALREADY_USED`. §3.1 `MESSAGE_CREATED` payload update: MessageDto thêm `attachments: FileDto[]` (luôn là array, không null), `type` mở rộng `TEXT | IMAGE | FILE`. ACK §3b.2 reuse MessageMapper với attachments load. §3c (EDIT) KHÔNG đổi payload — V1 không cho sửa attachments, chỉ sửa content. EDIT với message có attachments: update content giữ attachments. File upload qua REST `POST /api/files/upload` (xem API_CONTRACT.md), sau đó SEND qua STOMP với `attachmentIds`. Rationale tách 2 bước: binary không fit STOMP frame 64KB, progress bar dễ với multipart, reuse file cho multiple message V2. |
 | 2026-04-20 | v1.4-w5d3 | **Delete Message via STOMP (W5-D3)** + **ADR-018 (delete policy)**. Thêm inbound `/app/conv.{convId}.delete` với payload `{clientDeleteId, messageId}`. Fill §3.3 MESSAGE_DELETED đầy đủ (trước placeholder W6, nay dời W5 cùng với EDIT): payload `{id, conversationId, deletedAt, deletedBy}`, FE action patch `deletedAt + deletedBy + content=null` + exit edit mode silently nếu đang edit cùng message, KHÔNG xoá khỏi cache. Thêm §3d toàn bộ spec delete flow: validation (UUID, anti-enum MSG_NOT_FOUND merge 4 case null/wrong-conv/not-owner/already-deleted, KHÔNG có time window — khác EDIT), rate limit 10/phút/user (`rate:msg-delete:{userId}`), dedup Redis `msg:delete-dedup:{userId}:{clientDeleteId}` TTL 60s, ACK shape `{operation: "DELETE", clientId, message}` với `message` là metadata minimal (id + conversationId + deletedAt + deletedBy, KHÔNG có content/sender/createdAt), ERROR shape `{operation: "DELETE", clientId, error, code}` với error codes `MSG_NOT_FOUND | MSG_RATE_LIMITED | VALIDATION_FAILED | AUTH_REQUIRED | INTERNAL`. Thêm §3e Deleted Message Rendering contract: bubble gray italic "🚫 Tin nhắn đã bị xóa", không hover actions, BE strip `content=null` tại `MessageMapper.toDto` khi `deletedAt != null` (áp dụng nhất quán REST + WS + ACK), `MessageDto` thêm 2 field `deletedAt` + `deletedBy`. Thêm row `/app/conv.{id}.delete` vào destinations table (§2) + §7.1 Destination Policy (STRICT_MEMBER). Interaction: edit-after-delete → `MSG_NOT_FOUND` (anti-enum), reply-to-deleted → OK V1 (snapshot giữ nguyên, V2 flag). ADR-018 thêm vào §9. |

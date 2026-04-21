@@ -392,9 +392,11 @@ Validation rules:
 
 ---
 
-## Conversations API (v1.0.0-w7 — Group Chat)
+## Conversations API (v1.1.0-w7 — Group Chat Member Management finalized)
 
-> **Version bump W7 (2026-04-21)**: v0.9.5-files-extended → **v1.0.0-w7**. Lý do major bump: thêm full Group Chat management (W7-D1) — role enum (OWNER/ADMIN/MEMBER), metadata group (name/avatar/owner), + 7 endpoints mới (PATCH/DELETE conv, add/remove/leave/role-change/transfer-owner). Xem ADR-020. Schema migration V7 (`V7__add_group_chat.sql`) thêm `member_role` enum + columns `joined_at`, `conversations.name/avatar_file_id/owner_id` + CHECK constraint type-specific. Breaking: `POST /api/conversations` payload cho GROUP đổi — thêm `name` + `avatarFileId` optional; `type="GROUP"` BẮT BUỘC có `name` + `memberIds` ≥ 2 (tổng member ≥ 3 gồm caller).
+> **Version bump W7-D2 (2026-04-21)**: v1.0.0-w7 → **v1.1.0-w7** (minor). Lý do: finalize 5 member management endpoints trước BE/FE implement D2 — (1) partial success response shape cho add-members (`added[] + skipped[]` với `reason`), (2) error code naming refactor (`CANNOT_KICK_SELF`, `CANNOT_TRANSFER_TO_SELF`, `CANNOT_CHANGE_OWNER_ROLE`, `MEMBER_LIMIT_EXCEEDED`, `CANNOT_LEAVE_EMPTY_GROUP`, `INVALID_ROLE` — thay thế/bổ sung cho `INVALID_ROLE_CHANGE`, `GROUP_FULL`, `CANNOT_REMOVE_SELF` legacy), (3) thêm user-specific STOMP destinations `/user/{userId}/queue/conv-added` + `/user/{userId}/queue/conv-removed` để BE notify riêng user vừa bị add/kick, (4) OWNER_TRANSFERRED thêm `autoTransferred: boolean` (true khi OWNER leave auto-transfer, false khi `/transfer-owner` explicit), (5) formalize no-op idempotent behavior (PATCH role với same role → 200 OK, không broadcast). Không đụng schema, không có migration mới. Xem Changelog W7-D2 entry cuối file.
+>
+> **Version bump W7-D1 (2026-04-21)**: v0.9.5-files-extended → **v1.0.0-w7**. Lý do major bump: thêm full Group Chat management (W7-D1) — role enum (OWNER/ADMIN/MEMBER), metadata group (name/avatar/owner), + 7 endpoints mới (PATCH/DELETE conv, add/remove/leave/role-change/transfer-owner). Xem ADR-020. Schema migration V7 (`V7__add_group_chat.sql`) thêm `member_role` enum + columns `joined_at`, `conversations.name/avatar_file_id/owner_id` + CHECK constraint type-specific. Breaking: `POST /api/conversations` payload cho GROUP đổi — thêm `name` + `avatarFileId` optional; `type="GROUP"` BẮT BUỘC có `name` + `memberIds` ≥ 2 (tổng member ≥ 3 gồm caller).
 >
 > **Naming note**: V1 đơn giản hoá so với ARCHITECTURE.md mục 3.2:
 > - `type` dùng UPPERCASE `ONE_ON_ONE` | `GROUP` (không phải lowercase `direct`/`group` trong ARCHITECTURE gốc). Xem ADR-012.
@@ -781,7 +783,7 @@ Validation rules:
 
 ### POST /api/conversations/{id}/members
 
-**Description** (W7-D1): Thêm 1 hoặc nhiều user vào GROUP conversation. Batch tối đa 10 mỗi request.
+**Description** (W7-D2 finalized; was W7-D1 draft): Thêm 1 hoặc nhiều user vào GROUP conversation. Batch tối đa 10 mỗi request. **Partial success**: userIds không hợp lệ từng phần (đã là member, user không tồn tại, bị block) → skip với reason, không fail cả batch.
 
 **Auth required**: Yes
 
@@ -798,14 +800,13 @@ Validation rules:
 ```
 
 Validation rules:
-- `userIds`: bắt buộc array UUID, length 1-10. Không duplicate.
-- Mỗi user phải `status='active'`.
-- User không được là current member (else `GROUP_MEMBER_ALREADY_IN`).
-- Tổng sau add không vượt 50 (else `GROUP_FULL`). BE dùng `SELECT COUNT(*) FROM conversation_members WHERE conversation_id = :id FOR UPDATE` trước INSERT để chống race (xem WARNINGS W7-3).
+- `userIds`: bắt buộc array UUID, length 1-10. **Duplicate entries** trong array → BE dedupe silently (không throw).
+- `MEMBER_LIMIT_EXCEEDED` check là **all-or-nothing**: BE `SELECT COUNT(*) FROM conversation_members WHERE conversation_id = :id FOR UPDATE` → nếu `currentCount + validToAddCount > 50` → throw ngay, KHÔNG partial insert (tránh state không deterministic: "tôi add 5 người, tại sao chỉ 3 vào?"). Xem WARNINGS W7-3 — RESOLVED với FOR UPDATE lock.
+- Các user validation còn lại (exist + active, already-member, blocked) → per-user skip với `reason`, không fail batch.
 
 **Authorization**: `OWNER` hoặc `ADMIN`. MEMBER → `INSUFFICIENT_PERMISSION`.
 
-**Response 200**:
+**Response 201 Created**:
 
 ```json
 {
@@ -818,36 +819,56 @@ Validation rules:
       "role": "MEMBER",
       "joinedAt": "ISO8601"
     }
+  ],
+  "skipped": [
+    {
+      "userId": "uuid",
+      "reason": "ALREADY_MEMBER | USER_NOT_FOUND | BLOCKED"
+    }
   ]
 }
 ```
 
-**Error responses**:
+Field rules:
+- `added`: users thực sự inserted vào `conversation_members`. Có thể rỗng `[]` nếu tất cả đều skip.
+- `skipped`: users KHÔNG insert, kèm lý do. Có thể rỗng `[]`. **Luôn non-null** (FE không cần null check).
+- `skipped[].reason` enum:
+  - `ALREADY_MEMBER`: userId đã có row trong `conversation_members` cho conv này.
+  - `USER_NOT_FOUND`: userId không tồn tại trong `users` table hoặc `status != 'active'`. Merge (anti-enumeration) — không phân biệt deleted/never-existed/disabled.
+  - `BLOCKED`: user-blocks relation giữa caller/target (V1 chưa wire `user_blocks` table — reserved enum cho forward-compat; hiện tại không fire). Khi wire sẽ check bidirectional.
+
+**Error responses** (cả batch fail):
 
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
-| 400 | `VALIDATION_FAILED` | userIds rỗng / > 10 / duplicate. |
+| 400 | `VALIDATION_FAILED` | userIds rỗng / > 10 / malformed UUID. |
 | 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
 | 403 | `INSUFFICIENT_PERMISSION` | Caller là MEMBER. |
-| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
-| 404 | `GROUP_MEMBER_NOT_FOUND` | 1+ userIds không tồn tại hoặc inactive (details.missingIds). |
-| 409 | `GROUP_MEMBER_ALREADY_IN` | 1+ userIds đã là member (details.alreadyMemberIds). |
-| 409 | `GROUP_FULL` | Sau add > 50 members. details.currentCount + details.attemptedCount. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại, đã soft-delete, hoặc caller không phải member (anti-enumeration merge). |
+| 409 | `MEMBER_LIMIT_EXCEEDED` | `currentCount + validToAddCount > 50`. Kèm `details: { currentCount: int, attemptedCount: int, limit: 50 }`. |
 | 429 | `RATE_LIMITED` | Vượt quota. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
-**Broadcast**: fire `MEMBER_ADDED` event qua `/topic/conv.{id}` với list users mới + `addedBy`. Xem SOCKET_EVENTS.md §3.7.
+> **Deprecated codes (removed in v1.1.0-w7)**: `GROUP_MEMBER_NOT_FOUND` (404) và `GROUP_MEMBER_ALREADY_IN` (409) — hai codes này từng fail cả batch ở v1.0.0-w7. Nay chuyển sang per-user skip với `reason: USER_NOT_FOUND` / `ALREADY_MEMBER` trong response 201. BE MUST NOT emit hai codes này trong W7-D2+ implementation. Legacy FE code bắt 2 codes này → không bao giờ trigger (safe dead branch).
+
+**Broadcasts** (AFTER_COMMIT — `@TransactionalEventListener`, reuse pattern W4D4):
+
+1. Per added user, fire `MEMBER_ADDED` event lên `/topic/conv.{id}` — xem SOCKET_EVENTS.md §3.7. BE gọi 1 broadcast per user (không gộp 1 frame với array, để shape event nhất quán single-item). Nếu batch add 5 user → 5 frames MEMBER_ADDED.
+2. Per added user, `convertAndSendToUser(newUserId, "/queue/conv-added", ConversationSummaryDto)` — **gửi riêng user vừa được add** để FE add conv vào sidebar ngay (user chưa subscribe `/topic/conv.{id}` lúc add → sẽ miss broadcast #1). Xem SOCKET_EVENTS.md §2 "User-specific destinations" + §3.7.
+
+> **Skipped users KHÔNG broadcast** — không có side-effect state.
 
 **Notes**:
-- Transaction boundary: validate → COUNT FOR UPDATE → INSERT batch → publish event. Tất cả trong 1 `@Transactional`.
+- Transaction boundary: validate → `SELECT COUNT(*) FOR UPDATE` (lock) → classify users (add/skip) → INSERT batch → publish events. Tất cả trong 1 `@Transactional`.
 - New members default `role='MEMBER'`, `joined_at=NOW()`. OWNER không thể add directly với role khác — dùng PATCH role riêng sau.
+- `SELECT COUNT(*) FOR UPDATE` yêu cầu `FOR UPDATE` lock trên rows — Postgres semantics: COUNT aggregate với FOR UPDATE effectively locks all rows trong partition WHERE clause. Alternative: `SELECT 1 FROM conversation_members WHERE conversation_id = :id FOR UPDATE` rồi count ở Java. Chọn cách nào tuỳ BE, chốt race-safety. Xem WARNINGS W7-3.
 
 ---
 
 ### DELETE /api/conversations/{id}/members/{userId}
 
-**Description** (W7-D1): Kick user ra khỏi GROUP conversation. Hard-delete row `conversation_members` (không soft-leave V1). Đồng thời force-unsubscribe user khỏi `/topic/conv.{id}` (V1 chấp nhận client chỉ bị filter qua member-check tại lần SUBSCRIBE tiếp theo — xem Limitations SOCKET_EVENTS.md §8).
+**Description** (W7-D2 finalized; was W7-D1 draft): Kick user ra khỏi GROUP conversation. Hard-delete row `conversation_members` (không soft-leave V1). Đồng thời force-unsubscribe user khỏi `/topic/conv.{id}` (V1 chấp nhận client chỉ bị filter qua member-check tại lần SUBSCRIBE tiếp theo — xem Limitations SOCKET_EVENTS.md §8).
 
 **Auth required**: Yes
 
@@ -855,9 +876,9 @@ Validation rules:
 
 **Path params**: `id` (conversation UUID), `userId` (target user UUID).
 
-**Authorization matrix**:
-- **OWNER**: có thể kick bất kỳ ai **trừ chính mình** (OWNER self-kick = transfer-then-leave, dùng endpoint `/leave` thay).
-- **ADMIN**: chỉ kick được `MEMBER`. Kick ADMIN khác hoặc OWNER → `INSUFFICIENT_PERMISSION`.
+**Authorization matrix** (enforce qua service-layer check, matrix chuẩn trong Appendix):
+- **OWNER**: có thể kick ADMIN hoặc MEMBER. KHÔNG self-kick (OWNER self-kick qua endpoint này → `CANNOT_KICK_SELF`; dùng `/leave` thay — auto-transfer sẽ xử lý).
+- **ADMIN**: chỉ kick được `MEMBER`. Kick ADMIN khác hoặc OWNER → `INSUFFICIENT_PERMISSION`. KHÔNG self-kick.
 - **MEMBER**: không kick được ai → `INSUFFICIENT_PERMISSION`.
 
 **Response 204**: No Content.
@@ -867,22 +888,31 @@ Validation rules:
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
 | 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
-| 400 | `CANNOT_REMOVE_OWNER` | Target là OWNER (chỉ OWNER mới được remove OWNER, mà OWNER không remove chính mình — dùng `/leave` thay). |
-| 400 | `CANNOT_REMOVE_SELF` | Caller = target qua endpoint này (dùng `/leave`). |
+| 400 | `CANNOT_KICK_SELF` | `callerId == userId` (path param). Dùng `/leave` thay. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
-| 403 | `INSUFFICIENT_PERMISSION` | ADMIN kick ADMIN/OWNER; MEMBER kick bất kỳ. |
-| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
-| 404 | `GROUP_MEMBER_NOT_FOUND` | Target userId không phải member của conv. |
+| 403 | `INSUFFICIENT_PERMISSION` | Vi phạm matrix: OWNER kick OWNER (chính mình — đã catch bởi `CANNOT_KICK_SELF` trước), ADMIN kick ADMIN/OWNER, MEMBER kick bất kỳ. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại, đã soft-delete, hoặc caller không phải member. |
+| 404 | `MEMBER_NOT_FOUND` | Target `userId` không phải member của conv (anti-enumeration merge với "user không tồn tại"). |
 | 429 | `RATE_LIMITED` | Vượt quota. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
-**Broadcast**: fire `MEMBER_REMOVED` với `reason: "KICKED"` + `removedBy`. Target user FE nhận → navigate away khỏi conv (nếu đang mở) + remove khỏi sidebar. Xem SOCKET_EVENTS.md §3.8.
+> **Renamed codes (v1.1.0-w7)**: `CANNOT_REMOVE_SELF` → `CANNOT_KICK_SELF` (rõ semantics); `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND` (tên ngắn + reuse cho endpoints /role, /transfer-owner); `CANNOT_REMOVE_OWNER` **removed** (merged vào `INSUFFICIENT_PERMISSION` — ADMIN/MEMBER không có quyền kick OWNER; OWNER self-kick catch trước bởi `CANNOT_KICK_SELF`). BE W7-D2 implementation MUST emit tên mới.
+
+**Broadcasts** (AFTER_COMMIT):
+
+1. **Topic broadcast** `/topic/conv.{id}` — event `MEMBER_REMOVED` với `reason: "KICKED"` + `removedBy: { userId, username, fullName }`. Xem SOCKET_EVENTS.md §3.8.
+2. **User-specific notify** `convertAndSendToUser(kickedUserId, "/queue/conv-removed", { conversationId, reason: "KICKED" })` — target user nhận event ngắn gọn để (a) remove conv khỏi sidebar, (b) show toast "Bạn đã bị xoá khỏi nhóm {name} bởi {actor}", (c) navigate away nếu đang mở conv đó.
+
+> **Broadcast ordering caveat**: User bị kick có thể nhận topic broadcast MEMBER_REMOVED TRƯỚC hoặc SAU `/queue/conv-removed` — thứ tự không đảm bảo (Spring STOMP 2 channel riêng). FE phải handle idempotent: nếu nhận MEMBER_REMOVED với `removedUserId == currentUser.id` → cũng treat như conv-removed (remove UI). Xem WARNINGS W7-4.
+
+**Notes**:
+- Transaction boundary: SELECT target member → auth check matrix → DELETE row → publish event → AFTER_COMMIT broadcast + user-notify. Tất cả trong 1 `@Transactional`.
 
 ---
 
 ### POST /api/conversations/{id}/leave
 
-**Description** (W7-D1): Member tự rời khỏi GROUP conversation. Bất kỳ role nào cũng dùng được (MEMBER/ADMIN/OWNER). Khi OWNER leave → **auto-transfer** ownership theo rule dưới.
+**Description** (W7-D2 finalized; was W7-D1 draft): Member tự rời khỏi GROUP conversation. Bất kỳ role nào cũng dùng được (MEMBER/ADMIN/OWNER). Khi OWNER leave → **auto-transfer** ownership theo rule dưới. Nếu OWNER là member duy nhất → **400 CANNOT_LEAVE_EMPTY_GROUP** (phải dùng `DELETE /{id}` thay — V1 không auto-delete empty group).
 
 **Auth required**: Yes
 
@@ -892,7 +922,7 @@ Validation rules:
 
 **Request body**: Không có (empty body).
 
-**Authorization**: Bất kỳ member nào (MEMBER / ADMIN / OWNER).
+**Authorization**: Caller phải là member của conv. Non-member → **404 `CONV_NOT_FOUND`** (anti-enumeration merge với "conv không tồn tại").
 
 **Response 204**: No Content.
 
@@ -901,30 +931,46 @@ Validation rules:
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
 | 400 | `NOT_GROUP` | Conv là ONE_ON_ONE (V1 không cho leave DIRECT — dùng block hoặc ẩn hội thoại, chưa implement). |
+| 400 | `CANNOT_LEAVE_EMPTY_GROUP` | OWNER leave nhưng không có member nào khác trong group (caller là member duy nhất). Dùng `DELETE /{id}` thay. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
-| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại, đã soft-delete, hoặc caller không phải member. |
 | 429 | `RATE_LIMITED` | Vượt quota. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
 **Auto-transfer logic (OWNER leave only)**:
 
-1. SELECT ADMIN có `joined_at` nhỏ nhất (oldest ADMIN) — nếu có → promote thành OWNER.
-2. Nếu không có ADMIN — SELECT MEMBER oldest `joined_at` → promote thành OWNER.
-3. Nếu không còn ai khác (OWNER là member cuối) — set `conversations.owner_id = NULL` (DB cho phép SET NULL theo FK) + **giữ group**. V1 không auto-delete empty group — xem WARNINGS W7-2. Empty group sẽ bị alert monitoring sau 7 ngày.
-4. Bước 1-3 dùng `SELECT ... FOR UPDATE` trên `conversation_members` rows để tránh race với concurrent kick/leave (xem WARNINGS W7-1).
-5. Fire 2 broadcasts atomic-in-order:
-   - `ROLE_CHANGED` (với newOwner info) NẾU có transfer.
-   - `MEMBER_LEFT` với `reason: "LEFT"` cho caller.
+1. **Race-safe lock**: `SELECT ... FOR UPDATE` trên row của caller trong `conversation_members` (hoặc toàn bộ rows của conv — BE chọn scope). Lock này ngăn concurrent kick/leave race. Xem WARNINGS W7-1 — RESOLVED W7-D2.
+2. SELECT other members (EXCLUDE caller), ORDER BY role priority (`ADMIN` trước `MEMBER`, OWNER không trong set vì chỉ có 1 OWNER là caller), THEN `joined_at ASC`. LIMIT 1.
+3. **Nếu không có candidate** (caller là member duy nhất) → throw `CANNOT_LEAVE_EMPTY_GROUP` (400). Rollback transaction. Caller phải dùng `DELETE /{id}`. V1 không auto-delete để giữ rõ intent "chủ động xoá group vs rời bỏ".
+4. **Nếu có candidate** → transaction atomic:
+   - UPDATE caller row: `role = 'MEMBER'` (demote OWNER → MEMBER trước khi delete, để constraint `owner_id` match pattern atomic).
+   - UPDATE candidate row: `role = 'OWNER'`.
+   - UPDATE `conversations.owner_id = candidate.userId`.
+   - DELETE caller row khỏi `conversation_members`.
+5. Fire broadcasts AFTER_COMMIT theo thứ tự dưới.
+
+**Broadcasts** (AFTER_COMMIT):
+
+- **Non-OWNER leave (ADMIN hoặc MEMBER)**: chỉ 1 event.
+  - `MEMBER_REMOVED` lên `/topic/conv.{id}` với `reason: "LEFT"`, `removedBy: null` (khác kick: removedBy có giá trị). Xem SOCKET_EVENTS.md §3.8.
+- **OWNER leave (auto-transfer xảy ra)**: 2 events, fire theo thứ tự:
+  1. `OWNER_TRANSFERRED` với `autoTransferred: true` (khác `/transfer-owner` explicit là `false`). Xem §3.10. Fire TRƯỚC MEMBER_REMOVED để FE patch newOwner lên UI rồi mới thấy oldOwner biến mất — tránh flicker "2 OWNER tạm thời".
+  2. `MEMBER_REMOVED` với `reason: "LEFT"`, `removedBy: null`.
+
+> **Ordering note (v1.1.0-w7 change)**: v1.0.0-w7 dùng `ROLE_CHANGED` cho auto-transfer. v1.1.0-w7 đổi sang `OWNER_TRANSFERRED` để consistent với explicit transfer endpoint. Phân biệt 2 case bằng field `autoTransferred: boolean`. BE W7-D2 MUST emit OWNER_TRANSFERRED (không phải ROLE_CHANGED) cho auto-transfer path.
+
+> **Không broadcast user-specific** `/queue/conv-removed` cho self-leave — user tự bấm leave, FE đã navigate away sau khi REST 204 về. Nếu có session khác (tab khác) → nhận MEMBER_REMOVED topic broadcast là đủ (reason LEFT → self-user match → remove UI giống pattern W7-4).
 
 **Notes**:
 - Sau leave, caller KHÔNG còn subscribe `/topic/conv.{id}` (member check fail ở SUBSCRIBE lần sau; V1 chấp nhận currently-open subscription vẫn nhận event cho đến unsubscribe — xem SOCKET_EVENTS.md §8 Limitations).
-- OWNER self-kick qua `DELETE /members/{self-id}` → `CANNOT_REMOVE_SELF`. Dùng `/leave` thay.
+- OWNER self-kick qua `DELETE /members/{self-id}` → `CANNOT_KICK_SELF`. Dùng `/leave` thay.
+- "Empty group" case documented tại WARNINGS W7-2 — V1 không auto-delete; caller phải chủ động `DELETE /{id}` nếu muốn disband.
 
 ---
 
 ### PATCH /api/conversations/{id}/members/{userId}/role
 
-**Description** (W7-D1): Thay đổi role của 1 member. OWNER-only (V1).
+**Description** (W7-D2 finalized; was W7-D1 draft): Thay đổi role của 1 member giữa ADMIN ↔ MEMBER. OWNER-only (V1). Promote thành OWNER phải dùng `/transfer-owner` (atomic 2-way swap, flow riêng).
 
 **Auth required**: Yes
 
@@ -941,42 +987,62 @@ Validation rules:
 ```
 
 Validation rules:
-- `role`: enum strict `"ADMIN" | "MEMBER"`. Promote thành `"OWNER"` phải dùng `/transfer-owner` thay (V1 phân tách flow).
+- `role`: enum strict `"ADMIN" | "MEMBER"`. Truyền `"OWNER"` → `400 INVALID_ROLE`. Truyền enum khác (không hợp lệ) → `400 VALIDATION_FAILED`.
+- Target member hiện tại là OWNER → `403 CANNOT_CHANGE_OWNER_ROLE` (OWNER self-demote cấm qua endpoint này; dùng `/transfer-owner` để đổi chủ).
+- **No-op idempotent**: `newRole == target.currentRole` → **200 OK**, trả response bình thường, **KHÔNG broadcast** (tránh noise + log spam khi FE double-click). Không coi là lỗi.
 
-**Authorization**: `OWNER` only (V1). ADMIN/MEMBER → `INSUFFICIENT_PERMISSION`.
+**Authorization**: `OWNER` only (V1). ADMIN/MEMBER → `403 INSUFFICIENT_PERMISSION`.
 
 **Response 200**:
 
 ```json
 {
   "userId": "uuid",
-  "oldRole": "MEMBER",
-  "newRole": "ADMIN",
-  "changedAt": "ISO8601"
+  "role": "ADMIN | MEMBER",
+  "changedAt": "ISO8601",
+  "changedBy": {
+    "userId": "uuid",
+    "username": "string"
+  }
 }
 ```
+
+Field rules:
+- `role`: new role sau khi đổi (hoặc role hiện tại nếu no-op).
+- `changedAt`: ISO8601 timestamp của thao tác (hoặc thời điểm role được set gần nhất nếu no-op — BE chọn, FE không dùng làm state diff).
+- `changedBy`: actor (caller = OWNER). Shape minimal (userId + username). Broadcast payload shape fuller (xem §3.9).
+
+> **Response shape change (v1.1.0-w7)**: v1.0.0-w7 trả `{userId, oldRole, newRole, changedAt}`. v1.1.0-w7 bỏ `oldRole` (FE tự biết từ cache), thêm `changedBy` object (nhất quán với các response khác có actor). Broadcast §3.9 vẫn giữ `oldRole` vì receiver không có context.
 
 **Error responses**:
 
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
-| 400 | `VALIDATION_FAILED` | `role` không đúng enum. |
+| 400 | `VALIDATION_FAILED` | `role` không đúng enum (null, empty, invalid string). |
+| 400 | `INVALID_ROLE` | `role == "OWNER"` (dùng `/transfer-owner` thay). |
 | 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
-| 400 | `INVALID_ROLE_CHANGE` | target là OWNER (đổi OWNER role qua endpoint này cấm — dùng transfer); hoặc new role = current role (no-op); hoặc target == caller (OWNER self-demote cấm — dùng transfer). |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
 | 403 | `INSUFFICIENT_PERMISSION` | Caller không phải OWNER. |
-| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
-| 404 | `GROUP_MEMBER_NOT_FOUND` | Target userId không phải member. |
+| 403 | `CANNOT_CHANGE_OWNER_ROLE` | Target hiện tại là OWNER (including `userId == callerId` khi caller là OWNER tự đổi role của mình). |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại, đã soft-delete, hoặc caller không phải member. |
+| 404 | `MEMBER_NOT_FOUND` | Target userId không phải member. |
 | 429 | `RATE_LIMITED` | Vượt quota. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
-**Broadcast**: fire `ROLE_CHANGED` event với `userId + newRole + changedBy`. Xem SOCKET_EVENTS.md §3.9.
+> **Renamed/refactored codes (v1.1.0-w7)**: `INVALID_ROLE_CHANGE` cũ (gộp 3 sub-case) nay tách:
+> - Target = OWNER → `CANNOT_CHANGE_OWNER_ROLE` (403, rõ nghĩa: OWNER protected).
+> - No-op (same role) → không throw nữa, trả 200 OK idempotent (thay đổi behavior).
+> - `role == "OWNER"` trong body → `INVALID_ROLE` (400, body sai schema).
+>
+> BE W7-D2 MUST emit tên mới. Legacy code còn throw `INVALID_ROLE_CHANGE` → sửa trong implementation.
+
+**Broadcast**: fire `ROLE_CHANGED` event qua `/topic/conv.{id}` — **CHỈ KHI KHÔNG phải no-op**. Payload: `{conversationId, userId, oldRole, newRole, changedBy}`. Xem SOCKET_EVENTS.md §3.9. No-op → silent (không broadcast).
 
 ---
 
 ### POST /api/conversations/{id}/transfer-owner
 
-**Description** (W7-D1): OWNER chuyển quyền sở hữu cho 1 member khác. Current OWNER → ADMIN, new user → OWNER. Atomic 2-way swap.
+**Description** (W7-D2 finalized; was W7-D1 draft): OWNER chuyển quyền sở hữu cho 1 member khác. Current OWNER → ADMIN (KHÔNG về MEMBER — OWNER cũ giữ quyền quản lý), new user → OWNER. Atomic 2-way swap.
 
 **Auth required**: Yes
 
@@ -988,64 +1054,107 @@ Validation rules:
 
 ```json
 {
-  "newOwnerId": "uuid"
+  "targetUserId": "uuid"
 }
 ```
 
-Validation rules:
-- `newOwnerId`: bắt buộc UUID, phải là current member của conv. Khác caller id (self-transfer = no-op `INVALID_ROLE_CHANGE`).
+> **Field rename (v1.1.0-w7)**: `newOwnerId` → `targetUserId` (nhất quán với path `/members/{userId}` convention). BE W7-D2 MUST accept tên mới. v1.0.0-w7 clients chưa có → không backward-compat concern.
 
-**Authorization**: `OWNER` only.
+Validation rules:
+- `targetUserId`: bắt buộc UUID format, phải là current member của conv (`MEMBER_NOT_FOUND` nếu không).
+- `targetUserId != callerId` (self-transfer không hợp lệ → `CANNOT_TRANSFER_TO_SELF`).
+- Target không được là OWNER hiện tại. V1 invariant chỉ có 1 OWNER tồn tại (CHECK constraint `chk_group_metadata` + flow đảm bảo), nên case này trivially không xảy ra nếu target ≠ caller. Defensive check vẫn có: target role == OWNER → `CANNOT_TRANSFER_TO_SELF` (safe fallback, nghĩa là "target trùng caller").
+
+**Authorization**: `OWNER` hiện tại only. ADMIN/MEMBER → `403 INSUFFICIENT_PERMISSION`.
 
 **Response 200**:
 
 ```json
 {
-  "oldOwner": { "userId": "uuid", "newRole": "ADMIN" },
-  "newOwner": { "userId": "uuid", "newRole": "OWNER" }
+  "previousOwner": {
+    "userId": "uuid",
+    "username": "string",
+    "newRole": "ADMIN"
+  },
+  "newOwner": {
+    "userId": "uuid",
+    "username": "string"
+  }
 }
 ```
+
+Field rules:
+- `previousOwner`: caller (OWNER cũ). `newRole` luôn là `"ADMIN"` (hằng số, FE có thể hardcode check).
+- `newOwner`: target user được promote. Không cần kèm `newRole: "OWNER"` vì tên field đã nói rõ.
+
+> **Response shape change (v1.1.0-w7)**: v1.0.0-w7 dùng `oldOwner` / `newOwner`. v1.1.0-w7 đổi `oldOwner` → `previousOwner` (rõ hơn, không bị nhầm với "cựu owner đã rời"), và thêm `username` cho human-readable. Broadcast §3.10 payload độc lập — xem event schema.
 
 **Error responses**:
 
 | HTTP | Error code | Điều kiện |
 |------|-----------|-----------|
-| 400 | `VALIDATION_FAILED` | newOwnerId malformed UUID. |
+| 400 | `VALIDATION_FAILED` | targetUserId malformed UUID hoặc missing. |
 | 400 | `NOT_GROUP` | Conv là ONE_ON_ONE. |
-| 400 | `INVALID_ROLE_CHANGE` | newOwnerId = callerId. |
+| 400 | `CANNOT_TRANSFER_TO_SELF` | `targetUserId == callerId`. |
 | 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
 | 403 | `INSUFFICIENT_PERMISSION` | Caller không phải OWNER. |
-| 404 | `CONV_NOT_FOUND` | Conv không tồn tại hoặc caller không phải member. |
-| 404 | `GROUP_MEMBER_NOT_FOUND` | newOwnerId không phải member của conv. |
+| 404 | `CONV_NOT_FOUND` | Conv không tồn tại, đã soft-delete, hoặc caller không phải member. |
+| 404 | `MEMBER_NOT_FOUND` | targetUserId không phải member của conv. |
 | 429 | `RATE_LIMITED` | Vượt quota. |
 | 500 | `INTERNAL_ERROR` | Lỗi server. |
 
-**Broadcast**: fire `OWNER_TRANSFERRED` event (FE dùng để update UI + sidebar owner indicator). Xem SOCKET_EVENTS.md §3.10.
+> **Renamed codes (v1.1.0-w7)**: `INVALID_ROLE_CHANGE` (400, khi self-transfer) → `CANNOT_TRANSFER_TO_SELF` (400, rõ intent). `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND` (đồng bộ với các endpoints /role, /members/{uid}).
+
+**Broadcast**: fire `OWNER_TRANSFERRED` event qua `/topic/conv.{id}` với `autoTransferred: false` (phân biệt với auto-transfer trong `/leave`). Payload: `{conversationId, previousOwner: {userId, username}, newOwner: {userId, username, fullName}, autoTransferred: false}`. Xem SOCKET_EVENTS.md §3.10.
 
 **Notes**:
-- Transaction boundary: `SELECT ... FOR UPDATE` cả 2 rows (current OWNER + newOwnerId) → UPDATE cả 2 role → UPDATE `conversations.owner_id = newOwnerId` → publish event. Tất cả 1 `@Transactional`.
-- Khác với `/leave` + auto-transfer: `/transfer-owner` giữ OWNER cũ trong group (downgrade thành ADMIN). `/leave` sẽ remove OWNER.
+- Transaction boundary: `SELECT ... FOR UPDATE` cả 2 rows (caller + target) → UPDATE cả 2 role → UPDATE `conversations.owner_id = targetUserId` → publish event → AFTER_COMMIT broadcast. Tất cả 1 `@Transactional`.
+- Khác với `/leave` + auto-transfer: `/transfer-owner` giữ previousOwner trong group (downgrade thành ADMIN). `/leave` sẽ remove previousOwner.
+- KHÔNG broadcast `ROLE_CHANGED` cho 2 swaps — chỉ 1 event OWNER_TRANSFERRED atomic để FE patch cả 2 members cùng lúc (tránh "2 OWNER" flicker). Xem lý do tại §3.10 SOCKET_EVENTS.md.
 
 ---
 
-### Appendix — Group Chat Authorization Matrix (W7)
+### Appendix — Group Chat Authorization Matrix (W7, v1.1.0-w7 finalized)
 
 | Action | OWNER | ADMIN | MEMBER |
 |--------|-------|-------|--------|
-| Create group (POST /conversations type=GROUP) | N/A (caller becomes OWNER) | - | - |
+| Create group (POST /conversations type=GROUP) | ✓ (any auth user; becomes OWNER) | ✓ (becomes OWNER) | ✓ (becomes OWNER) |
 | Rename group / Change avatar (PATCH /{id}) | ✓ | ✓ | ✗ |
 | Delete group (DELETE /{id}) | ✓ | ✗ | ✗ |
 | Add members (POST /{id}/members) | ✓ | ✓ | ✗ |
 | Remove MEMBER (DELETE /{id}/members/{uid}) | ✓ | ✓ | ✗ |
 | Remove ADMIN (DELETE /{id}/members/{uid}) | ✓ | ✗ | ✗ |
 | Remove OWNER via kick | ✗ (use `/leave`) | ✗ | ✗ |
-| Change role ADMIN↔MEMBER (PATCH /{id}/members/{uid}/role) | ✓ | ✗ | ✗ |
-| Transfer ownership (POST /{id}/transfer-owner) | ✓ | ✗ | ✗ |
+| Kick self (DELETE /{id}/members/{self}) | ✗ (`CANNOT_KICK_SELF`, use `/leave`) | ✗ (same) | ✗ (same) |
 | Leave group (POST /{id}/leave) | ✓* | ✓ | ✓ |
+| Change role ADMIN↔MEMBER (PATCH /{id}/members/{uid}/role) | ✓ | ✗ | ✗ |
+| Change role of OWNER (target=OWNER) | ✗ (`CANNOT_CHANGE_OWNER_ROLE`) | ✗ | ✗ |
+| Transfer ownership (POST /{id}/transfer-owner) | ✓ | ✗ | ✗ |
 | View members (GET /{id}) | ✓ | ✓ | ✓ |
 | Send/Edit/Delete own messages | ✓ | ✓ | ✓ |
 
-\* OWNER leave triggers auto-transfer (oldest-ADMIN → oldest-MEMBER → NULL if alone).
+\* OWNER leave → auto-transfer (oldest-ADMIN first, fallback oldest-MEMBER). Nếu OWNER là member duy nhất → `CANNOT_LEAVE_EMPTY_GROUP` (phải `DELETE /{id}` để disband).
+
+**Error code → HTTP status cheat sheet** (từ 5 endpoints trên):
+
+| Code | HTTP | Endpoint(s) |
+|------|------|-------------|
+| `VALIDATION_FAILED` | 400 | all (body/path malformed) |
+| `NOT_GROUP` | 400 | all (conv type = ONE_ON_ONE) |
+| `INVALID_ROLE` | 400 | PATCH /role (role=OWNER in body) |
+| `CANNOT_KICK_SELF` | 400 | DELETE /members/{uid} |
+| `CANNOT_TRANSFER_TO_SELF` | 400 | POST /transfer-owner |
+| `CANNOT_LEAVE_EMPTY_GROUP` | 400 | POST /leave (OWNER alone) |
+| `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | 401 | all |
+| `INSUFFICIENT_PERMISSION` | 403 | all (role không đủ) |
+| `CANNOT_CHANGE_OWNER_ROLE` | 403 | PATCH /role (target=OWNER) |
+| `CONV_NOT_FOUND` | 404 | all (anti-enumeration merge) |
+| `MEMBER_NOT_FOUND` | 404 | DELETE /members/{uid}, PATCH /role, POST /transfer-owner |
+| `MEMBER_LIMIT_EXCEEDED` | 409 | POST /members (>50 cap) |
+| `RATE_LIMITED` | 429 | all |
+| `INTERNAL_ERROR` | 500 | all |
+
+> **Skipped reasons** (response 201 của POST /members) không phải error codes — là status per-user trong batch: `ALREADY_MEMBER`, `USER_NOT_FOUND`, `BLOCKED`.
 
 **BE implementation note**: Role enum PHẢI embed permission methods để tránh scatter if-else khắp service layer:
 
@@ -1603,6 +1712,7 @@ Field rules:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-21 | v1.1.0-w7 | **W7-D2 contract finalize** cho 5 member management endpoints trước BE/FE implement. Changes vs v1.0.0-w7: (1) **POST /{id}/members** response đổi từ single-shape `{added[]}` → partial-success `{added[], skipped[{userId, reason: ALREADY_MEMBER|USER_NOT_FOUND|BLOCKED}]}` — 201 Created thay vì 200; status 201 khi có ít nhất 1 added hoặc khi tất cả skipped (vẫn success). `GROUP_FULL` → `MEMBER_LIMIT_EXCEEDED` (409, details `{currentCount, attemptedCount, limit: 50}`, all-or-nothing). `GROUP_MEMBER_NOT_FOUND` + `GROUP_MEMBER_ALREADY_IN` deprecated — chuyển sang per-user `skipped[].reason`. (2) **DELETE /{id}/members/{uid}**: `CANNOT_REMOVE_SELF` → `CANNOT_KICK_SELF`; `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`; `CANNOT_REMOVE_OWNER` removed (merged vào INSUFFICIENT_PERMISSION). Thêm user-specific broadcast `/user/{kickedUserId}/queue/conv-removed` với `{conversationId, reason: "KICKED"}`. (3) **POST /{id}/leave**: thêm `CANNOT_LEAVE_EMPTY_GROUP` (400) khi OWNER là member duy nhất — V1 không auto-delete. OWNER leave auto-transfer nay fire `OWNER_TRANSFERRED` (với `autoTransferred: true`) thay vì `ROLE_CHANGED` — consistent với `/transfer-owner`. Thứ tự broadcast: OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED. `MEMBER_REMOVED` với `reason: "LEFT"` có `removedBy: null` (khác KICKED: non-null). `SELECT FOR UPDATE` trên caller row chống race W7-1. (4) **PATCH /role**: response bỏ `oldRole`, thêm `changedBy: {userId, username}`. No-op (newRole == currentRole) → 200 OK idempotent KHÔNG broadcast. `INVALID_ROLE_CHANGE` tách thành 3 codes: `INVALID_ROLE` (400, body `role=OWNER`), `CANNOT_CHANGE_OWNER_ROLE` (403, target=OWNER), silent-idempotent cho no-op. `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`. (5) **POST /transfer-owner**: body field `newOwnerId` → `targetUserId` (rename for consistency path `/members/{userId}`). Response `oldOwner` → `previousOwner` + thêm `username`. `INVALID_ROLE_CHANGE` → `CANNOT_TRANSFER_TO_SELF`. Broadcast OWNER_TRANSFERRED với `autoTransferred: false`. (6) **Authorization matrix appendix** finalize + thêm "error code → HTTP status cheat sheet". (7) **Add user-specific STOMP destinations** `/user/{userId}/queue/conv-added` (ConversationSummaryDto) + `/user/{userId}/queue/conv-removed` (`{conversationId, reason}`) — xem SOCKET_EVENTS.md §2 + §3.7/3.8. KHÔNG đụng schema, không migration mới. BLOCKING cho BE W7-D2 implementation: tên code mới, response shape mới, broadcast ordering mới. |
 | 2026-04-21 | v1.0.0-w7 | **W7-D1 Group Chat backfill** (major bump — W3 spec gốc yêu cầu group chat + role management nhưng đã skip, W7 backfill). Schema V7 migration (`V7__add_group_chat.sql`): CREATE TYPE `member_role` ENUM ('OWNER','ADMIN','MEMBER'); ALTER `conversation_members` ADD role + joined_at; ALTER `conversations` ADD name + avatar_file_id (FK → files) + owner_id (FK → users, ON DELETE SET NULL); CHECK constraint `chk_group_metadata` (GROUP phải có name+owner, ONE_ON_ONE phải cả 2 NULL); indexes conv+role, conv+joined_at, owner (partial). `POST /api/conversations` update payload: ONE_ON_ONE dùng `targetUserId` (backward-compat với memberIds[0]); GROUP bắt buộc `name` (1-100) + `memberIds` (2-49) + `avatarFileId` optional. Response shape thêm `owner: {userId, username, fullName} | null`. 7 endpoints mới: PATCH /{id} (rename/avatar, OWNER+ADMIN), DELETE /{id} (soft delete, OWNER only), POST /{id}/members (add batch ≤10, OWNER+ADMIN), DELETE /{id}/members/{uid} (kick, role matrix), POST /{id}/leave (any member, OWNER triggers auto-transfer), PATCH /{id}/members/{uid}/role (ADMIN↔MEMBER, OWNER only), POST /{id}/transfer-owner (OWNER only, atomic 2-way swap). Auto-transfer rule khi OWNER leave: oldest-ADMIN → oldest-MEMBER → NULL (empty group preserved V1, monitoring alert >7d). Error codes mới (15): GROUP_NAME_REQUIRED, GROUP_MEMBERS_MIN, GROUP_MEMBERS_MAX, GROUP_MEMBER_NOT_FOUND, GROUP_AVATAR_NOT_OWNED, GROUP_AVATAR_NOT_IMAGE, GROUP_MEMBER_ALREADY_IN, GROUP_FULL, NOT_GROUP, INSUFFICIENT_PERMISSION, CANNOT_REMOVE_OWNER, CANNOT_REMOVE_SELF, INVALID_ROLE_CHANGE. Appendix Authorization Matrix. ADR-020 (Group Chat Architecture). WARNINGS W7-1/2/3 (auto-transfer race, empty group edge case, max-50 enforcement with FOR UPDATE lock). |
 | 2026-04-21 | v0.9.5-files-extended | **W6-D4-extend**: Mở rộng MIME whitelist từ 5 type (image jpeg/png/webp/gif + pdf) sang 14 type chia 2 group: Group A (images, gallery 1–5/message) + Group B (non-image: pdf, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z — exactly 1/message). Documented blacklist (executables, scripts, XSS vectors svg/html). Mixing rules formalized: Group A only OR exactly 1 Group B; trộn → `MSG_ATTACHMENTS_MIXED`; 2+ Group B → `MSG_ATTACHMENTS_MIXED`. Thêm field `iconType` vào `FileDto`: enum `IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC` server-computed từ MIME (FE dùng để chọn icon, không bind MIME trực tiếp → dễ extend whitelist sau). Thumbnail endpoint vẫn chỉ phục vụ Group A images; Group B trả 404 (FE fallback `iconType` icon static). Update `MSG_ATTACHMENTS_TOO_MANY` chỉ cho >5 images; >1 Group B fall vào `MSG_ATTACHMENTS_MIXED`. WARNINGS thêm office macro risk + blacklist maintenance cycle. |
 | 2026-04-20 | v0.9.0-files | **W6-D1**: Thêm Files Management section với `FileDto` shape dùng chung (id, mime, name, size, url, thumbUrl, expiresAt). 3 endpoints: `POST /api/files/upload` (multipart, 20MB max, rate limit 20/phút, MIME whitelist jpeg/png/webp/gif/pdf, MIME verify qua Apache Tika magic bytes — khác `Content-Type` header → `MIME_MISMATCH`), `GET /api/files/{id}` (auth = uploader OR member của conv chứa attachment, 404 merge cho expired + not-found + forbidden, Content-Disposition inline + X-Content-Type-Options nosniff), `GET /api/files/{id}/thumb` (image 200×200 JPEG lazy-generate cache, PDF/non-image trả 404). Update `MessageDto` thêm `attachments: FileDto[]` (luôn là array, không null), `content` nullable khi có attachments. Validation SEND+EDIT với attachments: phải có content HOẶC attachments (`MSG_NO_CONTENT`), images 1-5 OR pdf đúng 1, không trộn (`MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`), per-file check `MSG_ATTACHMENT_NOT_OWNED/ALREADY_USED/NOT_FOUND/EXPIRED`. EDIT KHÔNG sửa attachments V1 (chỉ sửa content). Error codes mới: `FILE_TOO_LARGE` (413), `FILE_TYPE_NOT_ALLOWED` (415), `FILE_EMPTY` (400), `MIME_MISMATCH` (415), `STORAGE_FAILED` (500), và 7 MSG_* codes ở trên. Soft-delete message strip cả `content=null` + `attachments=[]` (W5-D3 mở rộng cho W6). ADR-019 quyết local disk + StorageService interface, migration V7 thêm `files` + `message_attachments`. |

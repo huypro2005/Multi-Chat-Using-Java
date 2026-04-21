@@ -16,6 +16,53 @@
 
 ---
 
+## [W7-D2] feat: Member Management + Owner Transfer — 26 new tests, 257 total pass
+
+**Scope**: 5 endpoints theo API_CONTRACT v1.1.0-w7:
+- POST `/api/conversations/{id}/members` — batch add (1-10), partial success {added, skipped}, OWNER/ADMIN only.
+- DELETE `/api/conversations/{id}/members/{userId}` — kick, role-hierarchical (OWNER→ADMIN/MEMBER, ADMIN→MEMBER only), CANNOT_KICK_SELF.
+- POST `/api/conversations/{id}/leave` — self-leave. OWNER leave → auto-transfer (oldest ADMIN → oldest MEMBER fallback). CANNOT_LEAVE_EMPTY_GROUP.
+- PATCH `/api/conversations/{id}/members/{userId}/role` — OWNER-only, ADMIN↔MEMBER, no-op idempotent (no broadcast), INVALID_ROLE cho body=OWNER, CANNOT_CHANGE_OWNER_ROLE cho target=OWNER.
+- POST `/api/conversations/{id}/transfer-owner` — OWNER only, atomic 2-way swap (OWNER cũ → ADMIN, không về MEMBER), CANNOT_TRANSFER_TO_SELF.
+
+**Files added**:
+- `conversation/dto/AddMembersRequest.java` — @NotEmpty @Size(max=10) List<UUID>.
+- `conversation/dto/AddMembersResponse.java` — {added: List<MemberDto>, skipped: List<SkippedMemberDto>}, @JsonInclude ALWAYS để FE không phải null check.
+- `conversation/dto/SkippedMemberDto.java` — {userId, reason} enum "ALREADY_MEMBER" | "USER_NOT_FOUND" | "BLOCKED" (V1 reserved).
+- `conversation/dto/RoleChangeRequest.java` — @NotNull MemberRole.
+- `conversation/dto/RoleChangeResponse.java` — {userId, role, changedAt, changedBy: ActorSummaryDto}. Bỏ oldRole (v1.0.0-w7 có; v1.1.0-w7 bỏ — FE tự biết từ cache).
+- `conversation/dto/TransferOwnerRequest.java` — @NotNull UUID targetUserId (rename từ v1.0.0-w7 `newOwnerId`).
+- `conversation/dto/OwnerTransferResponse.java` — {previousOwner: PreviousOwnerDto(newRole="ADMIN" hardcode), newOwner: ActorSummaryDto}.
+- `conversation/dto/ActorSummaryDto.java` — minimal {userId, username} dùng cho response, KHÁC broadcast actor shape (có fullName).
+- `conversation/dto/PreviousOwnerDto.java` — {userId, username, newRole="ADMIN" hardcode}.
+- `conversation/event/MemberAddedEvent.java`, `MemberRemovedEvent.java`, `RoleChangedEvent.java`, `OwnerTransferredEvent.java` — records cho @TransactionalEventListener.
+- `conversation/service/ConversationMemberService.java` — 5 @Transactional public methods, tách khỏi ConversationService để giữ class size manageable.
+- `test/conversation/MemberManagementTest.java` — 26 tests: A01-A06 (add), K01-K05 (kick), L01-L06 (leave), R01-R05 (role), T01-T04 (transfer).
+
+**Files modified**:
+- `conversation/repository/ConversationMemberRepository.java` — thêm `lockMembersForUpdate` (native FOR UPDATE, trả List<String> UUID), `findByConversationIdAndUserIdForUpdate` (native FOR UPDATE), `findCandidatesForOwnerTransfer` (native CASE ORDER BY role priority + joinedAt), `findUserIdsByConversationId` (JPQL trả Set<UUID>).
+- `conversation/broadcast/ConversationBroadcaster.java` — +4 listener: onMemberAdded, onMemberRemoved, onRoleChanged, onOwnerTransferred. Dùng `@Transactional(REQUIRES_NEW, readOnly=true)` vì listener chạy AFTER_COMMIT cần load User/Conversation từ DB — transaction cũ đã close.
+- `conversation/controller/ConversationController.java` — +5 endpoints, inject ConversationMemberService.
+
+**Pattern key (đã ghi knowledge)**:
+- `MemberRole.canRemoveMember(targetRole)` 2-tham số trong enum — encapsulate role hierarchy (OWNER→ADMIN/MEMBER, ADMIN→MEMBER). Service 1 dòng `if (!actor.getRole().canRemoveMember(target.getRole()))`.
+- Race-safe lock H2-compatible: SELECT rows native SQL `FOR UPDATE`, count ở Java. Postgres `COUNT(*) FOR UPDATE` trực tiếp không portable vì H2 từ chối (90145 "FOR UPDATE is not allowed in DISTINCT or grouped select").
+- Auto-transfer query native CASE ORDER BY: `CASE role WHEN 'ADMIN' THEN 0 WHEN 'MEMBER' THEN 1 ELSE 2 END ASC, joined_at ASC`. Chạy native vì JPQL CASE với fully-qualified enum literal không portable.
+- OWNER→ADMIN sau transfer (giữ quyền, không về MEMBER) — semantics contract v1.1.0-w7. OWNER→MEMBER chỉ xảy ra trong flow leave (demote trước khi delete row, dễ hiểu flow).
+- Partial-success response pattern: 201 với {added, skipped} thay vì fail batch. Skipped codes enum: ALREADY_MEMBER, USER_NOT_FOUND (merge anti-enum), BLOCKED (V1 reserved). MEMBER_LIMIT_EXCEEDED vẫn all-or-nothing (409).
+- @TransactionalEventListener AFTER_COMMIT với DB access: cần `@Transactional(REQUIRES_NEW, readOnly=true)` để có transaction cho JPA load. Transaction của request đã commit → không có EntityManager active.
+
+**Pitfall cần ghi vào knowledge**:
+- H2 + Hibernate PESSIMISTIC_WRITE → emit `FOR NO KEY UPDATE` (Postgres-specific), H2 90232 "Syntax error". Fix: native SQL `FOR UPDATE` (H2 + PG đều hiểu).
+- H2 `SELECT COUNT(*) ... FOR UPDATE` → 90145 "FOR UPDATE is not allowed in DISTINCT or grouped select". Postgres cho. Fix: SELECT rows + count Java.
+- Native SQL trả UUID column với H2 → ArrayList<byte[]>, ConversionFailedException khi map sang `List<UUID>`. Fix: `CAST(column AS VARCHAR)` + trả `List<String>`.
+- `CAST(:convId AS UUID)` bắt buộc cho WHERE clause UUID comparison trong native queries H2 (đã ghi từ W4).
+- Broadcaster test spy: `reset(messagingTemplate)` trước test no-op case (R03) để clear prior invocations từ createGroup.
+
+**Regression**: 257 tests pass. 6 subtests WebSocketIntegrationTest, GroupConversationTest (26), MemberManagementTest (26) new, ConversationControllerTest (15), + other. Zero failures.
+
+---
+
 ## [W7-D1] feat: Schema V9 + Group Chat CRUD (ADR-020) — 21 new tests, 231 total pass
 
 **Migration**: Đặt tên V9 thay V7 — V7 đã dùng cho files table (W6-D1). Docs ADR-020 viết V7 là naming drift; không rename để giữ flyway history thuần tuý (Flyway V1-V8 đã applied).
