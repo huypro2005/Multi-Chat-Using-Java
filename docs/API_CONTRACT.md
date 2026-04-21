@@ -791,9 +791,276 @@ Note:
 
 ---
 
-## Files
+## Files Management (v0.9.0-files — W6-D1)
 
-(reviewer sẽ thêm khi phase file upload bắt đầu)
+> **Phase**: Tuần 6 — File upload + attachments.
+> **Scope V1**: Local disk storage + StorageService interface (ADR-019, ARCHITECTURE.md §7.7). V2 migrate S3.
+> **Allowed MIME**: Images (`image/jpeg`, `image/png`, `image/webp`, `image/gif`) + PDF (`application/pdf`). Tất cả khác reject.
+> **Max size**: 20MB per file.
+> **Expiry**: 30 ngày kể từ `createdAt`. Daily cleanup job xoá file disk + mark row `expired`. Xem ADR-019 & §7.8.
+> **Auth**: Bearer JWT bắt buộc cho tất cả endpoints.
+
+### FileDto shape (dùng chung mọi nơi — response upload, attachment trong MessageDto)
+
+```json
+{
+  "id": "uuid (server-generated)",
+  "mime": "string (allowed MIME)",
+  "name": "string (original name, sanitized — max 255 chars)",
+  "size": "long (bytes, 1..20971520)",
+  "url": "string (GET /api/files/{id})",
+  "thumbUrl": "string | null (GET /api/files/{id}/thumb — null nếu không phải image)",
+  "expiresAt": "ISO8601 UTC (createdAt + 30 ngày)"
+}
+```
+
+Field notes:
+- `id`: UUID v4 server-generated. Client KHÔNG tự sinh id cho file (khác tempId của message).
+- `name`: `originalName` đã sanitize (strip path separator, control chars). Đây là tên hiển thị cho user download, KHÔNG phải filesystem path. Path nội bộ là `{base}/{yyyy}/{mm}/{uuid}.{ext}` — không bao giờ expose.
+- `url`: path relative (FE prefix với base API URL). Authorization check mỗi lần GET.
+- `thumbUrl`: `null` cho PDF / non-image. Cho image: trả về endpoint `/api/files/{id}/thumb` luôn (không pre-compute thumbnail tồn tại hay không — server lazy-generate).
+- `size`: bytes, client dùng để hiển thị (ví dụ "2.3 MB").
+- `expiresAt`: FE dùng để warn user trước expiry (ví dụ hiển thị "File sẽ hết hạn trong 3 ngày").
+
+---
+
+### POST /api/files/upload
+
+**Description**: Upload 1 file lên server. Trả về `FileDto` mà client có thể gắn vào message attachment khi gửi tin nhắn.
+
+**Auth required**: Yes
+
+**Rate limit**: 20 uploads/phút/user (Redis `rate:file-upload:{userId}` INCR + EX 60, pattern ADR-005).
+
+**Content-Type**: `multipart/form-data`
+
+**Request** (form fields):
+
+| Field | Type | Required | Mô tả |
+|-------|------|----------|------|
+| `file` | File | Yes | Binary file. Max 20MB. MIME phải trong whitelist. |
+
+> Không có field nào khác. Không có `convId` hay `messageId` — file được upload "standalone" rồi mới attach vào message khi gửi `/app/conv.{id}.message`. Orphan file (upload nhưng không attach) sẽ bị cleanup sau 1h (xem W6-4 WARNINGS).
+
+**Response 201** — `FileDto`:
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "mime": "image/jpeg",
+  "name": "vacation.jpg",
+  "size": 2457600,
+  "url": "/api/files/550e8400-e29b-41d4-a716-446655440000",
+  "thumbUrl": "/api/files/550e8400-e29b-41d4-a716-446655440000/thumb",
+  "expiresAt": "2026-05-20T10:00:00Z"
+}
+```
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `FILE_EMPTY` | Multipart field `file` thiếu hoặc size = 0 bytes. |
+| 400 | `VALIDATION_FAILED` | `file` field sai shape (không phải multipart part). |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 413 | `FILE_TOO_LARGE` | File > 20 MB. Kèm `details.maxBytes: 20971520` + `details.actualBytes`. |
+| 415 | `FILE_TYPE_NOT_ALLOWED` | MIME không nằm trong whitelist `[jpeg, png, webp, gif, pdf]`. Kèm `details.allowedMimes` + `details.actualMime`. |
+| 415 | `MIME_MISMATCH` | MIME detect qua magic bytes (Apache Tika) khác với `Content-Type` header. Attacker đổi extension/header để bypass whitelist. Kèm `details.declaredMime` + `details.detectedMime`. |
+| 429 | `RATE_LIMITED` | Vượt 20/phút/user. Kèm `details.retryAfterSeconds`. |
+| 500 | `STORAGE_FAILED` | Lỗi ghi disk (disk full, permission denied, I/O error). Log chi tiết server-side, client chỉ nhận generic message. |
+| 500 | `INTERNAL_ERROR` | Lỗi khác (DB, thumbnail generation fail, v.v.). |
+
+**Notes — Security (BLOCKING check cho reviewer)**:
+- **Path traversal**: `originalName` **KHÔNG BAO GIỜ** được dùng làm phần của filesystem path. Path nội bộ = `{base}/{yyyy}/{mm}/{fileId}.{ext}` (ext lấy từ MIME whitelist, không từ original filename). Tham khảo W6-1 trong WARNINGS.md.
+- **MIME spoofing**: BẮT BUỘC verify MIME qua Apache Tika `detect(InputStream)` đọc magic bytes — KHÔNG trust `Content-Type` header từ client. Nếu declared MIME (từ header) khác detected MIME → `MIME_MISMATCH`. Xem W6-2.
+- **Executable protection**: file `.exe`, `.sh`, `.bat`, … đều fail `FILE_TYPE_NOT_ALLOWED` vì MIME không trong whitelist. Nhưng defense-in-depth: serve `Content-Disposition: attachment` (hoặc `inline` với `X-Content-Type-Options: nosniff`) để browser không auto-execute.
+- **Disk quota V1**: KHÔNG có per-user quota. Acceptable V1 (<1000 users, 30-day expiry), V2 cần implement. Xem W6-3.
+- **Orphan cleanup**: file upload nhưng 1 tiếng không được attach vào message → cleanup job xoá. File đã attach → expire sau 30 ngày theo `expiresAt`. Xem W6-4.
+
+**Notes — Implementation**:
+- Size limit check ở 2 level: (1) Spring `spring.servlet.multipart.max-file-size: 20MB` reject ở HTTP layer, (2) service-level double-check (defense-in-depth nếu misconfig).
+- Response 201 (Created) — không phải 200 — theo REST convention.
+- `expiresAt` = `now() + 30 ngày` UTC. Server là authority về expiry, client không được override.
+
+---
+
+### GET /api/files/{id}
+
+**Description**: Download / stream file content theo `id`. Dùng cho inline display (browser render image trực tiếp trong `<img src>`) hoặc trigger download (PDF).
+
+**Auth required**: Yes (JWT trong header).
+
+**Rate limit**: Không áp riêng (global per-user budget, V1 chưa enforce).
+
+**Path params**:
+
+| Param | Type | Mô tả |
+|-------|------|------|
+| `id` | UUID | File id từ `FileDto.id`. |
+
+**Authorization logic** (BẮT BUỘC check theo thứ tự):
+
+1. Caller là `uploader_id` của file → 200 serve.
+2. Caller là member của conversation chứa message có attachment `file_id = id` (query `message_attachments` JOIN `messages` JOIN `conversation_members`) → 200 serve.
+3. Không thoả 1 hoặc 2 → `404 NOT_FOUND` (merge với "file không tồn tại" — anti-enumeration).
+
+**Response 200**:
+
+- `Content-Type`: MIME thật của file (từ DB `files.mime`).
+- `Content-Disposition`: `inline; filename="{originalName sanitized}"` cho image; `inline; filename="{originalName}"` cho PDF (trình duyệt PDF viewer sẽ render).
+- `Cache-Control`: `private, max-age=604800` (7 ngày — file immutable, cho phép cache client).
+- `X-Content-Type-Options: nosniff` — chống MIME sniffing attack.
+- `ETag`: dùng `file.id` (immutable).
+- Body: binary file content.
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `NOT_FOUND` | File không tồn tại **HOẶC** caller không có quyền (không uploader + không member của conv chứa message attach file này) **HOẶC** file đã expire (`expires_at < now()`). Merge tất cả để chống enumeration. |
+| 500 | `INTERNAL_ERROR` | I/O error khi đọc file từ disk. |
+
+**Notes — V1 anti-enumeration**:
+- **404 cho cả expired và not-found**: không trả `410 GONE` (sẽ tiết lộ "file từng tồn tại"). Consumer chỉ biết "tôi không có quyền xem file này hoặc nó không tồn tại" — không phân biệt được.
+- V2 có thể cân nhắc tách `FILE_EXPIRED` (410) nếu UX cần warning rõ hơn.
+
+**Notes — Performance**:
+- Stream file qua `ResponseEntity<Resource>` với `InputStreamResource` hoặc `FileSystemResource`. KHÔNG load toàn file vào memory (`byte[]`) — OOM với file 20MB × concurrent.
+- Range request (`Range: bytes=...`) — V1 chưa support (Spring Resource handler có sẵn nhưng cần wire). Defer V2 khi có video.
+
+---
+
+### GET /api/files/{id}/thumb
+
+**Description**: Trả về thumbnail 200×200 (cover) của image. Dùng cho preview trong chat bubble, list view.
+
+**Auth required**: Yes.
+
+**Path params**: `id` (UUID, giống GET /api/files/{id}).
+
+**Authorization**: cùng logic với GET /api/files/{id} (uploader OR member of conv containing message with this attachment).
+
+**Response 200**:
+
+- `Content-Type`: `image/jpeg` (thumbnail luôn JPEG bất kể source — tối ưu size).
+- `Cache-Control`: `private, max-age=604800`.
+- `ETag`: `file.id + "-thumb"`.
+- Body: 200×200 JPEG (cover fit — giữ aspect ratio, crop phần dư).
+
+**Error responses**:
+
+| HTTP | Error code | Điều kiện |
+|------|-----------|-----------|
+| 400 | `VALIDATION_FAILED` | `id` không phải UUID hợp lệ. |
+| 401 | `AUTH_REQUIRED` / `AUTH_TOKEN_EXPIRED` | Thiếu/expired JWT. |
+| 404 | `NOT_FOUND` | File không tồn tại / không có quyền / đã expire / **KHÔNG PHẢI image** (PDF không có thumbnail → 404 giống "không tồn tại" để consistent). |
+| 500 | `INTERNAL_ERROR` | Lỗi generate thumbnail (Thumbnailator exception, disk I/O). |
+
+**Notes**:
+- **Lazy generation + cache**: lần GET đầu tiên cho 1 file image → server generate thumbnail bằng `Thumbnailator.of(src).size(200, 200).outputFormat("jpg").toFile(thumbPath)`, lưu vào `{base}/{yyyy}/{mm}/{uuid}_thumb.jpg`. Lần sau serve từ cache.
+- **PDF**: trả 404 (không generate PDF preview V1). FE fallback hiển thị icon PDF generic.
+- **GIF animated**: thumbnail chỉ lấy frame đầu (Thumbnailator mặc định) — acceptable V1.
+
+---
+
+### MessageDto — thêm field `attachments` (W6-D1)
+
+> **Breaking change for MessageDto**: Thêm field `attachments` vào mọi MessageDto (REST response, STOMP ACK, STOMP broadcast MESSAGE_CREATED). `content` trở thành nullable khi có attachments (1 trong 2 phải non-null). BE + FE phải deploy đồng bộ.
+
+**Updated MessageDto shape**:
+
+```json
+{
+  "id": "uuid",
+  "conversationId": "uuid",
+  "sender": {
+    "id": "uuid",
+    "username": "string",
+    "fullName": "string",
+    "avatarUrl": "string|null"
+  },
+  "type": "TEXT|IMAGE|FILE|SYSTEM",
+  "content": "string | null",
+  "attachments": [
+    {
+      "id": "uuid",
+      "mime": "string",
+      "name": "string",
+      "size": "long",
+      "url": "string",
+      "thumbUrl": "string | null",
+      "expiresAt": "ISO8601"
+    }
+  ],
+  "replyToMessage": { "id", "senderName", "contentPreview", "deletedAt" } | null,
+  "editedAt": "ISO8601|null",
+  "deletedAt": "ISO8601|null",
+  "deletedBy": "uuid|null",
+  "createdAt": "ISO8601 UTC"
+}
+```
+
+Field rules:
+- `content`: **nullable** từ W6-D1. Trước W6: required 1-5000 chars. Sau W6: required nếu `attachments` rỗng; có thể `null` nếu `attachments` non-empty.
+- `attachments`: array (có thể rỗng `[]`). **Không bao giờ `null`** — luôn là array (FE không phải check null).
+- `type`: V1 mapping từ attachments mix:
+  - `attachments` rỗng + `content` non-null → `TEXT`.
+  - `attachments` có 1+ image → `IMAGE`.
+  - `attachments` có 1 PDF → `FILE`.
+  - `SYSTEM` do server phát (không có attachment).
+
+**BE mapper note** (BLOCKING): `MessageMapper.toDto` phải load `attachments` qua `JOIN message_attachments ORDER BY display_order ASC`, map từng row sang `FileDto` reuse `FileMapper`. Khi message `deletedAt != null` → strip cả `content=null` (đã có từ W5-D3) VÀ `attachments=[]` (W6-D1 mới). Lý do: attachment cũng là "content" đã xoá, không leak URL sau delete.
+
+---
+
+### Validation rules cho SEND + EDIT với attachments (W6-D1)
+
+Áp dụng cho cả STOMP `/app/conv.{id}.message` (SEND) và `/app/conv.{id}.edit` (EDIT) — xem `SOCKET_EVENTS.md` §3b + §3c.
+
+**SEND payload** (thêm `attachmentIds`):
+
+```json
+{
+  "tempId": "uuid",
+  "content": "string (0-5000 chars, nullable nếu có attachments)",
+  "type": "TEXT",
+  "replyToMessageId": "uuid | null",
+  "attachmentIds": ["uuid", "..."]
+}
+```
+
+**Validation rules** (server-side, enforce nghiêm ngặt):
+
+1. **Phải có content HOẶC attachments**: nếu `content` rỗng/null/toàn-whitespace AND `attachmentIds` rỗng/null → `MSG_NO_CONTENT`.
+2. **Mixed type NOT ALLOWED**: `attachmentIds` không được trộn image với PDF. Tất cả phải là image HOẶC tất cả là PDF. Vi phạm → `MSG_ATTACHMENTS_MIXED`.
+3. **Count limits**:
+   - Images: 1–5 items. >5 → `MSG_ATTACHMENTS_TOO_MANY` (kèm `details.maxItems: 5, details.actualCount`).
+   - PDF: **đúng 1 item**. >1 PDF → `MSG_ATTACHMENTS_TOO_MANY` (kèm `details.maxItems: 1`).
+4. **Per-attachment check** (cho mỗi `attachmentId`):
+   - File không tồn tại → `MSG_ATTACHMENT_NOT_FOUND`.
+   - File đã expire (`expires_at < now()`) → `MSG_ATTACHMENT_EXPIRED`.
+   - File uploader không phải sender (`file.uploader_id != userId`) → `MSG_ATTACHMENT_NOT_OWNED` (chống attach file của user khác).
+   - File đã được attach vào message khác (`EXISTS SELECT 1 FROM message_attachments WHERE file_id = ?`) → `MSG_ATTACHMENT_ALREADY_USED` (UNIQUE constraint DB guarantee, service check trước để có error code rõ).
+
+**EDIT constraint** (V1): KHÔNG cho sửa attachments — chỉ sửa `content`. Nếu FE gửi EDIT payload với `attachmentIds` khác attachments hiện tại → BE **bỏ qua field `attachmentIds`** (không lỗi, không thay đổi DB), chỉ update `content`. Lý do: (1) edit window 5 phút ngắn, user thường chỉ sửa typo; (2) thay attachment đòi hỏi upload mới + dedup cleanup phức tạp. V2 xem xét cho phép.
+
+> **BE implementation note**: EDIT service đã nhận payload `{clientEditId, messageId, newContent}` (§3c.1) — KHÔNG thêm field `attachmentIds` vào EDIT payload. Giữ nguyên shape EDIT hiện tại. Validation rule (1) "phải có content HOẶC attachments" với EDIT = chỉ check `newContent` non-empty (attachments giữ nguyên từ message gốc, đã qua validation khi SEND).
+
+**Error code table mới (W6-D1)**:
+
+| Code | HTTP (REST) / STOMP ERROR | Điều kiện |
+|------|---------------------------|-----------|
+| `MSG_NO_CONTENT` | 400 / STOMP | Cả `content` và `attachmentIds` đều rỗng. |
+| `MSG_ATTACHMENT_NOT_OWNED` | 403 / STOMP | File `uploader_id != senderId`. |
+| `MSG_ATTACHMENT_ALREADY_USED` | 409 / STOMP | File đã attach vào message khác (UNIQUE constraint). |
+| `MSG_ATTACHMENTS_MIXED` | 400 / STOMP | Trộn image + PDF trong cùng message. |
+| `MSG_ATTACHMENTS_TOO_MANY` | 400 / STOMP | >5 images hoặc >1 PDF. |
+| `MSG_ATTACHMENT_NOT_FOUND` | 404 / STOMP | `attachmentId` không tồn tại. |
+| `MSG_ATTACHMENT_EXPIRED` | 410 / STOMP | File đã expire (`expires_at < now()`). |
+
+**REST path**: vẫn dùng `POST /api/conversations/{convId}/messages` cho fallback (deprecated FE hot path nhưng vẫn support). Body thêm optional `attachmentIds: ["uuid", ...]`. Error code giống bảng trên.
 
 ---
 
@@ -801,6 +1068,7 @@ Note:
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-20 | v0.9.0-files | **W6-D1**: Thêm Files Management section với `FileDto` shape dùng chung (id, mime, name, size, url, thumbUrl, expiresAt). 3 endpoints: `POST /api/files/upload` (multipart, 20MB max, rate limit 20/phút, MIME whitelist jpeg/png/webp/gif/pdf, MIME verify qua Apache Tika magic bytes — khác `Content-Type` header → `MIME_MISMATCH`), `GET /api/files/{id}` (auth = uploader OR member của conv chứa attachment, 404 merge cho expired + not-found + forbidden, Content-Disposition inline + X-Content-Type-Options nosniff), `GET /api/files/{id}/thumb` (image 200×200 JPEG lazy-generate cache, PDF/non-image trả 404). Update `MessageDto` thêm `attachments: FileDto[]` (luôn là array, không null), `content` nullable khi có attachments. Validation SEND+EDIT với attachments: phải có content HOẶC attachments (`MSG_NO_CONTENT`), images 1-5 OR pdf đúng 1, không trộn (`MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`), per-file check `MSG_ATTACHMENT_NOT_OWNED/ALREADY_USED/NOT_FOUND/EXPIRED`. EDIT KHÔNG sửa attachments V1 (chỉ sửa content). Error codes mới: `FILE_TOO_LARGE` (413), `FILE_TYPE_NOT_ALLOWED` (415), `FILE_EMPTY` (400), `MIME_MISMATCH` (415), `STORAGE_FAILED` (500), và 7 MSG_* codes ở trên. Soft-delete message strip cả `content=null` + `attachments=[]` (W5-D3 mở rộng cho W6). ADR-019 quyết local disk + StorageService interface, migration V7 thêm `files` + `message_attachments`. |
 | 2026-04-20 | v0.6.2-messages-after-param | **W5-D4**: GET /api/conversations/{convId}/messages thêm `after` param (forward pagination, ORDER ASC, include deleted). `cursor` và `after` mutually exclusive (400 nếu dùng cùng nhau). `ReplyPreviewDto` thêm field `deletedAt` (null nếu source chưa bị xóa, ISO8601 nếu đã bị xóa) và `contentPreview` = null khi source deleted. STOMP `SendMessagePayload` thêm `replyToMessageId` (nullable UUID) với validation: source phải thuộc cùng conversation, quoting deleted source allowed. |
 | 2026-04-20 | v0.6.1-messages-stomp-shift | **ADR-016**: POST /api/conversations/{convId}/messages được **deprecated** cho FE hot path. FE chuyển sang STOMP `/app/conv.{id}.message` với tempId (xem SOCKET_EVENTS.md v1.1-w4). Endpoint REST KHÔNG bị xoá — giữ cho batch import, bot API, integration testing, và fallback. Shape response không đổi. |
 | 2026-04-19 | v0.6.0-messages-rest | Thêm Messages API: POST /api/conversations/{convId}/messages (gửi tin nhắn), GET /api/conversations/{convId}/messages (lịch sử, cursor-based). Rate limit 30/min. Anti-enumeration 404 cho non-member. ReplyPreviewDto shallow 1-level. nextCursor = createdAt của item cũ nhất. |

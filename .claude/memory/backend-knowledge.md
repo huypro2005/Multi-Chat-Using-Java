@@ -329,8 +329,30 @@ Workaround V2: dùng Redis MULTI/EXEC để atomic DELETE + SAVE.
 
 ---
 
+### File Upload Foundation (W6-D1)
+
+- Package: `com.chatapp.file.{entity,repository,dto,service,controller,exception,storage}`.
+- Files mới: `FileRecord`, `MessageAttachment` + `MessageAttachmentId` (composite key @EmbeddedId), `FileRecordRepository`, `MessageAttachmentRepository`, `FileDto`, `StorageService` (interface), `LocalStorageService`, `FileValidationService`, `FileService`, `FileController`, và 6 exception class riêng trong `com.chatapp.file.exception`.
+- Migration V7: `files` + `message_attachments`. **CHỐT**: `uploader_id UUID` (không BIGINT) và `message_id UUID` vì `users.id`/`messages.id` là UUID (V2/V5). Task spec viết BIGINT là sai — luôn align với PK type thực tế. Partial index pattern: `... WHERE expired = FALSE`, `... WHERE attached_at IS NULL` — chỉ index rows cần scan cho cleanup job.
+- `StorageService` interface 3 method (store/retrieve/delete) → `LocalStorageService` V1, dễ swap S3 V2 (ADR-019). Path layout `{base}/{yyyy}/{MM}/{uuid}.{ext}` — **KHÔNG** ghép originalName vào path (path traversal).
+- `LocalStorageService` security: `assertWithinBase()` canonical-prefix check trên mọi resolve. Reject fileId chứa `/`, `\`, `..`; reject ext chứa `.` (client attempt "jpg.exe" bypass). Trả **relative path** (normalize `\`→`/`) để DB portable cross-OS.
+- `FileValidationService` Tika: `new Tika().detect(InputStream)` — Tika chỉ đọc ~8KB peek, KHÔNG consume stream. MultipartFile.getInputStream() trả stream mới mỗi lần gọi nên không cần mark/reset. Alias normalization: `image/jpg → image/jpeg` (Firefox cũ).
+- MIME→ext map **CỐ ĐỊNH** trong FileValidationService (không đọc từ filename) — jpg/png/webp/gif/pdf. Whitelist: 4 image MIME + application/pdf (ADR-019).
+- `FileRateLimitedException` (không reuse `AppException` RATE_LIMITED vì có thêm field `retryAfterSeconds` typed getter). 6 exception class riêng để GlobalExceptionHandler map rõ ràng: FileEmpty/FileTooLarge/FileTypeNotAllowed/MimeMismatch/FileRateLimited/Storage + wire-in MaxUploadSizeExceeded + MissingServletRequestPart/Param.
+- GlobalExceptionHandler: `MissingServletRequestPartException` → 400 FILE_EMPTY (khi client POST không có part "file"); `MissingServletRequestParameterException("file")` → FILE_EMPTY (edge case Content-Type non-multipart). MaxUploadSizeExceededException → 413 FILE_TOO_LARGE generic (không có actualBytes).
+- application.yml: `spring.servlet.multipart.max-file-size: 20MB` + `max-request-size: 21MB` + `storage.local.base-path`. Test profile override: `./build/test-uploads` để không pollute repo working tree.
+- Controller: `@AuthenticationPrincipal User user` (KHÔNG `UserDetails` — project không dùng UserDetailsService, xem JwtAuthFilter). `@PostMapping(consumes=MULTIPART_FORM_DATA_VALUE)`. Download dùng `InputStreamResource` + `CacheControl.maxAge(7d).cachePrivate()` + ETag=id + `X-Content-Type-Options: nosniff`.
+- Anti-enumeration download: merge not-found / not-owner / expired → 404 NOT_FOUND đơn nhất. W6-D1 stub: chỉ uploader download được; W6-D2 sẽ thêm conv-member check.
+- Test pattern MultipartFile: `MockMultipartFile("file", "name.jpg", "image/jpeg", JPEG_MAGIC)` + `mockMvc.perform(multipart("/api/files/upload").file(file)...)`. Test size limit mà không alloc 20MB: custom `SizedMockMultipartFile` với explicit `getSize()` override, `getInputStream()` trả head bytes.
+- Test với `@TempDir` cho LocalStorageService — JUnit 5 tự cleanup, không pollute filesystem. Package test `com.chatapp.file` khác `com.chatapp.file.storage` → `getBasePath()` phải `public` (không package-private).
+- Test Tika magic bytes: lưu hardcoded byte[] cho JPEG/PNG/PDF (FF D8 FF E0 / 89 50 4E 47 / %PDF-1.4) — không mock Tika vì chính nó là component cần verify.
+- Orphan file concept: `attached_at NULL` = chưa gắn message. `markAttached()` domain method trên FileRecord sẽ dùng W6-D2 khi MessageService gắn attachments. Cleanup job orphan (1h) + expiry job (30d) làm ở W6-D3.
+
+---
+
 ## Changelog file này
 
+- 2026-04-21 W6D1: Thêm File Upload Foundation pattern (Tika MIME detect, LocalStorageService path traversal defense, MIME→ext cố định, 6 exception class, anti-enumeration 404 cho download, MultipartFile test pattern). Migration V7 dùng UUID FK (không BIGINT như task spec).
 - 2026-04-20 W5D4: Thêm Forward Pagination Pattern (after param), ReplyPreviewDto deletedAt field, STOMP reply validation pattern.
 - 2026-04-20 W5D3: Thêm Soft Delete Pattern (Message), content strip tại mapper, DELETE ACK minimal map, Map.of() null pitfall.
 - 2026-04-20 W5D2: Thêm Unified ACK/ERROR Shape Pattern (ADR-017), Anti-enumeration MSG_NOT_FOUND, Edit Dedup Pattern, Edit Window Check.

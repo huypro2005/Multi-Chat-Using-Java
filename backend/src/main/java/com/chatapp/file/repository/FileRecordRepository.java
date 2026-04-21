@@ -1,0 +1,27 @@
+package com.chatapp.file.repository;
+
+import com.chatapp.file.entity.FileRecord;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Repository
+public interface FileRecordRepository extends JpaRepository<FileRecord, UUID> {
+
+    /**
+     * Lookup file chưa expire — dùng cho GET /api/files/{id}.
+     * Nếu expired=true → treat như không tồn tại (anti-enumeration 404).
+     */
+    Optional<FileRecord> findByIdAndExpiredFalse(UUID id);
+
+    /**
+     * Liệt kê orphan files của user (attached_at = NULL) tạo trước threshold.
+     * Dùng cho orphan cleanup job (W6-D3). Threshold thường là now() - 1h.
+     */
+    List<FileRecord> findByUploaderIdAndAttachedAtIsNullAndCreatedAtBefore(
+            UUID uploaderId, OffsetDateTime threshold);
+}

@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.4-w5d3_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue_
+_Version: v1.4-w6_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -85,7 +85,7 @@ Trường `type` luôn UPPERCASE snake-like. `payload` là object tự do, shape
 
 **Trigger**: BE broadcast sau khi `POST /api/conversations/{id}/messages` save thành công.
 
-**Payload**: `MessageDto` — **shape IDENTICAL với REST response** của `POST /api/conversations/{convId}/messages` trong `API_CONTRACT.md` mục v0.6.0-messages-rest.
+**Payload**: `MessageDto` — **shape IDENTICAL với REST response** của `POST /api/conversations/{convId}/messages` trong `API_CONTRACT.md` mục v0.6.0-messages-rest (+ v0.9.0-files cập nhật).
 
 ```json
 {
@@ -99,20 +99,33 @@ Trường `type` luôn UPPERCASE snake-like. `payload` là object tự do, shape
       "fullName": "string",
       "avatarUrl": "string|null"
     },
-    "type": "TEXT",
-    "content": "Hello",
+    "type": "TEXT | IMAGE | FILE",
+    "content": "string | null (W6: nullable khi chỉ có attachments)",
+    "attachments": [
+      {
+        "id": "uuid",
+        "mime": "image/jpeg | image/png | image/webp | image/gif | application/pdf",
+        "name": "string",
+        "size": 123456,
+        "url": "/api/files/{id}",
+        "thumbUrl": "/api/files/{id}/thumb | null",
+        "expiresAt": "2026-05-20T10:00:00Z"
+      }
+    ],
     "replyToMessage": {
       "id": "uuid",
       "senderName": "string",
       "contentPreview": "string (≤100 chars + '...' nếu truncated)"
     },
     "editedAt": null,
+    "deletedAt": null,
+    "deletedBy": null,
     "createdAt": "2026-04-20T10:00:00Z"
   }
 }
 ```
 
-> **Rule vàng**: BE PHẢI dùng cùng 1 `MessageMapper` / serialization cho cả REST response và broadcast payload. Nếu shape lệch → FE sẽ mismatch runtime. Reviewer sẽ check điều này ở W4-D3 review.
+> **Rule vàng**: BE PHẢI dùng cùng 1 `MessageMapper` / serialization cho cả REST response và broadcast payload. Nếu shape lệch → FE sẽ mismatch runtime. Reviewer sẽ check điều này ở W4-D3 review. W6-D1: `attachments` là array (có thể rỗng `[]`), **không bao giờ `null`** — FE không phải check null.
 
 **FE action khi nhận MESSAGE_CREATED**:
 1. Parse `frame.body` → `WsEvent<MessageDto>`.
@@ -222,19 +235,23 @@ TYPING_STOPPED shape giống hệt.
 ```json
 {
   "tempId": "uuid v4 (client-generated)",
-  "content": "string (1-5000 chars, required)",
+  "content": "string | null (0-5000 chars, nullable khi có attachments)",
   "type": "TEXT",
-  "replyToMessageId": "uuid | null (W5-D4+, nullable)"
+  "replyToMessageId": "uuid | null (W5-D4+, nullable)",
+  "attachmentIds": ["uuid", "..."]
 }
 ```
 
 **Validation rules** (server-side):
 - `tempId`: bắt buộc, UUID v4 format. Server dùng để dedup + route ACK.
-- `content`: bắt buộc, trim sau đó 1–5000 chars. Content toàn whitespace → validation fail.
-- `type`: chỉ `"TEXT"` ở Path B. `IMAGE` / `FILE` vẫn đi qua REST (kèm file upload). `SYSTEM` chỉ server phát, client không gửi.
+- `content`:
+  - **Trước W6**: bắt buộc non-empty 1-5000 chars.
+  - **Từ W6-D1**: nullable. Phải non-empty (1-5000 chars sau trim) HOẶC `attachmentIds` non-empty. Cả 2 rỗng → `MSG_NO_CONTENT`.
+- `type`: chỉ `"TEXT"` ở Path B (server tự derive `IMAGE` / `FILE` từ attachments khi persist — xem API_CONTRACT.md). `SYSTEM` chỉ server phát, client không gửi.
 - `replyToMessageId` (W5-D4): nullable UUID. Nếu non-null → PHẢI thuộc cùng `convId`; cross-conv → `VALIDATION_FAILED`. Cho phép reply vào tin nhắn đã bị soft-delete (quoting deleted source OK — AD-16). ACK trả về `replyToMessage.contentPreview = null` + `replyToMessage.deletedAt` set nếu source đã xóa.
+- `attachmentIds` (W6-D1): array UUID, có thể rỗng (`[]` hoặc omit). Validation chi tiết (count, mix, ownership, expiry) xem API_CONTRACT.md mục "Validation rules cho SEND + EDIT với attachments". Error codes: `MSG_NO_CONTENT`, `MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`, `MSG_ATTACHMENT_NOT_FOUND`, `MSG_ATTACHMENT_EXPIRED`, `MSG_ATTACHMENT_NOT_OWNED`, `MSG_ATTACHMENT_ALREADY_USED`.
 
-> **Path B scope**: Chỉ `TEXT` qua STOMP. Reply-to-message qua `replyToMessageId` đã hỗ trợ từ W5-D4 (post-W5-D3 hotfix reconnect). Upload media (`IMAGE` / `FILE`) vẫn đi qua REST.
+> **Path B scope (W6 update)**: Qua STOMP `/app/conv.{id}.message` — text + reply + attachments (images hoặc PDF) đều qua path này. File upload TẠM đi trước qua REST `POST /api/files/upload` (trả `fileId`), sau đó client gửi STOMP với `attachmentIds: [fileId]` để tạo message gắn file. Lý do tách 2 bước: (1) upload binary không hợp với STOMP frame size limit 64KB, (2) progress bar + retry dễ hơn với multipart HTTP, (3) re-use file cho multiple message (tương lai).
 
 ### 3b.2 Server → Client (sender-only): ACK
 
@@ -259,6 +276,8 @@ TYPING_STOPPED shape giống hệt.
 
 Shape của `message` **IDENTICAL** với `MessageDto` ở REST `POST /messages` response và broadcast payload `MESSAGE_CREATED`. Reuse cùng `MessageMapper` phía BE.
 
+> **W6-D1 note**: `message` trong ACK bao gồm field `attachments: FileDto[]` (có thể rỗng `[]`) khi payload SEND có `attachmentIds`. BE PHẢI load attachments qua `JOIN message_attachments` trước khi trả ACK. Shape `FileDto` xem API_CONTRACT.md mục Files Management.
+
 > **Migration W5-D2 (ADR-017)**: Shape này sẽ đổi sang `{operation: "SEND", clientId: tempId, message}` khi implement edit message, để unify với EDIT ACK. BE + FE phải deploy đồng bộ. Xem §3c.3 + ADR-017 + changelog v1.3-w5d2.
 
 ### 3b.3 Server → Client (sender-only): ERROR
@@ -270,7 +289,7 @@ Shape của `message` **IDENTICAL** với `MessageDto` ở REST `POST /messages`
 {
   "tempId": "uuid (echo từ request)",
   "error": "string (human-readable)",
-  "code": "CONV_NOT_FOUND | FORBIDDEN | VALIDATION_FAILED | MSG_CONTENT_TOO_LONG | MSG_RATE_LIMITED | AUTH_REQUIRED | INTERNAL"
+  "code": "CONV_NOT_FOUND | FORBIDDEN | VALIDATION_FAILED | MSG_CONTENT_TOO_LONG | MSG_RATE_LIMITED | MSG_NO_CONTENT | MSG_ATTACHMENTS_MIXED | MSG_ATTACHMENTS_TOO_MANY | MSG_ATTACHMENT_NOT_FOUND | MSG_ATTACHMENT_EXPIRED | MSG_ATTACHMENT_NOT_OWNED | MSG_ATTACHMENT_ALREADY_USED | AUTH_REQUIRED | INTERNAL"
 }
 ```
 
@@ -280,9 +299,16 @@ Shape của `message` **IDENTICAL** với `MessageDto` ở REST `POST /messages`
 |------|-----------|-----------|
 | `CONV_NOT_FOUND` | Conversation không tồn tại hoặc sender không phải member (merge để chống enumeration) | Mark tempId = failed, hiện "Không tìm thấy cuộc trò chuyện" |
 | `FORBIDDEN` | Sender bị user khác trong conv block (khi `user_blocks` wire; V1 chưa fire) | Mark failed, hiện "Không thể gửi tin nhắn tới người này" |
-| `VALIDATION_FAILED` | content rỗng, toàn whitespace, hoặc tempId không phải UUID | Mark failed, hiện message cụ thể (FE không retry) |
+| `VALIDATION_FAILED` | tempId không phải UUID, payload malformed | Mark failed, hiện message cụ thể (FE không retry) |
 | `MSG_CONTENT_TOO_LONG` | content > 5000 chars | Mark failed, hiện "Tin nhắn quá dài (tối đa 5000 ký tự)" |
 | `MSG_RATE_LIMITED` | Vượt 30 msg/phút/user | Mark failed, hiện "Gửi quá nhanh, thử lại sau N giây"; FE có thể retry sau `retryAfterSeconds` (nếu BE có gửi field này) |
+| `MSG_NO_CONTENT` (W6) | Cả `content` và `attachmentIds` đều rỗng/null | Mark failed, hiện "Tin nhắn phải có nội dung hoặc file đính kèm" |
+| `MSG_ATTACHMENTS_MIXED` (W6) | Trộn image + PDF trong 1 message | Mark failed, hiện "Không thể gửi chung ảnh và PDF" |
+| `MSG_ATTACHMENTS_TOO_MANY` (W6) | >5 images hoặc >1 PDF | Mark failed, hiện "Tối đa 5 ảnh hoặc 1 file PDF" |
+| `MSG_ATTACHMENT_NOT_FOUND` (W6) | `attachmentId` không tồn tại trong `files` table | Mark failed, hiện "File không tồn tại hoặc đã bị xóa" (upload lại) |
+| `MSG_ATTACHMENT_EXPIRED` (W6) | File đã expire (`expires_at < now()`) | Mark failed, hiện "File đã hết hạn, vui lòng upload lại" |
+| `MSG_ATTACHMENT_NOT_OWNED` (W6) | Sender không phải uploader của file (`file.uploader_id != userId`) | Mark failed, hiện "File không hợp lệ" (KHÔNG tiết lộ "file của user khác") |
+| `MSG_ATTACHMENT_ALREADY_USED` (W6) | File đã attach vào message khác (DB UNIQUE + service check) | Mark failed, hiện "File đã được sử dụng trong tin nhắn khác" |
 | `AUTH_REQUIRED` | STOMP Principal null (token lỗi giữa chừng) | Trigger refresh flow → reconnect |
 | `INTERNAL` | Lỗi không xác định (DB down, NPE, …) | Mark failed, hiện "Lỗi server, thử lại sau"; FE có thể retry manual |
 
@@ -423,6 +449,8 @@ Mỗi message trong FE cache có trường `status: 'sending' | 'sent' | 'failed
   "newContent": "string (1-5000 chars, trim sau đó non-empty)"
 }
 ```
+
+> **W6-D1 note**: EDIT payload **KHÔNG có** `attachmentIds`. V1 chỉ cho phép sửa `content`, không sửa attachments. Nếu FE vô tình gửi thêm field → BE bỏ qua (không lỗi). Rationale: edit window 5 phút ngắn, user thường chỉ sửa typo; thay attachment cần re-upload + dedup cleanup phức tạp. V2 xem xét mở rộng. Message có attachments thì EDIT chỉ update `content` — attachments giữ nguyên. Nếu message **chỉ có attachments, không có content** (`content IS NULL`) thì EDIT với `newContent` non-empty sẽ set content — message sau edit có cả content và attachments. ACK trả full `MessageDto` với attachments không đổi (load lại từ DB).
 
 ### 3c.2 Validation rules (server-side)
 
@@ -1422,4 +1450,5 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 | 2026-04-20 | v1.1-w4 | **Path B (ADR-016)**: Chuyển send path từ REST → STOMP. Thêm inbound `/app/conv.{convId}.message` với payload `{tempId, content, type}`. Thêm 2 user queue `/user/queue/acks` (payload `{tempId, message}`) + `/user/queue/errors` (payload `{tempId, error, code}`). Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s atomic SET NX EX. FE tempId lifecycle state machine: optimistic → ACK/ERROR/timeout 10s. BE handler + `@MessageExceptionHandler` pattern. Rate limit 30/phút khớp REST. REST `POST /messages` không deprecated — giữ cho batch/bot/fallback. Error codes mới: MSG_CONTENT_TOO_LONG, MSG_RATE_LIMITED, FORBIDDEN, INTERNAL. Bỏ "draft" suffix vì contract đã được accept sau W4D4. |
 | 2026-04-20 | v1.2-w5d1 | **Destination-aware auth policy (W5-D1)**: Thêm mục 7.1 Destination Policy Table. `AuthChannelInterceptor.handleSend()` refactored với `DestinationPolicy` enum: `.message` → STRICT_MEMBER (throw FORBIDDEN), `.typing` + `.read` → SILENT_DROP (pass through, handler tự xử lý). Không còn throw FORBIDDEN cho `.typing` — fix spec mismatch (typing phải silent drop, không ERROR frame). |
 | 2026-04-20 | v1.3-w5d2 | **Edit Message via STOMP (W5-D2)** + **Unified ACK queue (ADR-017)**. Thêm inbound `/app/conv.{convId}.edit` với payload `{clientEditId, messageId, newContent}`. Fill §3.2 MESSAGE_UPDATED đầy đủ (trước đây là placeholder W6, nay dời sang W5). Thêm §3c toàn bộ spec: validation (UUID, 1-5000, 5 phút window, owner + not-found merge chống enumeration, no-change check, TEXT-only), ACK shape mới `{operation: "SEND"|"EDIT", clientId, message}` thay thế shape cũ `{tempId, message}` (breaking — BE + FE deploy đồng bộ), ERROR shape mới `{operation, clientId, error, code}`. Error codes mới: `MSG_NOT_FOUND`, `MSG_EDIT_WINDOW_EXPIRED`, `MSG_NO_CHANGE`. Dedup Redis key `msg:edit-dedup:{userId}:{clientEditId}` TTL 60s atomic SET NX EX (giống send). Rate limit 10 edit/phút/user (`rate:msg-edit:{userId}`). FE state machine idle → editing → saving → saved/error với timer 10s. Thêm row mới vào destinations table (§2) + §7.1 Destination Policy Table (STRICT_MEMBER cho `.edit`). Thêm limitation về clock skew edit window (FE disable sớm ở 4:50) + unified queue multi-session caveat. ADR-017 thêm vào §9. Broadcast MESSAGE_UPDATED giữ minimal payload (id + conversationId + content + editedAt) — không phải MessageDto đầy đủ. FE dedup broadcast theo `editedAt` timestamp. |
+| 2026-04-20 | v1.4-w6 | **W6-D1 attachments for SEND** (ADR-019). §3b.1 payload thêm `attachmentIds?: string[]` (array UUID, 0-5 items). `content` nullable khi có attachments (1 trong 2 phải non-null). Validation rules chi tiết trong API_CONTRACT.md mục Files Management. Error codes mới trong bảng §3b.3: `MSG_NO_CONTENT`, `MSG_ATTACHMENTS_MIXED`, `MSG_ATTACHMENTS_TOO_MANY`, `MSG_ATTACHMENT_NOT_FOUND`, `MSG_ATTACHMENT_EXPIRED`, `MSG_ATTACHMENT_NOT_OWNED`, `MSG_ATTACHMENT_ALREADY_USED`. §3.1 `MESSAGE_CREATED` payload update: MessageDto thêm `attachments: FileDto[]` (luôn là array, không null), `type` mở rộng `TEXT | IMAGE | FILE`. ACK §3b.2 reuse MessageMapper với attachments load. §3c (EDIT) KHÔNG đổi payload — V1 không cho sửa attachments, chỉ sửa content. EDIT với message có attachments: update content giữ attachments. File upload qua REST `POST /api/files/upload` (xem API_CONTRACT.md), sau đó SEND qua STOMP với `attachmentIds`. Rationale tách 2 bước: binary không fit STOMP frame 64KB, progress bar dễ với multipart, reuse file cho multiple message V2. |
 | 2026-04-20 | v1.4-w5d3 | **Delete Message via STOMP (W5-D3)** + **ADR-018 (delete policy)**. Thêm inbound `/app/conv.{convId}.delete` với payload `{clientDeleteId, messageId}`. Fill §3.3 MESSAGE_DELETED đầy đủ (trước placeholder W6, nay dời W5 cùng với EDIT): payload `{id, conversationId, deletedAt, deletedBy}`, FE action patch `deletedAt + deletedBy + content=null` + exit edit mode silently nếu đang edit cùng message, KHÔNG xoá khỏi cache. Thêm §3d toàn bộ spec delete flow: validation (UUID, anti-enum MSG_NOT_FOUND merge 4 case null/wrong-conv/not-owner/already-deleted, KHÔNG có time window — khác EDIT), rate limit 10/phút/user (`rate:msg-delete:{userId}`), dedup Redis `msg:delete-dedup:{userId}:{clientDeleteId}` TTL 60s, ACK shape `{operation: "DELETE", clientId, message}` với `message` là metadata minimal (id + conversationId + deletedAt + deletedBy, KHÔNG có content/sender/createdAt), ERROR shape `{operation: "DELETE", clientId, error, code}` với error codes `MSG_NOT_FOUND | MSG_RATE_LIMITED | VALIDATION_FAILED | AUTH_REQUIRED | INTERNAL`. Thêm §3e Deleted Message Rendering contract: bubble gray italic "🚫 Tin nhắn đã bị xóa", không hover actions, BE strip `content=null` tại `MessageMapper.toDto` khi `deletedAt != null` (áp dụng nhất quán REST + WS + ACK), `MessageDto` thêm 2 field `deletedAt` + `deletedBy`. Thêm row `/app/conv.{id}.delete` vào destinations table (§2) + §7.1 Destination Policy (STRICT_MEMBER). Interaction: edit-after-delete → `MSG_NOT_FOUND` (anti-enum), reply-to-deleted → OK V1 (snapshot giữ nguyên, V2 flag). ADR-018 thêm vào §9. |

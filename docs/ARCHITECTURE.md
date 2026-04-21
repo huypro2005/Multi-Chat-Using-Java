@@ -2297,3 +2297,42 @@ src/main/java/com/yourapp/chat/
   - **Time window**: loại vì user có quyền xoá lịch sử — khác edit (edit có thể manipulate ngữ nghĩa).
   - **FE tự render placeholder, BE không strip content**: loại vì (1) duplicate logic BE/FE, (2) content vẫn bay qua network dù không render → leak + waste bandwidth cho group lớn.
 - **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-018.
+
+### ADR-019: File storage — Local disk + StorageService interface
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-20 (Tuần 6, W6-D1)
+- **Context**: Tuần 6 cần implement file upload (images + PDF). ARCHITECTURE.md §7.7 và §3.5 đã ghi "V1 lưu local, V2 chuyển S3". Cần chốt chi tiết: schema, path convention, expiry, cleanup, interface để V2 migrate không break code caller.
+- **Decision**:
+  - **Storage layer**: interface `StorageService` với method `store(InputStream, StoragePath) → void`, `load(StoragePath) → InputStream`, `delete(StoragePath) → void`, `exists(StoragePath) → boolean`. V1 implement `LocalDiskStorageService` đọc base path từ `app.storage.local.base-path` trong `application.yml` (ví dụ `/var/chat-app/uploads` production, `./uploads` dev). V2 thay bằng `S3StorageService` implement cùng interface — service caller (`FileService`) không đổi.
+  - **Path convention**: `{base}/{yyyy}/{mm}/{uuid}.{ext}` trong đó:
+    - `yyyy`/`mm` lấy từ `created_at` server UTC.
+    - `uuid` = `file.id` (UUID v4 server-generated).
+    - `ext` lấy từ MIME whitelist mapping (`image/jpeg → .jpg`, `image/png → .png`, v.v.) — KHÔNG LẤY từ `originalName` (chống path traversal + extension spoofing).
+  - **Thumbnail path** (chỉ cho image): `{base}/{yyyy}/{mm}/{uuid}_thumb.jpg` — luôn JPEG bất kể source format (tối ưu size). Lazy-generate lần đầu GET `/api/files/{id}/thumb`, cache vào disk cho lần sau.
+  - **DB schema** (migration V7 — xem §3.5 update):
+    - Bảng `files`: `id UUID PK`, `uploader_id UUID FK users(id) ON DELETE CASCADE`, `original_name VARCHAR(255)` (sanitized, để serve `Content-Disposition`), `mime VARCHAR(100)`, `size BIGINT`, `internal_path VARCHAR(500) UNIQUE` (ví dụ `2026/04/uuid.jpg` relative từ base), `created_at TIMESTAMPTZ DEFAULT NOW()`, `expires_at TIMESTAMPTZ NOT NULL` (= `created_at + 30 ngày`).
+    - Bảng `message_attachments`: `id UUID PK`, `message_id UUID FK messages(id) ON DELETE CASCADE`, `file_id UUID FK files(id) ON DELETE RESTRICT`, `display_order INT DEFAULT 0`, `UNIQUE(file_id)`. UNIQUE đảm bảo mỗi file chỉ attach 1 message (chống reuse cross-message). CASCADE từ messages → cho phép hard-delete message (ngược lại với V1 soft-delete) mà vẫn cleanup attachment link; RESTRICT từ files → không xoá file trực tiếp khi còn message reference (phải đi qua cleanup job).
+  - **Attachment rules** (SEND validation, xem SOCKET_EVENTS.md §3b.1 + API_CONTRACT.md):
+    - **1 PDF OR 1-5 images** — không trộn. PDF dùng cho document, images cho photo; khác workflow UI.
+    - Max 20MB/file (Spring multipart limit + service check).
+    - MIME whitelist: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `application/pdf`.
+    - MIME verify qua Apache Tika magic bytes — chống spoof `Content-Type` header.
+  - **Expiry**: 30 ngày từ `created_at`. `FileCleanupJob` `@Scheduled(cron="0 0 3 * * *")` (3 giờ sáng hàng ngày) SELECT files WHERE `expires_at < NOW()`, xoá file disk (both original + thumbnail), xoá row DB (CASCADE tới `message_attachments`). Message vẫn giữ (content còn), chỉ mất attachment link.
+  - **Orphan cleanup**: file upload nhưng 1 tiếng không attach vào message (`created_at < NOW() - INTERVAL '1 hour' AND NOT EXISTS (SELECT 1 FROM message_attachments WHERE file_id = files.id)`) → xoá. Thuộc cùng `FileCleanupJob`, chạy mỗi giờ cho orphan + daily cho expired.
+  - **User delete account**: `ON DELETE CASCADE` từ `users` → xoá `files` + attachments + files disk (qua event listener hoặc cleanup job lần tiếp theo). File trên disk sẽ được xoá theo schedule, không real-time.
+  - **Authorization GET file**: caller phải là (1) uploader, HOẶC (2) member của conv chứa message attach file đó. Query: `SELECT 1 FROM message_attachments ma JOIN messages m ON ma.message_id = m.id JOIN conversation_members cm ON m.conversation_id = cm.conversation_id WHERE ma.file_id = ? AND cm.user_id = ? LIMIT 1`. V1 merge 404 cho (a) file không tồn tại, (b) không có quyền, (c) đã expire — chống enumeration.
+- **Consequences**:
+  - Migration V7 tạo 2 bảng `files` + `message_attachments`. Không breaking với V5 `messages` (messages cũ không có attachment, `attachments=[]` trong DTO).
+  - `MessageDto` thêm field `attachments: FileDto[]` — **breaking** cho FE type. Deploy BE + FE đồng bộ.
+  - BE `MessageMapper.toDto` cần JOIN `message_attachments` ORDER BY `display_order` → thêm 1 query (N+1 risk cho list messages). Mitigation: `@EntityGraph` hoặc JOIN FETCH trong `MessageRepository.findById` + list query. Thêm AD note trong WARNINGS (AD-N+1 cho attachments list).
+  - SimpleBroker broadcast payload có thể vượt 64KB nếu message có 5 ảnh (mỗi FileDto ~200 bytes → 5 × 200 = 1KB, thực tế < 64KB OK). Monitor nếu group lớn nhiều attachment.
+  - StorageService interface cho phép V2 migrate S3 không sửa caller code — chỉ swap bean `@Primary`. Test: unit test `FileService` với mock `StorageService`.
+  - Orphan cleanup 1 tiếng gây edge case: user upload chậm, STOMP connect lại mất >1h (impossible normally nhưng mobile background) → file orphan bị xoá → SEND fail với `MSG_ATTACHMENT_NOT_FOUND`. Acceptable V1 — FE upload lại.
+  - Per-user disk quota: KHÔNG có V1. Attacker có thể upload 1000 × 20MB = 20GB. Mitigation rate limit 20 upload/phút (cap ~57GB/ngày/user). V2 enforce quota qua `SUM(size) WHERE uploader_id = ?`.
+- **Alternatives considered**:
+  - **S3 ngay V1**: rejected — setup AWS credentials + bucket + IAM cho dự án SE330 demo overhead quá cao. Local disk đủ cho <1000 users.
+  - **Inline JSON attachments trong messages.metadata**: rejected — query attachment cross-message phức tạp (parse JSON, không index được UNIQUE constraint cho file_id). Normalize thành bảng riêng đúng 3NF.
+  - **File URL pre-signed với HMAC token** (thay cho auth check): rejected — URL leak sẽ bypass auth. V2 S3 pre-signed URL OK vì S3 tự sign + TTL ngắn.
+  - **Keep file sau message delete**: decision là RESTRICT FK — file không bị xoá khi soft-delete message (vì message row vẫn còn). Hard-delete message (V2 audit cleanup) sẽ CASCADE xoá `message_attachments`, files vẫn giữ đến expiry (user có thể có message khác không — nhưng UNIQUE(file_id) đảm bảo không). Có thể thêm cleanup job xoá files không còn attachment link.
+- **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-019 (reviewer sẽ add sau W6 review).

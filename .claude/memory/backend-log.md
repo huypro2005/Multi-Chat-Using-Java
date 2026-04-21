@@ -16,6 +16,50 @@
 
 ---
 
+## [W6-D1] feat: File Upload Foundation (upload + download stub)
+
+**Files changed (new unless noted):**
+- `backend/pom.xml` — thêm `org.apache.tika:tika-core:2.9.1` dependency.
+- `backend/src/main/resources/db/migration/V7__create_files_tables.sql` — tables `files` + `message_attachments`. FK type UUID (khớp users.id, messages.id), KHÔNG BIGINT như task spec.
+- `com.chatapp.file.entity.FileRecord` — UUID PK + uploaderId UUID + storage_path + expires_at + attached_at + domain method `markAttached()`/`isImage()`.
+- `com.chatapp.file.entity.MessageAttachment` + `MessageAttachmentId` — composite key (@EmbeddedId) cho M2M messages↔files. W6-D1 setup sẵn; flow link message gắn ở W6-D2.
+- `com.chatapp.file.repository.FileRecordRepository` — findByIdAndExpiredFalse + orphan query method.
+- `com.chatapp.file.repository.MessageAttachmentRepository` — lookup by messageId / fileId.
+- `com.chatapp.file.dto.FileDto` — record 7 fields; url computed `/api/files/{id}`, thumbUrl null cho non-image.
+- `com.chatapp.file.storage.StorageService` — interface (store/retrieve/delete), swap-ready cho S3 V2.
+- `com.chatapp.file.storage.LocalStorageService` — V1 disk implementation. Canonical-prefix check, reject path traversal + fileId/ext chứa separator/dot, trả relative path normalize `/`.
+- `com.chatapp.file.service.FileValidationService` — Tika detect magic bytes, whitelist 5 MIME, MIME→ext cố định, alias image/jpg→image/jpeg.
+- `com.chatapp.file.service.FileService` — upload flow (validate → rate limit → generate UUID → store → persist DB → map), loadForDownload (W6-D1 stub uploader-only), rate limit 20/min Redis fail-open.
+- `com.chatapp.file.controller.FileController` — POST /upload (201 FileDto), GET /{id} (stream với Cache-Control + Content-Disposition + nosniff + ETag). `@AuthenticationPrincipal User` (không UserDetails — đồng bộ JwtAuthFilter).
+- `com.chatapp.file.exception.*` — 6 class (FileEmpty, FileTooLarge, FileTypeNotAllowed, MimeMismatch, FileRateLimited, StorageException).
+- `com.chatapp.exception.GlobalExceptionHandler` — thêm 8 handler (6 file exception + MaxUploadSizeExceeded + MissingServletRequestPart + MissingServletRequestParameter mapping to FILE_EMPTY).
+- `backend/src/main/resources/application.yml` — `spring.servlet.multipart` limits + `storage.local.base-path`.
+- `backend/src/test/resources/application-test.yml` — test storage base-path `./build/test-uploads`.
+- `backend/src/test/java/com/chatapp/file/FileValidationServiceTest.java` — 10 tests (JPEG/PNG/PDF happy, size/empty/null, whitelist/mismatch, ext map, alias).
+- `backend/src/test/java/com/chatapp/file/LocalStorageServiceTest.java` — 7 tests (@TempDir based: path format, roundtrip, traversal reject, delete, non-existent, fileId/ext rejection).
+- `backend/src/test/java/com/chatapp/file/FileControllerTest.java` — 10 integration tests (upload happy JPEG/PDF, missing/empty/bad MIME, no JWT, rate limit, download happy/404/anti-enum).
+
+**Test result:** 172 / 172 pass (145 cũ + 27 mới). `mvn test` 52s.
+
+**Decisions:**
+- FK UUID (không BIGINT): align với schema hiện tại users.id/messages.id UUID (V2/V5). Task spec sai — tôi override theo thực tế.
+- StorageService interface thay vì concrete class: ADR-019 yêu cầu S3 swap V2. Interface mỏng 3 method.
+- 6 exception class riêng (không extend AppException): GlobalExceptionHandler có typed getter để format details rõ ràng (maxBytes, allowedMimes, retryAfterSeconds, …).
+- Download W6-D1 stub chỉ uploader-only: FE có thể test upload → preview tạm thời; W6-D2 sẽ mở conv-member check khi MessageService gắn attachments xong.
+
+**Pitfall:**
+- Cross-package test (`com.chatapp.file` vs `com.chatapp.file.storage`) → `getBasePath()` phải `public` (không package-private). Đã đổi.
+- MultipartFile test size > 20MB: viết `SizedMockMultipartFile` wrapper custom (override `getSize()` + `getInputStream()` trả head bytes) thay vì alloc 20MB byte[] (OOM test).
+- Tika alias: browser Firefox cũ gửi `image/jpg` thay `image/jpeg` → phải normalize trước khi reject MIME_MISMATCH. Thêm test V10.
+- Path traversal trên retrieve: test đúng bằng `IllegalArgumentException` (không IOException) vì `assertWithinBase()` throw trước khi chạm filesystem.
+
+**Next (W6-D2):**
+- Thumbnail generation (Thumbnailator) + `/api/files/{id}/thumb` endpoint với lazy cache.
+- Authorization mở rộng: uploader OR member-of-conv-with-attachment.
+- MessageService integration: attach file vào message khi sendViaStomp (set attached_at).
+
+---
+
 ## [W5-D4] feat: after param + ReplyPreviewDto deletedAt + STOMP reply validation
 
 **Files changed:**
