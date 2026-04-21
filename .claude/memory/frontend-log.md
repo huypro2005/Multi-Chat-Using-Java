@@ -5,6 +5,22 @@
 
 ---
 
+[2026-04-22 W7-D4] feat: system messages rendering with i18n (8 event types)
+- SỬA: SystemMessage.tsx — fix copy templates khớp chính xác contract §3e.1:
+  - ROLE_PROMOTED: "đặt {target} làm quản trị viên" (thay vì "thăng làm phó nhóm")
+  - ROLE_DEMOTED: "gỡ quyền quản trị của {target}" (thay vì "giáng xuống thành viên")
+  - OWNER_TRANSFERRED autoTransferred=true: "{actor} đã rời nhóm và chuyển quyền trưởng nhóm cho {target}"
+  - OWNER_TRANSFERRED autoTransferred=false: "chuyển quyền trưởng nhóm cho {target}"
+  - GROUP_RENAMED: thêm phần oldValue "từ X thành Y" khi oldValue có
+  - default fallback: "(sự kiện hệ thống)" thay vì generic string
+- SỬA: Container class my-2 → my-1 px-4 (khớp §3e.1)
+- SỬA: Span class → text-xs italic text-gray-500 dark:text-gray-400 (bỏ pill bg theo DOM contract)
+- XÁC NHẬN: message.ts đã có systemEventType/systemMetadata/sender=null (W7-D4 types)
+- XÁC NHẬN: MessageItem.tsx SYSTEM branch đã có (dispatch trước hooks)
+- XÁC NHẬN: MessagesList.tsx render SystemMessage inline với TEXT messages
+- XÁC NHẬN: useAckErrorSubscription.ts đã có SYSTEM_MESSAGE_NOT_EDITABLE + NOT_DELETABLE
+- tsc: 0 errors, lint: 0 errors 0 warnings
+
 [2026-04-22 W7-D3] feat: group UI + member management + 6 broadcast handlers
 - TẠOMỚI: CreateGroupDialog (avatar async upload, user search debounce, min 2 members)
 - TẠOMỚI: GroupInfoPanel (role-based context menu, AddMembersDialog, confirm dialogs x5)

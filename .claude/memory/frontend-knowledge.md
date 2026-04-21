@@ -226,6 +226,45 @@ Dedup: `if (existing.editedAt && existing.editedAt >= updated.editedAt) return p
 
 ---
 
+## W7-D4 SystemMessage Patterns
+
+### SystemMessage component — centered inline (no pill bg)
+- Container: `flex justify-center my-1 px-4` — khớp §3e.1 DOM contract.
+- Span: `text-xs italic text-gray-500 dark:text-gray-400 select-none` — KHÔNG có `rounded-full bg-gray-100` (pill).
+- `role="status" aria-label={text}` cho accessibility.
+- `React.memo` wrap bắt buộc (MessagesList render nhiều item).
+
+### i18n pattern — Bạn/bạn substitution
+```ts
+const isActor = !!meta.actorId && meta.actorId === currentUserId
+const isTarget = !!meta.targetId && meta.targetId === currentUserId
+const actorName = isActor ? 'Bạn' : (meta.actorName ?? 'Ai đó')
+const targetName = isTarget ? 'bạn' : (meta.targetName ?? '')
+```
+- Guard `!!meta.actorId &&` trước so sánh tránh false positive khi actorId undefined.
+- targetName falsy → warning + fallback string (không crash).
+
+### Conditional render TEXT vs SYSTEM trong MessageItem
+- `MessageItem` là memo wrapper: dispatch SYSTEM trước khi vào `MessageItemInner` (tránh hook order issue — inner component có nhiều hooks).
+- `MessagesList` cũng dispatch SYSTEM trước `MessageItem` để skip shouldShowAvatar logic.
+- Double dispatch là intentional defense-in-depth.
+
+### systemEventType copy mapping (§3e.1 vi-VN, V1)
+| type | template |
+|------|----------|
+| GROUP_CREATED | `{actor} đã tạo nhóm` |
+| MEMBER_ADDED | `{actor} đã thêm {target} vào nhóm` |
+| MEMBER_REMOVED | `{actor} đã xóa {target} khỏi nhóm` |
+| MEMBER_LEFT | `{actor} đã rời nhóm` |
+| ROLE_PROMOTED | `{actor} đã đặt {target} làm quản trị viên` |
+| ROLE_DEMOTED | `{actor} đã gỡ quyền quản trị của {target}` |
+| OWNER_TRANSFERRED (auto) | `{actor} đã rời nhóm và chuyển quyền trưởng nhóm cho {target}` |
+| OWNER_TRANSFERRED (explicit) | `{actor} đã chuyển quyền trưởng nhóm cho {target}` |
+| GROUP_RENAMED | `{actor} đã đổi tên nhóm từ "{old}" thành "{new}"` |
+| default/unknown | `(sự kiện hệ thống)` |
+
+---
+
 ## W7-D3 Group UI Patterns
 
 ### CreateGroupDialog — async avatar upload + user search
