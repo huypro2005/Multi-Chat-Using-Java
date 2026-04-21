@@ -83,7 +83,6 @@ interface ConversationUpdatedPayload {
 
 interface GroupDeletedPayload {
   conversationId: string
-  name: string
   deletedBy: { userId: string; username: string; fullName: string }
 }
 
@@ -484,9 +483,15 @@ function handleConversationUpdated(
 function handleGroupDeleted(
   queryClient: QueryClient,
   conversationId: string,
-  payload: GroupDeletedPayload,
+  _payload: GroupDeletedPayload,
   navigate: (path: string) => void,
 ): void {
+  // Đọc tên nhóm từ cache TRƯỚC khi xóa — BE không gửi name trong GROUP_DELETED event
+  const cachedConv = queryClient.getQueryData<ConversationDto>(
+    conversationKeys.detail(conversationId),
+  )
+  const groupName = cachedConv?.name ?? 'này'
+
   queryClient.setQueryData(
     conversationKeys.lists(),
     (old: { content?: ConversationDto[] } | undefined) => {
@@ -502,7 +507,7 @@ function handleGroupDeleted(
   if (window.location.pathname.includes(conversationId)) {
     navigate('/')
   }
-  toast.warning(`Nhóm "${payload.name}" đã bị xóa`)
+  toast.warning(`Nhóm "${groupName}" đã bị xóa`)
 }
 
 // ---------------------------------------------------------------------------
