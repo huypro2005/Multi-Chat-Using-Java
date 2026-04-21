@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Conversation types — generated from docs/API_CONTRACT.md v0.5.0-conversations
+// Conversation types — generated from docs/API_CONTRACT.md v1.1.0-w7
 // Mọi thay đổi contract phải update file này trước.
 // ---------------------------------------------------------------------------
 
@@ -38,12 +38,19 @@ export interface MemberDto {
  * KHÔNG có displayName, displayAvatarUrl, unreadCount, mutedUntil — những fields đó chỉ có trong ConversationSummaryDto.
  * Dùng getConversationDisplayName() để derive display name ở FE runtime.
  */
+export interface OwnerDto {
+  userId: string
+  username: string
+  fullName: string
+}
+
 export interface ConversationDto {
   id: string
   type: ConversationType
   name: string | null
   avatarUrl: string | null
   createdBy: CreatedByDto | null
+  owner: OwnerDto | null // W7: chỉ có cho GROUP
   members: MemberDto[]
   createdAt: string // ISO8601
   lastMessageAt: string | null // ISO8601
@@ -90,8 +97,38 @@ export interface PageResponse<T> {
 
 export interface CreateConversationRequest {
   type: ConversationType
-  memberIds: string[]
+  memberIds?: string[]
+  targetUserId?: string
   name?: string
+  avatarFileId?: string | null
+}
+
+// W7: Requests cho group member management
+export interface AddMembersRequest {
+  userIds: string[]
+}
+
+export interface AddMembersSkippedItem {
+  userId: string
+  reason: 'ALREADY_MEMBER' | 'USER_NOT_FOUND' | 'BLOCKED'
+}
+
+export interface AddMembersResponse {
+  added: MemberDto[]
+  skipped: AddMembersSkippedItem[]
+}
+
+export interface ChangeRoleRequest {
+  role: 'ADMIN' | 'MEMBER'
+}
+
+export interface TransferOwnerRequest {
+  targetUserId: string
+}
+
+export interface UpdateGroupRequest {
+  name?: string
+  avatarFileId?: string | null // null = xóa avatar, undefined = không đổi
 }
 
 export interface UserSearchDto {

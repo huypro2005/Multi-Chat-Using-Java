@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { X, ChevronLeft, ChevronRight, Download } from 'lucide-react'
 import type { AttachmentDto } from '@/types/message'
+import { useProtectedObjectUrl } from '@/features/files/hooks/useProtectedObjectUrl'
+import api from '@/lib/api'
 
 interface Props {
   attachments: AttachmentDto[]
@@ -26,16 +28,7 @@ export function AttachmentGallery({ attachments }: Props) {
             onClick={() => setLightboxIdx(idx)}
             aria-label={`Xem ảnh ${att.name}`}
           >
-            <img
-              src={att.thumbUrl ?? att.url}
-              alt={att.name}
-              loading="lazy"
-              className="w-full h-full object-cover"
-              onError={(e) => {
-                // File expired/deleted — show placeholder
-                e.currentTarget.style.display = 'none'
-              }}
-            />
+            <ProtectedThumbnail attachment={att} />
           </button>
         ))}
       </div>
@@ -52,6 +45,12 @@ export function AttachmentGallery({ attachments }: Props) {
   )
 }
 
+function ProtectedThumbnail({ attachment }: { attachment: AttachmentDto }) {
+  const src = useProtectedObjectUrl(attachment.thumbUrl ?? attachment.url)
+  if (!src) return <div className="w-full h-full bg-gray-200" />
+  return <img src={src} alt={attachment.name} loading="lazy" className="w-full h-full object-cover" />
+}
+
 interface LightboxProps {
   attachments: AttachmentDto[]
   initialIdx: number
@@ -61,6 +60,7 @@ interface LightboxProps {
 function Lightbox({ attachments, initialIdx, onClose }: LightboxProps) {
   const [idx, setIdx] = useState(initialIdx)
   const current = attachments[idx]
+  const imageSrc = useProtectedObjectUrl(current.url)
 
   const prev = () => setIdx((i) => Math.max(0, i - 1))
   const next = () => setIdx((i) => Math.min(attachments.length - 1, i + 1))
@@ -72,7 +72,6 @@ function Lightbox({ attachments, initialIdx, onClose }: LightboxProps) {
   }
 
   return (
-    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
       className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center"
       onClick={onClose}
@@ -83,12 +82,16 @@ function Lightbox({ attachments, initialIdx, onClose }: LightboxProps) {
       tabIndex={-1}
     >
       {/* Image */}
-      <img
-        src={current.url}
-        alt={current.name}
-        className="max-w-[90vw] max-h-[85vh] object-contain rounded"
-        onClick={(e) => e.stopPropagation()}
-      />
+      {imageSrc ? (
+        <img
+          src={imageSrc}
+          alt={current.name}
+          className="max-w-[90vw] max-h-[85vh] object-contain rounded"
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <div className="text-white/70 text-sm">Không thể tải ảnh</div>
+      )}
 
       {/* Close */}
       <button
@@ -101,17 +104,27 @@ function Lightbox({ attachments, initialIdx, onClose }: LightboxProps) {
       </button>
 
       {/* Download */}
-      <a
-        href={current.url}
-        download={current.name}
-        target="_blank"
-        rel="noreferrer"
+      <button
+        type="button"
         className="absolute top-4 right-14 text-white/80 hover:text-white"
         aria-label="Tải xuống"
-        onClick={(e) => e.stopPropagation()}
+        onClick={async (e) => {
+          e.stopPropagation()
+          try {
+            const res = await api.get<Blob>(current.url, { responseType: 'blob' })
+            const url = URL.createObjectURL(res.data)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = current.name
+            a.click()
+            URL.revokeObjectURL(url)
+          } catch {
+            // ignore download errors in lightbox
+          }
+        }}
       >
         <Download size={20} />
-      </a>
+      </button>
 
       {/* Prev/Next */}
       {attachments.length > 1 && (

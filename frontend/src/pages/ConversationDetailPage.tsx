@@ -4,6 +4,8 @@ import { MessageCircle } from 'lucide-react'
 import { useConversation } from '@/features/conversations/hooks'
 import ConversationHeader from '@/features/conversations/components/ConversationHeader'
 import { ConversationInfoPanel } from '@/features/conversations/components/ConversationInfoPanel'
+import { GroupInfoPanel } from '@/features/conversations/components/GroupInfoPanel'
+import { ConversationType } from '@/types/conversation'
 import { MessagesList } from '@/features/messages/components/MessagesList'
 import { MessageInput } from '@/features/messages/components/MessageInput'
 import { ReplyPreviewBox } from '@/features/messages/components/ReplyPreviewBox'
@@ -111,11 +113,19 @@ export default function ConversationDetailPage() {
         </div>
 
         {/* Info panel — slide-in từ phải */}
-        <ConversationInfoPanel
-          conversation={conversation}
-          open={showInfo}
-          onClose={() => setShowInfo(false)}
-        />
+        {conversation.type === ConversationType.GROUP ? (
+          <GroupInfoPanel
+            conversationId={conversation.id}
+            open={showInfo}
+            onClose={() => setShowInfo(false)}
+          />
+        ) : (
+          <ConversationInfoPanel
+            conversation={conversation}
+            open={showInfo}
+            onClose={() => setShowInfo(false)}
+          />
+        )}
       </div>
     </div>
   )

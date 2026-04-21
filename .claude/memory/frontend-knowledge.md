@@ -226,6 +226,61 @@ Dedup: `if (existing.editedAt && existing.editedAt >= updated.editedAt) return p
 
 ---
 
+## W7-D3 Group UI Patterns
+
+### CreateGroupDialog — async avatar upload + user search
+- Upload avatar ngay khi chọn file (không chờ submit) qua `POST /api/files/upload` multipart.
+- Preview qua `URL.createObjectURL` (blob URL tức thì, trước khi upload xong).
+- `avatarFileId` state: null cho đến khi upload hoàn tất → submit button không block vì đã có `avatarUploading` flag.
+- Revoke blob URL: trong `handleRemoveAvatar`, `handleClose`, và `useEffect` cleanup (unmount).
+- `blobUrlRef = useRef<string | null>(null)` để capture current blob URL trong cleanup return.
+
+### GroupInfoPanel — role-based context menu authorization matrix
+```
+Current = OWNER, target = MEMBER: promote → ADMIN, kick
+Current = OWNER, target = ADMIN: demote → MEMBER, kick, transfer-owner
+Current = OWNER, target = OWNER (self): no menu
+Current = ADMIN, target = MEMBER: kick only
+Current = ADMIN, target = ADMIN/OWNER: no menu
+Current = MEMBER: no menu button rendered
+```
+Render `showMenuBtn` condition: `!isSelf && (OWNER over non-OWNER || ADMIN over MEMBER)`.
+
+### useConvMembershipSubscription — global mount pattern
+- Mount 1 lần tại `GlobalSubscriptions` component trong `App.tsx`.
+- Subscribe `/user/queue/conv-added` và `/user/queue/conv-removed`.
+- `conv-added`: add to conversations cache (dedupe), toast.
+- `conv-removed`: remove from cache (idempotent), navigate '/' if currently viewing, toast nếu KICKED.
+- Re-subscribe on STOMP reconnect (same pattern as useConvSubscription).
+
+### Tristate PATCH pattern (EditGroupInfoDialog)
+```ts
+// Only send fields the user actually changed:
+const body: Record<string, unknown> = {}
+if (name !== currentName) body.name = name
+if (avatarMode === 'changed') body.avatarFileId = newFileId
+if (avatarMode === 'removed') body.avatarFileId = null
+// avatarMode === 'unchanged': không include field → BE không đổi
+if (Object.keys(body).length === 0) { handleClose(); return } // no-op
+```
+
+### Idempotent broadcast handling — MEMBER_REMOVED + conv-removed
+- `/topic/conv.{id}` MEMBER_REMOVED với `isSelf === true` → **bỏ qua**, không xử lý.
+- `/user/queue/conv-removed` xử lý tất cả trường hợp user bị remove (bao gồm cả KICKED).
+- Lý do: tránh duplicate navigate/toast khi user nhận cả 2 frames.
+- Idempotent remove: `filter(c.id !== convId)` — nếu đã remove → no-op.
+
+### navigateRef pattern (hooks dùng useNavigate)
+```ts
+const navigate = useNavigate()
+const navigateRef = useRef(navigate)
+useEffect(() => { navigateRef.current = navigate }) // update in effect, NOT during render
+// Dùng navigateRef.current trong callback để tránh stale closure
+```
+KHÔNG viết `navigateRef.current = navigate` trực tiếp ngoài effect (react-hooks/refs lint error).
+
+---
+
 ## Misc patterns
 
 ### TypeScript enum → const object (erasableSyntaxOnly)

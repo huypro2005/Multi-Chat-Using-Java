@@ -11,6 +11,7 @@ import UserAvatar from '@/components/UserAvatar'
 interface Props {
   open: boolean
   onClose: () => void
+  onCreateGroup?: () => void // callback để mở CreateGroupDialog
 }
 
 /**
@@ -19,7 +20,7 @@ interface Props {
  * Tìm user → click → tạo/redirect conversation.
  * 409 CONV_ONE_ON_ONE_EXISTS → redirect sang conv cũ (không show error).
  */
-export default function CreateConversationDialog({ open, onClose }: Props) {
+export default function CreateConversationDialog({ open, onClose, onCreateGroup }: Props) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -114,13 +115,27 @@ export default function CreateConversationDialog({ open, onClose }: Props) {
             >
               Chat 1-1
             </button>
-            <button
-              type="button"
-              disabled
-              className="px-4 py-2 rounded-lg bg-gray-100 text-gray-400 text-sm font-medium cursor-not-allowed"
-            >
-              Tạo nhóm (sắp có)
-            </button>
+            {onCreateGroup ? (
+              <button
+                type="button"
+                onClick={() => {
+                  handleClose()
+                  onCreateGroup()
+                }}
+                className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium
+                  hover:bg-gray-200 transition-colors"
+              >
+                Tạo nhóm
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled
+                className="px-4 py-2 rounded-lg bg-gray-100 text-gray-400 text-sm font-medium cursor-not-allowed"
+              >
+                Tạo nhóm
+              </button>
+            )}
           </div>
 
           {/* Search input */}

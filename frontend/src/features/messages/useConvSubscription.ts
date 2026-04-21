@@ -16,10 +16,13 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 import { getStompClient, onConnectionStateChange } from '@/lib/stompClient'
-import { messageKeys } from '@/features/conversations/queryKeys'
+import { conversationKeys, messageKeys } from '@/features/conversations/queryKeys'
 import { useAuthStore } from '@/stores/authStore'
 import type { MessageDto, MessageListResponse } from '@/types/message'
+import type { ConversationDto, MemberDto } from '@/types/conversation'
 import { catchUpMissedMessages } from './catchUp'
 
 interface WsEvent {
@@ -43,6 +46,47 @@ interface MessageDeletedPayload {
   deletedBy: string
 }
 
+// W7 event payloads
+interface MemberAddedPayload {
+  conversationId: string
+  member: MemberDto
+  addedBy: { userId: string; username: string; fullName: string }
+}
+
+interface MemberRemovedPayload {
+  conversationId: string
+  userId: string
+  reason: 'KICKED' | 'LEFT'
+  removedBy: { userId: string; username: string; fullName: string } | null
+}
+
+interface RoleChangedPayload {
+  conversationId: string
+  userId: string
+  oldRole: 'ADMIN' | 'MEMBER'
+  newRole: 'ADMIN' | 'MEMBER'
+  changedBy: { userId: string; username: string; fullName: string }
+}
+
+interface OwnerTransferredPayload {
+  conversationId: string
+  previousOwner: { userId: string; username: string }
+  newOwner: { userId: string; username: string; fullName: string }
+  autoTransferred: boolean
+}
+
+interface ConversationUpdatedPayload {
+  conversationId: string
+  changes: { name?: string; avatarUrl?: string }
+  updatedBy: { userId: string; fullName: string }
+}
+
+interface GroupDeletedPayload {
+  conversationId: string
+  name: string
+  deletedBy: { userId: string; username: string; fullName: string }
+}
+
 function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boolean {
   if (!tempMsg.clientTempId) return false
   if (tempMsg.type !== incoming.type) return false
@@ -59,6 +103,12 @@ function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boo
 export function useConvSubscription(conversationId: string | undefined): void {
   const queryClient = useQueryClient()
   const currentUserId = useAuthStore((s) => s.user?.id ?? null)
+  const navigate = useNavigate()
+  const navigateRef = useRef(navigate)
+
+  useEffect(() => {
+    navigateRef.current = navigate
+  })
 
   // Track xem đã từng disconnect chưa — chỉ catch-up khi reconnect, không phải connect lần đầu
   const wasDisconnectedRef = useRef(false)
@@ -89,6 +139,42 @@ export function useConvSubscription(conversationId: string | undefined): void {
               queryClient,
               conversationId!,
               event.payload as MessageDeletedPayload,
+            )
+          } else if (event.type === 'MEMBER_ADDED') {
+            handleMemberAdded(queryClient, conversationId!, event.payload as MemberAddedPayload)
+          } else if (event.type === 'MEMBER_REMOVED') {
+            handleMemberRemoved(
+              queryClient,
+              conversationId!,
+              event.payload as MemberRemovedPayload,
+              currentUserId,
+            )
+          } else if (event.type === 'ROLE_CHANGED') {
+            handleRoleChanged(
+              queryClient,
+              conversationId!,
+              event.payload as RoleChangedPayload,
+              currentUserId,
+            )
+          } else if (event.type === 'OWNER_TRANSFERRED') {
+            handleOwnerTransferred(
+              queryClient,
+              conversationId!,
+              event.payload as OwnerTransferredPayload,
+              currentUserId,
+            )
+          } else if (event.type === 'CONVERSATION_UPDATED') {
+            handleConversationUpdated(
+              queryClient,
+              conversationId!,
+              event.payload as ConversationUpdatedPayload,
+            )
+          } else if (event.type === 'GROUP_DELETED') {
+            handleGroupDeleted(
+              queryClient,
+              conversationId!,
+              event.payload as GroupDeletedPayload,
+              navigateRef.current,
             )
           }
         } catch (e) {
@@ -126,7 +212,7 @@ export function useConvSubscription(conversationId: string | undefined): void {
       cleanup = null
       unsubState()
     }
-  }, [conversationId, currentUserId, queryClient])
+  }, [conversationId, currentUserId, queryClient, navigate])
 }
 
 // ---------------------------------------------------------------------------
@@ -268,4 +354,164 @@ function appendToCache(
 
   // Invalidate conversations list để sidebar cập nhật lastMessageAt + re-sort
   void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: MEMBER_ADDED — append new member to conversation detail cache
+// ---------------------------------------------------------------------------
+function handleMemberAdded(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: MemberAddedPayload,
+): void {
+  queryClient.setQueryData(
+    conversationKeys.detail(conversationId),
+    (old: ConversationDto | undefined) => {
+      if (!old) return old
+      // Dedupe
+      if (old.members.some((m) => m.userId === payload.member.userId)) return old
+      // Sort: OWNER first → ADMINs → MEMBERs, then by joinedAt
+      const newMembers = [...old.members, payload.member].sort(sortMembers)
+      return { ...old, members: newMembers }
+    },
+  )
+  void queryClient.invalidateQueries({ queryKey: conversationKeys.lists() })
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: MEMBER_REMOVED — remove member from cache
+// Idempotent with /user/queue/conv-removed (check isSelf)
+// ---------------------------------------------------------------------------
+function handleMemberRemoved(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: MemberRemovedPayload,
+  currentUserId: string | null,
+): void {
+  const isSelf = payload.userId === currentUserId
+  if (!isSelf) {
+    queryClient.setQueryData(
+      conversationKeys.detail(conversationId),
+      (old: ConversationDto | undefined) => {
+        if (!old) return old
+        return {
+          ...old,
+          members: old.members.filter((m) => m.userId !== payload.userId),
+        }
+      },
+    )
+    void queryClient.invalidateQueries({ queryKey: conversationKeys.lists() })
+  }
+  // isSelf: handled by /user/queue/conv-removed handler (useConvMembershipSubscription)
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: ROLE_CHANGED — update member role in cache
+// ---------------------------------------------------------------------------
+function handleRoleChanged(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: RoleChangedPayload,
+  currentUserId: string | null,
+): void {
+  queryClient.setQueryData(
+    conversationKeys.detail(conversationId),
+    (old: ConversationDto | undefined) => {
+      if (!old) return old
+      const newMembers = old.members
+        .map((m) => (m.userId === payload.userId ? { ...m, role: payload.newRole } : m))
+        .sort(sortMembers)
+      return { ...old, members: newMembers }
+    },
+  )
+
+  if (payload.userId === currentUserId) {
+    const roleLabel = payload.newRole === 'ADMIN' ? 'phó nhóm' : 'thành viên'
+    toast.info(`Bạn đã trở thành ${roleLabel}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: OWNER_TRANSFERRED — atomic 2-way role swap
+// ---------------------------------------------------------------------------
+function handleOwnerTransferred(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: OwnerTransferredPayload,
+  currentUserId: string | null,
+): void {
+  queryClient.setQueryData(
+    conversationKeys.detail(conversationId),
+    (old: ConversationDto | undefined) => {
+      if (!old) return old
+      const newMembers = old.members
+        .map((m) => {
+          if (m.userId === payload.newOwner.userId) return { ...m, role: 'OWNER' as const }
+          if (m.userId === payload.previousOwner.userId) {
+            // autoTransferred: previous owner will be removed (MEMBER_REMOVED follows)
+            // non-auto: previous owner stays as ADMIN
+            if (payload.autoTransferred) return m // keep as-is, will be removed by MEMBER_REMOVED
+            return { ...m, role: 'ADMIN' as const }
+          }
+          return m
+        })
+        .sort(sortMembers)
+      return { ...old, owner: { userId: payload.newOwner.userId, username: payload.newOwner.username, fullName: payload.newOwner.fullName }, members: newMembers }
+    },
+  )
+
+  if (payload.newOwner.userId === currentUserId) {
+    toast.success('Bạn đã trở thành chủ nhóm')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: CONVERSATION_UPDATED — update group name/avatar
+// ---------------------------------------------------------------------------
+function handleConversationUpdated(
+  queryClient: QueryClient,
+  conversationId: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _payload: ConversationUpdatedPayload,
+): void {
+  void queryClient.invalidateQueries({ queryKey: conversationKeys.detail(conversationId) })
+  void queryClient.invalidateQueries({ queryKey: conversationKeys.lists() })
+}
+
+// ---------------------------------------------------------------------------
+// W7 Helper: GROUP_DELETED — remove conv from cache, navigate away
+// ---------------------------------------------------------------------------
+function handleGroupDeleted(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: GroupDeletedPayload,
+  navigate: (path: string) => void,
+): void {
+  queryClient.setQueryData(
+    conversationKeys.lists(),
+    (old: { content?: ConversationDto[] } | undefined) => {
+      if (!old) return old
+      return {
+        ...old,
+        content: (old.content ?? []).filter((c) => c.id !== conversationId),
+      }
+    },
+  )
+  queryClient.removeQueries({ queryKey: conversationKeys.detail(conversationId) })
+
+  if (window.location.pathname.includes(conversationId)) {
+    navigate('/')
+  }
+  toast.warning(`Nhóm "${payload.name}" đã bị xóa`)
+}
+
+// ---------------------------------------------------------------------------
+// Sort helper: OWNER first → ADMIN → MEMBER, then by joinedAt ASC
+// ---------------------------------------------------------------------------
+function sortMembers(a: MemberDto, b: MemberDto): number {
+  const roleOrder = { OWNER: 0, ADMIN: 1, MEMBER: 2 }
+  const roleA = roleOrder[a.role] ?? 3
+  const roleB = roleOrder[b.role] ?? 3
+  if (roleA !== roleB) return roleA - roleB
+  return new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime()
 }

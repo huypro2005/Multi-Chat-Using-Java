@@ -1,5 +1,6 @@
 import { memo } from 'react'
 import type { ConversationSummaryDto } from '@/types/conversation'
+import { ConversationType } from '@/types/conversation'
 import { formatLastMessageTime } from '../utils'
 
 interface Props {
@@ -33,8 +34,8 @@ const ConversationListItem = memo(function ConversationListItem({
         }`}
       aria-current={isActive ? 'page' : undefined}
     >
-      {/* Avatar */}
-      <div className="flex-shrink-0">
+      {/* Avatar with optional group badge */}
+      <div className="flex-shrink-0 relative">
         {conversation.displayAvatarUrl ? (
           <img
             src={conversation.displayAvatarUrl}
@@ -46,12 +47,27 @@ const ConversationListItem = memo(function ConversationListItem({
           />
         ) : (
           <div
-            className="w-12 h-12 rounded-full bg-indigo-100 text-indigo-700
-              flex items-center justify-center text-lg font-medium select-none"
+            className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-medium select-none
+              ${conversation.type === ConversationType.GROUP
+                ? 'bg-purple-100 text-purple-700'
+                : 'bg-indigo-100 text-indigo-700'}`}
             aria-hidden="true"
           >
             {initial}
           </div>
+        )}
+        {/* Group badge — small indicator at bottom-right of avatar */}
+        {conversation.type === ConversationType.GROUP && (
+          <span
+            className="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-purple-500
+              flex items-center justify-center text-white"
+            aria-label="Nhóm"
+            title="Nhóm chat"
+          >
+            <svg viewBox="0 0 12 12" fill="currentColor" className="w-2.5 h-2.5" aria-hidden="true">
+              <path d="M6 6a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm-4 4a4 4 0 018 0H2z" />
+            </svg>
+          </span>
         )}
       </div>
 

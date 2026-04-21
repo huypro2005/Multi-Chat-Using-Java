@@ -1,4 +1,4 @@
-import { Plus } from 'lucide-react'
+import { Plus, Users } from 'lucide-react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useConversations } from '../hooks'
 import { useAuthStore } from '@/stores/authStore'
@@ -6,13 +6,14 @@ import ConversationListItem from './ConversationListItem'
 
 interface Props {
   onOpenCreateDialog: () => void
+  onOpenCreateGroupDialog?: () => void
 }
 
 /**
  * ConversationListSidebar — nội dung bên trong sidebar: search bar, list cuộc trò chuyện.
  * Header (logo + user avatar) vẫn giữ ở ConversationsLayout.
  */
-export default function ConversationListSidebar({ onOpenCreateDialog }: Props) {
+export default function ConversationListSidebar({ onOpenCreateDialog, onOpenCreateGroupDialog }: Props) {
   const { id: activeId } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const currentUserId = useAuthStore((s) => s.user?.id ?? '')
@@ -25,15 +26,30 @@ export default function ConversationListSidebar({ onOpenCreateDialog }: Props) {
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
         <h2 className="font-semibold text-gray-900">Tin nhắn</h2>
-        <button
-          type="button"
-          onClick={onOpenCreateDialog}
-          aria-label="Tạo cuộc trò chuyện mới"
-          className="w-8 h-8 rounded-lg flex items-center justify-center
-            text-gray-500 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-        >
-          <Plus size={18} />
-        </button>
+        <div className="flex items-center gap-1">
+          {onOpenCreateGroupDialog && (
+            <button
+              type="button"
+              onClick={onOpenCreateGroupDialog}
+              aria-label="Tạo nhóm chat"
+              title="Tạo nhóm"
+              className="w-8 h-8 rounded-lg flex items-center justify-center
+                text-gray-500 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+            >
+              <Users size={16} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onOpenCreateDialog}
+            aria-label="Tạo cuộc trò chuyện mới"
+            title="Chat 1-1 mới"
+            className="w-8 h-8 rounded-lg flex items-center justify-center
+              text-gray-500 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+          >
+            <Plus size={18} />
+          </button>
+        </div>
       </div>
 
       {/* Search bar placeholder — Ngày 4 wire */}

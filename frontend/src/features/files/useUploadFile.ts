@@ -32,7 +32,11 @@ export function useUploadFile() {
   const [pending, setPending] = useState<PendingUpload[]>([])
   // Keep a ref to current pending for cleanup on unmount
   const pendingRef = useRef<PendingUpload[]>(pending)
-  pendingRef.current = pending
+
+  // Update ref in effect (not during render) to avoid react-hooks/refs lint error
+  useEffect(() => {
+    pendingRef.current = pending
+  })
 
   // Cleanup blob URLs on unmount
   useEffect(() => {

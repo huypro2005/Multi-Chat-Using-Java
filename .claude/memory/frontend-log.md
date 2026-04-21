@@ -5,6 +5,26 @@
 
 ---
 
+[2026-04-22 W7-D3] feat: group UI + member management + 6 broadcast handlers
+- TẠOMỚI: CreateGroupDialog (avatar async upload, user search debounce, min 2 members)
+- TẠOMỚI: GroupInfoPanel (role-based context menu, AddMembersDialog, confirm dialogs x5)
+- TẠOMỚI: EditGroupInfoDialog (tristate PATCH, avatar change/remove)
+- TẠOMỚI: useGroupActions.ts (5 mutation hooks: addMembers, removeMember, leaveGroup, changeRole, transferOwner)
+- TẠOMỚI: useConvMembershipSubscription.ts (global, conv-added/conv-removed queues)
+- SỬA: useConvSubscription.ts — thêm 6 case W7: MEMBER_ADDED, MEMBER_REMOVED, ROLE_CHANGED, OWNER_TRANSFERRED, CONVERSATION_UPDATED, GROUP_DELETED + navigate support
+- SỬA: App.tsx — mount useConvMembershipSubscription trong GlobalSubscriptions
+- SỬA: ConversationDetailPage — GroupInfoPanel cho GROUP, ConversationInfoPanel cho ONE_ON_ONE
+- SỬA: ConversationsLayout — wire CreateGroupDialog + onCreateGroup callback
+- SỬA: ConversationListSidebar — thêm nút Users (tạo nhóm)
+- SỬA: ConversationListItem — group badge (purple) ở corner avatar
+- SỬA: CreateConversationDialog — enable tab Tạo nhóm với onCreateGroup callback
+- SỬA: types/conversation.ts — thêm OwnerDto, request types W7, UpdateGroupRequest
+- SỬA: conversations/api.ts — thêm 6 mutation functions W7
+- FIX (pre-existing): useProtectedObjectUrl + useUploadFile lint errors
+- tsc: 0 errors, lint: 0 errors 0 warnings
+
+---
+
 [2026-04-21 W6-D4-extend] feat: expand file types (Office/text/archive), FileCard, group validation update. Accept attribute 14 MIME types + extensions. PdfCard deleted. Build clean (0 TS errors).
 
 ---

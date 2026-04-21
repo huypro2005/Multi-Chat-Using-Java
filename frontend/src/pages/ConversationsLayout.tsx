@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Outlet, useParams } from 'react-router-dom'
+import { Outlet, useNavigate, useParams } from 'react-router-dom'
 import { MessageSquare } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import ConversationListSidebar from '@/features/conversations/components/ConversationListSidebar'
 import CreateConversationDialog from '@/features/conversations/components/CreateConversationDialog'
+import CreateGroupDialog from '@/features/conversations/components/CreateGroupDialog'
 
 /**
  * ConversationsLayout — layout 2 cột cho trang conversations.
@@ -14,8 +15,10 @@ import CreateConversationDialog from '@/features/conversations/components/Create
  */
 export default function ConversationsLayout() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [createGroupDialogOpen, setCreateGroupDialogOpen] = useState(false)
 
   // Mobile: có :id → ẩn sidebar, hiện main; không có :id → hiện sidebar, ẩn main
   const sidebarMobileClass = id ? 'hidden md:flex' : 'flex md:flex'
@@ -50,6 +53,7 @@ export default function ConversationsLayout() {
         <div className="flex-1 overflow-hidden flex flex-col">
           <ConversationListSidebar
             onOpenCreateDialog={() => setCreateDialogOpen(true)}
+            onOpenCreateGroupDialog={() => setCreateGroupDialogOpen(true)}
           />
         </div>
       </aside>
@@ -59,10 +63,18 @@ export default function ConversationsLayout() {
         <Outlet />
       </main>
 
-      {/* Create conversation dialog (portal-like, rendered outside aside) */}
+      {/* Create 1-1 conversation dialog */}
       <CreateConversationDialog
         open={createDialogOpen}
         onClose={() => setCreateDialogOpen(false)}
+        onCreateGroup={() => setCreateGroupDialogOpen(true)}
+      />
+
+      {/* Create group dialog */}
+      <CreateGroupDialog
+        open={createGroupDialogOpen}
+        onClose={() => setCreateGroupDialogOpen(false)}
+        onCreated={(convId) => navigate(`/conversations/${convId}`)}
       />
     </div>
   )

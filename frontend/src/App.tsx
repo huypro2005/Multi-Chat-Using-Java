@@ -5,6 +5,7 @@ import { authService } from '@/services/authService'
 import { useAuthStore } from '@/stores/authStore'
 import { connectStomp, disconnectStomp } from '@/lib/stompClient'
 import { useAckErrorSubscription } from '@/features/messages/useAckErrorSubscription'
+import { useConvMembershipSubscription } from '@/features/conversations/hooks/useConvMembershipSubscription'
 import AppLoadingScreen from '@/components/AppLoadingScreen'
 import ProtectedRoute from '@/components/ProtectedRoute'
 import ConnectionStatus from '@/components/ConnectionStatus'
@@ -23,6 +24,8 @@ function GlobalSubscriptions() {
   // Subscribe /user/queue/acks + /user/queue/errors (Path B, ADR-016)
   // Hook này idempotent: tự re-subscribe khi STOMP reconnect
   useAckErrorSubscription()
+  // Subscribe /user/queue/conv-added + /user/queue/conv-removed (W7-D3)
+  useConvMembershipSubscription()
   return null
 }
 
