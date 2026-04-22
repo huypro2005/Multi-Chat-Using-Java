@@ -16,6 +16,16 @@
 
 ---
 
+## [W7-bugfix] fix: group avatar not visible in sidebar for other users — 270 tests pass
+
+**Scope**: Bug fix avatar nhóm không hiển thị cho user khác trong sidebar.
+- Root cause: `ConversationRepository.findConversationsByUserPaginated` không select `avatar_file_id` (W7 column). `buildSummary()` đọc `avatarUrl` từ `row[3]` (legacy `avatar_url`) — null khi dùng avatar W7.
+- Fix 1 (`ConversationRepository.java`): Thêm `CAST(c.avatar_file_id AS VARCHAR)` vào SELECT → cột mới là `row[4]`. Các cột sau dịch chuyển: lastMessageAt → `row[5]`, memberCount → `row[7]`.
+- Fix 2 (`ConversationService.buildSummary()`): Update index reads + resolve `avatarUrl = avatarFileId != null ? "/api/files/" + avatarFileId : legacyAvatarUrl` (cùng logic với `ConversationDto.from()`).
+- Không cần migration (chỉ thay query SQL + service logic).
+- Note: `Message.java` có local pending change (revert `@JdbcTypeCode` → `@Convert`) trong working tree khi bắt đầu session này — đó là pre-existing, không liên quan bug fix. Đã checkout lại file gốc từ HEAD để tránh ảnh hưởng test.
+- All 270 tests pass.
+
 ## [W7-D2] feat: Member Management + Owner Transfer — 26 new tests, 257 total pass
 
 **Scope**: 5 endpoints theo API_CONTRACT v1.1.0-w7:

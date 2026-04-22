@@ -1,3 +1,5 @@
+import { useProtectedObjectUrl } from '@/features/files/hooks/useProtectedObjectUrl'
+
 interface Props {
   user: { fullName?: string; username?: string; avatarUrl?: string | null }
   size?: number // default 40
@@ -10,11 +12,15 @@ interface Props {
  */
 export default function UserAvatar({ user, size = 40 }: Props) {
   const initial = (user.fullName ?? user.username ?? '?').charAt(0).toUpperCase()
+  const shouldUseProtectedFetch =
+    !!user.avatarUrl && user.avatarUrl.startsWith('/api/files/')
+  const protectedUrl = useProtectedObjectUrl(shouldUseProtectedFetch ? user.avatarUrl : null)
+  const avatarSrc = shouldUseProtectedFetch ? protectedUrl : user.avatarUrl
 
-  if (user.avatarUrl) {
+  if (avatarSrc) {
     return (
       <img
-        src={user.avatarUrl}
+        src={avatarSrc}
         alt={user.fullName ?? user.username ?? 'Avatar'}
         width={size}
         height={size}

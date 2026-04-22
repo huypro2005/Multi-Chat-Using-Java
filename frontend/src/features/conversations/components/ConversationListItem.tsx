@@ -2,6 +2,7 @@ import { memo } from 'react'
 import type { ConversationSummaryDto } from '@/types/conversation'
 import { ConversationType } from '@/types/conversation'
 import { formatLastMessageTime } from '../utils'
+import { useProtectedObjectUrl } from '@/features/files/hooks/useProtectedObjectUrl'
 
 interface Props {
   conversation: ConversationSummaryDto
@@ -21,6 +22,14 @@ const ConversationListItem = memo(function ConversationListItem({
   onClick,
 }: Props) {
   const initial = conversation.displayName.charAt(0).toUpperCase()
+  const protectedAvatarUrl = useProtectedObjectUrl(
+    conversation.displayAvatarUrl?.startsWith('/api/files/')
+      ? conversation.displayAvatarUrl
+      : null,
+  )
+  const displayAvatarSrc = conversation.displayAvatarUrl?.startsWith('/api/files/')
+    ? protectedAvatarUrl
+    : conversation.displayAvatarUrl
 
   return (
     <button
@@ -36,9 +45,9 @@ const ConversationListItem = memo(function ConversationListItem({
     >
       {/* Avatar with optional group badge */}
       <div className="flex-shrink-0 relative">
-        {conversation.displayAvatarUrl ? (
+        {displayAvatarSrc ? (
           <img
-            src={conversation.displayAvatarUrl}
+            src={displayAvatarSrc}
             alt={conversation.displayName}
             width={48}
             height={48}

@@ -354,12 +354,15 @@ public class ConversationService {
         UUID convId = UUID.fromString(row[0].toString());
         ConversationType type = ConversationType.valueOf(row[1].toString());
         String name = row[2] != null ? row[2].toString() : null;
-        String avatarUrl = row[3] != null ? row[3].toString() : null;
-        // last_message_at (row[4]) and created_at (row[5])
+        // row[3] = avatar_url (legacy), row[4] = avatar_file_id (W7)
+        String legacyAvatarUrl = row[3] != null ? row[3].toString() : null;
+        String avatarFileId = row[4] != null ? row[4].toString() : null;
+        String avatarUrl = avatarFileId != null ? "/api/files/" + avatarFileId : legacyAvatarUrl;
+        // last_message_at (row[5]) — shifted from row[4] after adding avatar_file_id column
         java.time.Instant lastMessageAt = null;
-        if (row[4] != null) {
+        if (row[5] != null) {
             // JDBC returns java.sql.Timestamp or OffsetDateTime
-            Object rawTs = row[4];
+            Object rawTs = row[5];
             if (rawTs instanceof java.sql.Timestamp ts) {
                 lastMessageAt = ts.toInstant();
             } else if (rawTs instanceof java.time.OffsetDateTime odt) {
@@ -368,7 +371,7 @@ public class ConversationService {
                 lastMessageAt = java.time.Instant.parse(rawTs.toString());
             }
         }
-        long memberCount = ((Number) row[6]).longValue();
+        long memberCount = ((Number) row[7]).longValue();
 
         // Compute displayName / displayAvatarUrl
         String displayName = name; // GROUP default

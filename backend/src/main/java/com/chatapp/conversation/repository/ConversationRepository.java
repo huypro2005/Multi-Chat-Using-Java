@@ -66,7 +66,7 @@ public interface ConversationRepository extends JpaRepository<Conversation, UUID
      * W7 note: filter deleted_at IS NULL — không hiển thị group đã bị xoá trong sidebar.
      */
     @Query(value = """
-            SELECT CAST(c.id AS VARCHAR), c.type, c.name, c.avatar_url, c.last_message_at, c.created_at,
+            SELECT CAST(c.id AS VARCHAR), c.type, c.name, c.avatar_url, CAST(c.avatar_file_id AS VARCHAR), c.last_message_at, c.created_at,
                    (SELECT COUNT(*) FROM conversation_members WHERE conversation_id = c.id) AS member_count
             FROM conversations c
             JOIN conversation_members m ON m.conversation_id = c.id AND m.user_id = CAST(:userId AS UUID)
