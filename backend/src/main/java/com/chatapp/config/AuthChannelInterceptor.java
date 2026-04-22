@@ -34,7 +34,7 @@ import java.util.UUID;
  *   - Áp dụng {@link DestinationPolicy} theo destination suffix:
  *     - {@code .message} → STRICT_MEMBER: throw FORBIDDEN nếu non-member → ERROR frame về client.
  *     - {@code .typing}  → SILENT_DROP: pass through, handler tự silent-drop non-member.
- *     - {@code .read}    → SILENT_DROP: (Tuần 5) pass through, handler xử lý.
+ *     - {@code .read}    → STRICT_MEMBER: (W7-D5) persist DB + broadcast, non-member → ERROR frame.
  *     - Mọi suffix khác  → STRICT_MEMBER (default an toàn).
  * <p>
  * Exception handling: throw {@link MessageDeliveryException} với message là error code
@@ -215,7 +215,7 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
      * <ul>
      *   <li>{@code .message} — STRICT_MEMBER (persistent event, auth required)</li>
      *   <li>{@code .typing}  — SILENT_DROP (ephemeral, handler handles non-member)</li>
-     *   <li>{@code .read}    — SILENT_DROP (ephemeral, Tuần 5 prep)</li>
+     *   <li>{@code .read}    — STRICT_MEMBER (W7-D5: persists DB + broadcasts, non-member → ERROR)</li>
      *   <li>everything else  — STRICT_MEMBER (safe default)</li>
      * </ul>
      */
@@ -224,7 +224,7 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
         if (destination.endsWith(".edit"))    return DestinationPolicy.STRICT_MEMBER;
         if (destination.endsWith(".delete"))  return DestinationPolicy.STRICT_MEMBER;
         if (destination.endsWith(".typing"))  return DestinationPolicy.SILENT_DROP;
-        if (destination.endsWith(".read"))    return DestinationPolicy.SILENT_DROP;
+        if (destination.endsWith(".read"))    return DestinationPolicy.STRICT_MEMBER;
         return DestinationPolicy.STRICT_MEMBER;
     }
 }
