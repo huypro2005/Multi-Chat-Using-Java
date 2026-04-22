@@ -5,6 +5,7 @@ import com.chatapp.auth.dto.request.LogoutRequest;
 import com.chatapp.auth.dto.request.OAuthRequest;
 import com.chatapp.auth.dto.request.RefreshRequest;
 import com.chatapp.auth.dto.request.RegisterRequest;
+import com.chatapp.auth.dto.request.ChangePasswordRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
 import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.service.AuthService;
@@ -113,6 +114,16 @@ public class AuthController {
 
         authService.logout(req.refreshToken(), user.getId(), jti, remainingMs);
         return Map.of("message", "Đăng xuất thành công");
+    }
+
+    @PostMapping("/change-password")
+    public Map<String, String> changePassword(
+            @RequestBody ChangePasswordRequest req,
+            Authentication authentication
+    ) {
+        User user = (User) authentication.getPrincipal();
+        authService.changePassword(user, req);
+        return Map.of("message", "Đổi mật khẩu thành công");
     }
 
     /**

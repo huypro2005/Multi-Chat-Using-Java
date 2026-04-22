@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Outlet, useNavigate, useParams } from 'react-router-dom'
+import { Link, Outlet, useNavigate, useParams } from 'react-router-dom'
 import { MessageSquare } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import ConversationListSidebar from '@/features/conversations/components/ConversationListSidebar'
@@ -38,14 +38,21 @@ export default function ConversationsLayout() {
             <h1 className="text-base font-semibold text-gray-900">Chat App</h1>
           </div>
 
-          {/* Current user avatar */}
-          <div
-            className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center
-              text-indigo-600 text-sm font-medium select-none"
-            aria-label={user?.fullName ?? 'Người dùng'}
-            title={user?.fullName ?? 'Người dùng'}
-          >
-            {user?.fullName?.charAt(0).toUpperCase() ?? '?'}
+          <div className="flex items-center gap-2">
+            <Link to="/profile" className="text-xs text-gray-600 hover:text-indigo-600">
+              Hồ sơ
+            </Link>
+            <Link to="/settings" className="text-xs text-gray-600 hover:text-indigo-600">
+              Cài đặt
+            </Link>
+            <div
+              className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center
+                text-indigo-600 text-sm font-medium select-none"
+              aria-label={user?.fullName ?? 'Người dùng'}
+              title={user?.fullName ?? 'Người dùng'}
+            >
+              {user?.fullName?.charAt(0).toUpperCase() ?? '?'}
+            </div>
           </div>
         </div>
 

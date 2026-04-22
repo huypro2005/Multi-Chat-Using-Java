@@ -26,6 +26,7 @@ import { MemberRole } from '@/types/conversation'
 import type { ConversationDto, MemberDto } from '@/types/conversation'
 import UserAvatar from '@/components/UserAvatar'
 import { useUserSearch } from '@/features/users/hooks'
+import { MemberSkeleton } from '@/features/common/components/Skeleton'
 
 /**
  * ADR-021 (W7-D4-fix): avatarUrl từ BE là public URL (/api/files/{id}/public).
@@ -549,10 +550,17 @@ export function GroupInfoPanel({ conversationId, open, onClose }: Props) {
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto">
         {isLoading && (
-          <div className="flex flex-col items-center gap-3 p-6 animate-pulse">
-            <div className="w-16 h-16 rounded-full bg-gray-200" />
-            <div className="h-4 bg-gray-200 rounded w-32" />
-            <div className="h-3 bg-gray-200 rounded w-20" />
+          <div className="p-6">
+            <div className="flex flex-col items-center gap-3 mb-4 animate-pulse">
+              <div className="w-16 h-16 rounded-full bg-gray-200" />
+              <div className="h-4 bg-gray-200 rounded w-32" />
+              <div className="h-3 bg-gray-200 rounded w-20" />
+            </div>
+            <div className="space-y-1">
+              <MemberSkeleton />
+              <MemberSkeleton />
+              <MemberSkeleton />
+            </div>
           </div>
         )}
 

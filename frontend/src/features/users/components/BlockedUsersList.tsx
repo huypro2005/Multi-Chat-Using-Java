@@ -1,6 +1,7 @@
 import UserAvatar from '@/components/UserAvatar'
 import { useBlockedUsers, useUnblockUser } from '../hooks'
 import type { UserDto } from '@/types/auth'
+import { EmptyState } from '@/features/common/components/EmptyState'
 
 function BlockedUserRow({ user }: { user: UserDto }) {
   const unblock = useUnblockUser(user.id)
@@ -31,7 +32,13 @@ export function BlockedUsersList() {
 
   if (isLoading) return <p className="py-3 text-sm text-gray-500">Đang tải danh sách...</p>
   if (!data || data.length === 0) {
-    return <p className="py-3 text-sm text-gray-500">Bạn chưa chặn người dùng nào.</p>
+    return (
+      <EmptyState
+        icon="✨"
+        title="Chưa chặn ai"
+        description="Bạn có thể chặn người dùng để ngăn họ gửi tin nhắn."
+      />
+    )
   }
 
   return (

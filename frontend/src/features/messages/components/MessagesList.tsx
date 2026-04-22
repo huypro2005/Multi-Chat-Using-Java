@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from 'react'
-import { RefreshCw, MessageCircle } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import { useMessages } from '../hooks'
 import { useConversation } from '@/features/conversations/hooks'
@@ -9,6 +9,8 @@ import { SystemMessage } from './SystemMessage'
 import { PinnedMessagesBanner } from './PinnedMessagesBanner'
 import { useAutoMarkRead } from '../hooks/useAutoMarkRead'
 import type { MessageDto } from '@/types/message'
+import { MessageSkeleton } from '@/features/common/components/Skeleton'
+import { EmptyState } from '@/features/common/components/EmptyState'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,14 +41,9 @@ function shouldShowAvatar(messages: MessageDto[], index: number): boolean {
 // ---------------------------------------------------------------------------
 function MessagesSkeleton() {
   return (
-    <div className="space-y-3 animate-pulse px-4 py-4">
+    <div className="px-2 py-2">
       {[...Array(5)].map((_, i) => (
-        <div key={i} className={`flex ${i % 2 === 0 ? 'justify-start' : 'justify-end'}`}>
-          <div
-            className="h-10 bg-gray-200 rounded-2xl"
-            style={{ width: `${120 + i * 30}px` }}
-          />
-        </div>
+        <MessageSkeleton key={i} />
       ))}
     </div>
   )
@@ -76,11 +73,11 @@ function MessagesError({ onRetry }: { onRetry: () => void }) {
 // ---------------------------------------------------------------------------
 function MessagesEmpty() {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 py-12 text-center px-4">
-      <MessageCircle size={48} className="text-gray-300" />
-      <p className="text-gray-500 font-medium">Bắt đầu cuộc trò chuyện</p>
-      <p className="text-gray-400 text-sm">Gửi tin nhắn đầu tiên để bắt đầu</p>
-    </div>
+    <EmptyState
+      icon="👋"
+      title="Bắt đầu cuộc trò chuyện"
+      description="Hãy gửi tin nhắn đầu tiên."
+    />
   )
 }
 

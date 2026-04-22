@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import { authService } from '@/services/authService'
 import { useAuthStore } from '@/stores/authStore'
@@ -15,6 +15,10 @@ import HomePage from '@/pages/HomePage'
 import ConversationsLayout from '@/pages/ConversationsLayout'
 import ConversationsIndexPage from '@/pages/ConversationsIndexPage'
 import ConversationDetailPage from '@/pages/ConversationDetailPage'
+import { ProfilePage } from '@/features/users/pages/ProfilePage'
+import { SettingsPage } from '@/features/settings/pages/SettingsPage'
+import { NotFoundPage } from '@/features/errors/NotFoundPage'
+import { ErrorBoundary } from '@/features/errors/ErrorBoundary'
 
 // ---------------------------------------------------------------------------
 // GlobalSubscriptions — mount 1 lần khi user đã authenticated
@@ -63,7 +67,8 @@ export default function App() {
   }
 
   return (
-    <BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
       {/* Global ACK/ERROR subscription — mount khi authenticated, unmount khi logout */}
       {isAuthenticated && <GlobalSubscriptions />}
 
@@ -81,10 +86,12 @@ export default function App() {
             {/* detail: /conversations/:id */}
             <Route path=":id" element={<ConversationDetailPage />} />
           </Route>
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
 
         {/* Fallback */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
 
       {/* Debug indicator — chỉ visible ở DEV hoặc khi có lỗi/disconnect */}
@@ -92,6 +99,7 @@ export default function App() {
 
       {/* Toast notifications */}
       <Toaster position="bottom-right" richColors />
-    </BrowserRouter>
+      </BrowserRouter>
+    </ErrorBoundary>
   )
 }

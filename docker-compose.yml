@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: chatapp
+      POSTGRES_USER: chatapp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatapp_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatapp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatapp-network
+
   redis:
     image: redis:7-alpine
     container_name: chatapp-redis
@@ -14,9 +32,47 @@ services:
     networks:
       - chatapp-network
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/chatapp
+      SPRING_DATASOURCE_USERNAME: chatapp
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-chatapp_dev_password}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      APP_STORAGE_LOCAL_BASE_PATH: /app/uploads
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-in-production-min-256-bits}
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "8080:8080"
+    networks:
+      - chatapp-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    networks:
+      - chatapp-network
+
 networks:
   chatapp-network:
     driver: bridge
 
 volumes:
+  pgdata:
   redis-data:
+  uploads:

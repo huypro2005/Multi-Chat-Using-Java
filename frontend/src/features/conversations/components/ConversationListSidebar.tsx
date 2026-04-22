@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useConversations } from '../hooks'
 import { useAuthStore } from '@/stores/authStore'
 import ConversationListItem from './ConversationListItem'
+import { ConversationSkeleton } from '@/features/common/components/Skeleton'
+import { EmptyState } from '@/features/common/components/EmptyState'
 
 interface Props {
   onOpenCreateDialog: () => void
@@ -69,16 +71,7 @@ export default function ConversationListSidebar({ onOpenCreateDialog, onOpenCrea
         {isLoading && (
           <div className="flex flex-col gap-0">
             {Array.from({ length: 5 }).map((_, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-3 px-3 py-3 animate-pulse"
-              >
-                <div className="w-12 h-12 rounded-full bg-gray-200 flex-shrink-0" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-3.5 bg-gray-200 rounded w-3/4" />
-                  <div className="h-3 bg-gray-200 rounded w-1/2" />
-                </div>
-              </div>
+              <ConversationSkeleton key={i} />
             ))}
           </div>
         )}
@@ -99,16 +92,20 @@ export default function ConversationListSidebar({ onOpenCreateDialog, onOpenCrea
 
         {/* Empty state */}
         {!isLoading && !isError && conversations.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-32 text-sm text-gray-500 px-4 text-center">
-            <p>Chưa có cuộc trò chuyện.</p>
-            <button
-              type="button"
-              onClick={onOpenCreateDialog}
-              className="mt-2 text-indigo-600 hover:underline"
-            >
-              Tạo chat mới
-            </button>
-          </div>
+          <EmptyState
+            icon="💬"
+            title="Chưa có cuộc trò chuyện"
+            description="Bắt đầu nhắn tin với bạn bè hoặc tạo nhóm mới."
+            action={
+              <button
+                type="button"
+                onClick={onOpenCreateDialog}
+                className="text-sm text-indigo-600 hover:underline"
+              >
+                Tạo chat mới
+              </button>
+            }
+          />
         )}
 
         {/* Conversation list */}

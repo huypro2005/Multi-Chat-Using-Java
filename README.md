@@ -1,92 +1,85 @@
-# Hướng dẫn setup Agent Team cho dự án Chat App
+# Chat App — SE330 Project
 
-Bản hướng dẫn này giúp bạn tạo một **team 3 AI agent chạy local với Claude Code** để cùng xây dự án chat theo tài liệu `ARCHITECTURE.md`.
+Real-time chat application với group chat, file sharing, reactions, read receipts, pin message và block user.
 
-## Triết lý thiết kế team
+## Features
 
-Team gồm 3 sub-agents chuyên biệt, được điều phối bởi **main Claude Code session** (đóng vai orchestrator):
+### Messaging
+- Direct chat (1-1) và group chat
+- Send/Edit/Delete/Reply message
+- Any-emoji reactions
+- Pin message (max 3 mỗi conversation)
+- Read receipts + unread count
+- Typing indicator + reconnect catch-up
 
-```
-        Bạn (human, product owner)
-              │
-              ▼
-   Main Claude Code session = Orchestrator
-              │
-       ┌──────┼──────┐
-       ▼      ▼      ▼
-   backend  frontend  reviewer
-    -dev    -dev
-```
+### File Sharing
+- Upload ảnh và tài liệu (14 MIME types)
+- Public/default avatars + private attachments
+- Thumbnail cho ảnh
 
-Khi bạn nói với main session: *"Triển khai phase 2 (auth) theo roadmap"*, nó sẽ:
-1. Đọc `ARCHITECTURE.md` + `CLAUDE.md` để hiểu context.
-2. Gọi `backend-dev` làm các endpoint `/auth/*`.
-3. Gọi `frontend-dev` làm Login/Register UI.
-4. Gọi `code-reviewer` review cả hai trước khi merge.
-5. Báo cáo lại bạn, chờ lệnh tiếp theo.
+### User
+- Auth: register/login + Google OAuth
+- Profile page: cập nhật thông tin, đổi avatar, đổi mật khẩu
+- Settings page: blocked users + notification stub
+- Bilateral block/unblock
 
-## Tại sao 3 agent, không phải 1?
+### Platform
+- Spring Boot + PostgreSQL + Redis + React + STOMP
+- Docker-ready với `docker-compose.yml`
 
-Một agent đơn lẻ với context chung dễ gặp vấn đề:
-- **Nhiễm chéo context**: agent đang viết React component bỗng dưng "nhớ ra" nó cũng vừa viết Spring service, tạo code không nhất quán.
-- **Không có critic**: agent tự đánh giá code mình viết thường quá dễ dãi.
-- **Prompt chung chung**: instructions cho fullstack dài và mâu thuẫn ("ưu tiên JPA... nhưng đừng quên React hooks").
+## Tech Stack
 
-Tách 3 agent giải quyết cả 3:
-- Mỗi agent có **context window riêng** và **system prompt chuyên biệt**.
-- Reviewer đóng vai người thứ 3 độc lập, chỉ đọc output, không dính vào việc "viết".
-- Main orchestrator không cần nhớ chi tiết Spring/React — nó chỉ cần biết phân việc.
+### Backend
+- Java 21, Spring Boot 3.4.4
+- PostgreSQL 18, Redis 7
+- Flyway migrations
+- Apache Tika + Thumbnailator
 
-## Cấu trúc thư mục
+### Frontend
+- React 19 + TypeScript + Vite
+- TanStack Query + Zustand
+- Tailwind CSS
+- SockJS + STOMP
 
-```
-chat-app/                          ← Dự án thật của bạn
-├── .claude/
-│   ├── agents/                    ← 3 sub-agent definitions
-│   │   ├── backend-dev.md
-│   │   ├── frontend-dev.md
-│   │   └── code-reviewer.md
-│   └── settings.json              ← (tuỳ chọn) cấu hình permissions
-├── CLAUDE.md                      ← Memory chung (orchestrator đọc mặc định)
-├── docs/
-│   ├── ARCHITECTURE.md            ← File của bạn, copy vào đây
-│   ├── API_CONTRACT.md            ← Reviewer viết & maintain
-│   └── SOCKET_EVENTS.md           ← Reviewer viết & maintain
-├── backend/                       ← Spring Boot project
-├── frontend/                      ← React/Vue project
-└── docker-compose.yml
+## Quick Start (Docker)
+
+### 1) Setup env
+
+```bash
+cp .env.example .env
 ```
 
-## Các bước triển khai (tóm tắt)
+### 2) Build and run
 
-| Bước | Việc cần làm | Thời gian |
-|------|--------------|-----------|
-| 1 | Cài Claude Code | 10 phút |
-| 2 | Tạo project folder + copy ARCHITECTURE.md | 5 phút |
-| 3 | Copy 3 file agent definition vào `.claude/agents/` | 5 phút |
-| 4 | Copy CLAUDE.md vào root | 2 phút |
-| 5 | (Tuỳ chọn) Cấu hình permissions trong settings.json | 10 phút |
-| 6 | Chạy `claude` trong folder, test sub-agents | 15 phút |
-| 7 | Bắt đầu tuần 1 của roadmap | — |
+```bash
+docker compose build
+docker compose up -d
+```
 
-Chi tiết từng bước xem `SETUP.md`.
+Services:
+- Frontend: http://localhost
+- Backend: http://localhost:8080
+- PostgreSQL: localhost:5432
+- Redis: localhost:6379
 
-## Các file trong bộ hướng dẫn này
+### 3) Setup default avatars
 
-| File | Mục đích |
-|------|----------|
-| `README.md` | File bạn đang đọc |
-| `SETUP.md` | Hướng dẫn cài đặt từng bước chi tiết |
-| `WORKFLOW.md` | Cách bạn tương tác với orchestrator mỗi ngày |
-| `CLAUDE.md` | Memory chung cho orchestrator (copy vào root project) |
-| `.claude/agents/backend-dev.md` | System prompt cho agent backend |
-| `.claude/agents/frontend-dev.md` | System prompt cho agent frontend |
-| `.claude/agents/code-reviewer.md` | System prompt cho agent reviewer |
-| `.claude/settings.json` | Cấu hình permissions (tuỳ chọn) |
-| `templates/API_CONTRACT.md` | Template để reviewer điền contract REST |
-| `templates/SOCKET_EVENTS.md` | Template để reviewer điền contract Socket |
+```bash
+docker cp avatar_default.jpg chatapp-backend-1:/app/uploads/default/
+docker cp group_default.jpg chatapp-backend-1:/app/uploads/default/
+```
 
-## Đọc tiếp
+Hoặc mount local volume:
 
-→ Bắt đầu từ `SETUP.md` nếu bạn muốn cài đặt ngay.
-→ Đọc `WORKFLOW.md` trước nếu bạn muốn hiểu cách làm việc hằng ngày.
+```yaml
+volumes:
+  - ./default-avatars:/app/uploads/default:ro
+```
+
+## Docs
+
+- `docs/ARCHITECTURE.md`
+- `docs/API_CONTRACT.md`
+- `docs/SOCKET_EVENTS.md`
+- `docs/WARNINGS.md`
+- `docs/RETROSPECTIVE.md`

@@ -1,8 +1,8 @@
 package com.chatapp.auth.service;
 
 import com.chatapp.auth.dto.request.LoginRequest;
-import com.chatapp.auth.dto.request.RefreshRequest;
 import com.chatapp.auth.dto.request.RegisterRequest;
+import com.chatapp.auth.dto.request.ChangePasswordRequest;
 import com.chatapp.auth.dto.response.AuthResponse;
 import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.dto.response.UserDto;
@@ -192,6 +192,36 @@ public class AuthService {
 
         // 5. Generate tokens (cần @Transactional write để lưu refresh token vào Redis)
         return buildAuthResponse(user, AuthMethod.PASSWORD);
+    }
+
+    /**
+     * Đổi mật khẩu cho user hiện tại.
+     */
+    @Transactional
+    public void changePassword(User user, ChangePasswordRequest req) {
+        if (req.newPassword() == null || req.newPassword().length() < 8) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "PASSWORD_TOO_SHORT",
+                    "Mật khẩu mới tối thiểu 8 ký tự");
+        }
+        if (req.currentPassword() == null || req.currentPassword().isBlank()) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                    "Mật khẩu hiện tại không được để trống");
+        }
+        if (!req.newPassword().equals(req.confirmPassword())) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "PASSWORD_MISMATCH",
+                    "Mật khẩu xác nhận không khớp");
+        }
+        if (user.getPasswordHash() == null || !passwordEncoder.matches(req.currentPassword(), user.getPasswordHash())) {
+            throw new AppException(HttpStatus.UNAUTHORIZED, "INVALID_CURRENT_PASSWORD",
+                    "Mật khẩu hiện tại sai");
+        }
+        if (req.newPassword().equals(req.currentPassword())) {
+            throw new AppException(HttpStatus.BAD_REQUEST, "SAME_AS_CURRENT",
+                    "Mật khẩu mới không được trùng mật khẩu hiện tại");
+        }
+
+        user.setPasswordHash(passwordEncoder.encode(req.newPassword()));
+        userRepository.save(user);
     }
 
     // -------------------------------------------------------------------------
