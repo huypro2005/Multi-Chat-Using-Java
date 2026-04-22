@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.7-w7_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`; **W7-D4 SYSTEM messages** piggyback trên MESSAGE_CREATED với `type: "SYSTEM"` + `systemEventType` + `systemMetadata`_
+_Version: v1.9-w7_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`; W7-D4 SYSTEM messages piggyback trên MESSAGE_CREATED với `type: "SYSTEM"` + `systemEventType` + `systemMetadata`; **W7-D5 Read receipts** — inbound `/app/conv.{convId}.read` (idempotent forward-only) + outbound `READ_UPDATED` broadcast trên `/topic/conv.{id}` + `ConversationDto.members[].lastReadMessageId` (FE tự compute readBy per message client-side)_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -53,7 +53,7 @@ _Owner: code-reviewer (architect)_
 | `/app/conv.{convId}.edit` | Edit message | STRICT_MEMBER | 10 edit/phút/user | Tuần 5 |
 | `/app/conv.{convId}.delete` | Delete message | STRICT_MEMBER | 10/phút/user | Tuần 5 |
 | `/app/conv.{conversationId}.typing` | Typing indicator | SILENT_DROP | 1 event/2s/user/conv | Tuần 5 |
-| `/app/conv.{conversationId}.read` | Read receipt | SILENT_DROP | 1 event/5s/user/conv | Tuần 5 |
+| `/app/conv.{convId}.read` | Read receipt — đánh dấu đã đọc tới message | **STRICT_MEMBER** (check DB member + message thuộc conv) | 1 event/2s/user/conv | **W7-D5** |
 
 ### User queues (Server → Client, per-user targeted)
 
@@ -68,7 +68,7 @@ Spring STOMP user destination — BE gửi bằng `SimpMessagingTemplate.convert
 
 > **FE subscription**: Spring STOMP prefix `/user` auto-resolved per-session — FE subscribe literal `/user/queue/conv-added` (không cần userId trong path). BE gửi với `convertAndSendToUser(userIdString, "/queue/conv-added", payload)`.
 
-> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017) + `/user/queue/conv-added`, `/user/queue/conv-removed` (W7-D2). Presence/read giữ Tuần 5 về sau.
+> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017) + `/user/queue/conv-added`, `/user/queue/conv-removed` (W7-D2) + `/app/conv.{id}.read` + `READ_UPDATED` broadcast (**W7-D5**). Presence giữ cho phase sau.
 
 ---
 
@@ -606,6 +606,56 @@ FE xử lý tuần tự: sau #1 cache có new OWNER ở vị trí đầu, sau #2
 **FE action** (khi nhận MESSAGE_CREATED với type=SYSTEM):
 - Xem §3.1 FE action bước 5 — branch render `<SystemMessageItem>`.
 - Xem §3e.1 Render SYSTEM contract (bên dưới) — copy mapping từ `systemEventType` + `systemMetadata` sang user-facing string.
+
+### 3.13 READ_UPDATED _(Tuần 7 — W7-D5)_
+
+**Trigger**: Sau khi handler `/app/conv.{convId}.read` update `conversation_members.last_read_message_id` commit thành công **VÀ** `messageId` thực sự **forward-newer** so với giá trị cũ (xem §3f.2 idempotent rule). No-op (messageId cũ hơn hoặc bằng current) → **KHÔNG** broadcast.
+
+**Destination**: `/topic/conv.{convId}` — broadcast tới TOÀN BỘ members (bao gồm chính user vừa đánh dấu, để multi-tab đồng bộ).
+
+**Envelope**:
+
+```json
+{
+  "type": "READ_UPDATED",
+  "payload": {
+    "conversationId": "uuid",
+    "userId": "uuid",
+    "lastReadMessageId": "uuid",
+    "readAt": "ISO8601"
+  }
+}
+```
+
+**Field rules**:
+- `conversationId`: UUID của conv.
+- `userId`: user vừa đánh dấu đã đọc (subject của read event, KHÔNG phải receiver).
+- `lastReadMessageId`: message ID được đánh dấu đã đọc. Luôn non-null (chỉ broadcast khi đã advance forward).
+- `readAt`: ISO-8601 UTC. Server time tại commit transaction — KHÔNG phải thời điểm message được tạo. FE dùng để hiển thị "đã đọc lúc {readAt}" nếu UX cần; V1 chỉ dùng làm monotonic key cho React Query cache invalidation.
+
+**FE action**:
+1. Parse → `WsEvent<ReadUpdatedPayload>`.
+2. Patch React Query cache `['conversation', convId]`:
+   - Tìm member có `userId === payload.userId` trong `members[]`.
+   - Set `member.lastReadMessageId = payload.lastReadMessageId`.
+   - Fallback: nếu member không tồn tại trong cache (race: user vừa rời conv nhưng broadcast đến chậm) → **ignore silently** (không throw, không log error — xem race note §3f.4).
+3. **readBy per-message compute client-side** (BLOCKING cho FE contract):
+   - FE KHÔNG store "readBy per message" server-side. Thay vào đó, từ `members[].lastReadMessageId`, FE tự compute: với mỗi message `m` trong conversation, `readBy(m) = members.filter(x => x.userId !== senderId && lastReadMessageAt(x.lastReadMessageId) >= m.createdAt).map(x => x.userId)`.
+   - Rationale: tránh explosion storage (N members × M messages) khi chỉ cần 1 pointer per member. Trade-off: FE phải biết `createdAt` của `lastReadMessageId` để compare → FE cache `messagesById` đã có. Nếu `lastReadMessageId` không có trong cache (message quá cũ, chưa paginate tới) → treat as "unknown, assume read" (tránh flash "unread dot" khi chưa load hết).
+4. **KHÔNG** patch `conversation.unreadCount` từ READ_UPDATED frame — field đó là per-caller (server compute theo caller's `lastReadMessageId`). Khi caller chính là `payload.userId` → FE tự set `unreadCount = 0` (caller đã đọc đến message mới nhất hoặc mới hơn). Khi `payload.userId !== caller` → không đụng `unreadCount`.
+5. **Self-echo dedup**: user đánh dấu read từ tab A → broadcast về tab A + tab B cùng user. FE handler idempotent: `if (cached.lastReadMessageId === payload.lastReadMessageId) return;` — skip redundant set. Không skip theo sender ID (vì tab A cần patch cache để consistent với tab B sau reload).
+
+**Ordering caveats**:
+- BE commit transaction TRƯỚC khi broadcast (`@TransactionalEventListener(AFTER_COMMIT)` pattern, cùng pipe MESSAGE_CREATED). Guarantee: nếu FE nhận READ_UPDATED → DB đã persisted → next `GET /api/conversations/{id}` (thông qua `members[].lastReadMessageId`) cũng trả về giá trị mới. Không có race "broadcast arrives before DB commit".
+- 2 user cùng conv đọc gần-đồng-thời → 2 frame READ_UPDATED độc lập, không cần order — mỗi frame chỉ patch 1 member entry. FE handler single-member, không conflict.
+- Ngược với MEMBER_REMOVED (broadcast trước hard-delete), READ_UPDATED bình thường `AFTER_COMMIT` — row member vẫn tồn tại khi broadcast (chỉ update column).
+
+**Relationship với `unreadCount`**:
+- `unreadCount` (field trong `ConversationSummaryDto` từ `GET /api/conversations`) là per-caller server-compute — xem API_CONTRACT.md mục "unreadCount compute rule (v1.4.0-w7-read)".
+- Khi caller = `payload.userId`: FE có thể tự set `unreadCount = 0` ngay, không cần REST refetch (optimistic).
+- Khi caller ≠ `payload.userId`: `unreadCount` của caller KHÔNG đổi từ READ_UPDATED frame này (người khác đọc không ảnh hưởng badge của caller).
+
+### 3.14 (reserved) — _Không có event mới ở v1.9-w7 ngoài READ_UPDATED_
 
 ---
 
@@ -1256,6 +1306,208 @@ FE render `message.content` **bỏ qua** (luôn `""`); derive copy từ `systemE
 
 ---
 
+## 3f. Read Receipt via STOMP — W7-D5
+
+> **Scope**: FE đánh dấu user đã đọc tin nhắn tới `messageId` nào đó trong conv. BE persist vào `conversation_members.last_read_message_id` (xem Migration V12) và broadcast `READ_UPDATED` §3.13 tới toàn bộ members để UI compute "readBy" hiển thị chấm xanh / avatar nhỏ dưới message.
+>
+> **Không dùng** `/user/queue/acks` / `/user/queue/errors` cho luồng này — read receipt KHÔNG có client-side optimistic UI cần ACK confirm (ngược với SEND/EDIT/DELETE). Thành công → broadcast `/topic`. Thất bại → ERROR frame qua `/user/queue/errors` với `operation: "READ"`.
+
+### 3f.1 Client → Server: `/app/conv.{convId}.read`
+
+**Destination**: `/app/conv.{convId}.read`
+
+**Auth**: STOMP Principal đã set ở CONNECT frame. Non-authenticated → ERROR `/user/queue/errors` `{operation: "READ", code: "AUTH_REQUIRED"}`.
+
+**Payload**:
+
+```json
+{
+  "messageId": "uuid (v4, required)"
+}
+```
+
+**Field rules**:
+- `messageId`: UUID của message user vừa đọc đến (thường là message cuối cùng visible trong viewport). Required, non-null.
+- **KHÔNG có** `clientId` / `tempId` — read receipt không cần client-side dedup ID (idempotent forward-only ở server, xem §3f.2; duplicate send từ FE với same messageId → silent no-op).
+- **KHÔNG có** `convId` trong payload — đọc từ destination path. BE parse `/app/conv.{convId}.read` để lấy convId, validate message thuộc convId.
+
+**Rate limit**: 1 event/2s/user/conv (Redis `rate:msg-read:{userId}:{convId}` TTL 2s atomic INCR). Vượt → ERROR `{operation: "READ", code: "MSG_RATE_LIMITED"}` + silent dropped subsequent. Lý do rate limit chặt hơn send (30/phút): scroll/focus event FE có thể fire rapid — debounce phía client (~500ms) + server rate limit là defense-in-depth.
+
+### 3f.2 Validation rules (server-side)
+
+Thứ tự check (fail fast):
+
+1. **Auth** (interceptor): Principal non-null → pass; else ERROR `AUTH_REQUIRED`.
+2. **Member check** (interceptor, STRICT_MEMBER per §7.1): `EXISTS SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?` → pass; else ERROR `{code: "NOT_MEMBER"}`.
+3. **Rate limit** (handler): Redis INCR `rate:msg-read:{userId}:{convId}` TTL 2s. Count > 1 → ERROR `MSG_RATE_LIMITED`.
+4. **Payload validation** (handler): `messageId` UUID format. Sai → ERROR `VALIDATION_FAILED` + `details: {field: "messageId"}`.
+5. **Message exists**: `SELECT m.created_at, m.conversation_id FROM messages WHERE m.id = ?` → nếu không tồn tại → ERROR `MSG_NOT_FOUND`.
+6. **Message thuộc conv**: `message.conversationId == pathConvId` → pass; else ERROR `MSG_NOT_IN_CONV` (403 severity — user cố gắng đánh dấu read cross-conv, bất thường). Anti-enum exception: vì member check đã pass (user là member của pathConvId), leak "message này KHÔNG thuộc conv X" không leak existence của message (user biết message tồn tại vì họ có `messageId`). Code rõ ràng giúp FE debug.
+7. **Idempotent forward-only** (BLOCKING logic):
+   - Load `current = SELECT last_read_message_id FROM conversation_members WHERE conversation_id=? AND user_id=?`.
+   - Nếu `current IS NULL` → advance: set `last_read_message_id = payload.messageId`. Broadcast `READ_UPDATED`.
+   - Nếu `current IS NOT NULL`:
+     - Load `currentCreatedAt = SELECT created_at FROM messages WHERE id = current`. Nếu `current` đã bị hard-delete (khó xảy ra — DB RESTRICT / SET NULL; xem Migration V12 note) → treat as `NULL` path.
+     - Load `incomingCreatedAt = SELECT created_at FROM messages WHERE id = payload.messageId` (đã load ở bước 5, reuse).
+     - Nếu `incomingCreatedAt > currentCreatedAt` → advance + broadcast.
+     - Nếu `incomingCreatedAt <= currentCreatedAt` → **no-op silent**. KHÔNG update DB, KHÔNG broadcast, KHÔNG ERROR. Response: handler return void. Lý do: read receipt chỉ tiến về phía trước (forward-only) — đọc lại message cũ không làm "undo" read state. Đồng bộ UX mọi chat app lớn (Messenger, Telegram, Zalo).
+8. **Commit** `conversation_members.last_read_message_id = payload.messageId` (UPDATE 1 row, WHERE conversation_id = ? AND user_id = ?). Transaction commit → `@TransactionalEventListener(AFTER_COMMIT)` fire `READ_UPDATED` broadcast (§3.13).
+
+> **BE impl hint (V1)**: Bước 5-7 merge thành 1 query: `SELECT m.created_at AS incoming_created_at, cm.last_read_message_id AS current, m2.created_at AS current_created_at FROM messages m INNER JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = :userId LEFT JOIN messages m2 ON m2.id = cm.last_read_message_id WHERE m.id = :messageId AND m.conversation_id = :convId`. Null result → message không exist OR không thuộc conv (không phân biệt được từ 1 query — chạy thêm 1 query fallback để phân biệt error code, hoặc chấp nhận trả `MSG_NOT_FOUND` cho cả 2 case anti-enum). V1 khuyên anti-enum `MSG_NOT_FOUND` cho cả 2 (tránh leak "message tồn tại nhưng không thuộc conv"). Loại ERROR `MSG_NOT_IN_CONV` là **reserved** cho case đặc biệt (internal dev/debug) — V1 production KHÔNG emit, FE chỉ nhận `MSG_NOT_FOUND`. Nếu W7-D5 BE muốn emit `MSG_NOT_IN_CONV` cho debugging → OK nhưng phải stamp log WARN.
+
+### 3f.3 Server → Client (sender-only): ERROR
+
+**Destination**: `/user/queue/errors` (unified per ADR-017).
+
+**Payload**:
+
+```json
+{
+  "operation": "READ",
+  "error": "Tin nhắn không tồn tại",
+  "code": "MSG_NOT_FOUND"
+}
+```
+
+> **KHÔNG có** `clientId` — read receipt không có client-side dedup ID. FE không correlate error về 1 specific request; chỉ log + (optional) silent retry.
+
+**Error codes**:
+
+| Code | Ý nghĩa | FE action |
+|------|---------|-----------|
+| `AUTH_REQUIRED` | Principal null | Reconnect với fresh token |
+| `NOT_MEMBER` | User không phải member của convId | Silent (impossible nếu UI đúng; log WARN — có thể user vừa bị kick race với frame in-flight). KHÔNG retry. |
+| `VALIDATION_FAILED` | `messageId` sai format UUID | Silent log ERROR — FE code bug, không phải user error |
+| `MSG_NOT_FOUND` | Message không tồn tại hoặc không thuộc conv (anti-enum merged V1) | Silent (có thể user vừa reopen tab sau khi admin hard-delete message — rare). KHÔNG retry. |
+| `MSG_NOT_IN_CONV` | **Reserved, không emit V1** | N/A |
+| `MSG_RATE_LIMITED` | Gửi quá 1 event/2s | Silent dropped — FE debounce bắt buộc để tránh. |
+| `INTERNAL` | BE lỗi không xác định | Log ERROR + silent retry sau 5s (1 lần duy nhất) |
+
+**FE handling policy** (QUAN TRỌNG):
+- Read receipt KHÔNG có user-facing UI error — toast/alert KHÔNG phù hợp (user không chủ động trigger, chỉ scroll → fire event).
+- Mọi ERROR code → log ở console (level WARN cho NOT_MEMBER/MSG_NOT_FOUND; ERROR cho VALIDATION_FAILED/INTERNAL). KHÔNG hiển thị UI.
+- KHÔNG retry ngoài `INTERNAL` (1 lần), tránh retry storm.
+
+### 3f.4 Race conditions & edge cases
+
+1. **User bị kick đang lúc read frame in-flight**: Client gửi `.read` frame → server interceptor check member → not member → ERROR `NOT_MEMBER`. Hoặc kick xảy ra ở giữa (member check pass nhưng UPDATE conv_members WHERE user_id=? affect 0 rows) → UPDATE silent no-op, không broadcast. Cả 2 case đều safe, không dirty state.
+2. **Message bị hard-delete sau khi user đánh dấu read**: V1 migration V12 dùng `ON DELETE SET NULL` trên FK `last_read_message_id`. Nếu message ref bị xóa cứng → FK trigger set `last_read_message_id = NULL` → next call `.read` sẽ treat như NULL case (advance bất kỳ messageId nào). Soft-delete (`deleted_at` set) KHÔNG trigger FK → `last_read_message_id` giữ nguyên, UX tính unread vẫn đúng.
+3. **2 tab cùng user đọc đồng thời**: Tab A gửi `.read(msgId=100)`, Tab B gửi `.read(msgId=105)`. Transaction order bất kỳ. Nếu order là (A commit → B commit) → DB final state `last_read_message_id=105` (B forward từ 100). Nếu order là (B commit → A commit) → DB final state `last_read_message_id=105` (A check `100 <= 105` → no-op silent). Idempotent OK. 2 broadcast READ_UPDATED fire (1 cho mỗi commit advance) — tab A+B nhận 2 frame, handler idempotent `if (cached === payload.lastReadMessageId) skip` → chỉ 1 effective state change. No-op case chỉ 1 frame.
+4. **User member race với READ_UPDATED broadcast** (mentioned §3.13 step 2 fallback): Nếu tab FE nhận READ_UPDATED cho `userId=X` nhưng members cache hiện tại không có X (X vừa bị kick, frame MEMBER_REMOVED đã xử lý trước) → FE ignore silently. Ngược lại (X vẫn trong cache, FE nhận READ_UPDATED TRƯỚC MEMBER_REMOVED) → patch lastReadMessageId bình thường, MEMBER_REMOVED về sau sẽ remove member → orphan patch discarded. Cả 2 safe.
+5. **Reconnect catch-up**: Sau STOMP reconnect, FE gọi `GET /api/conversations/{id}` để refresh `members[].lastReadMessageId` — đây là source-of-truth. Missed READ_UPDATED frames trong thời gian offline → không broadcast lại (SimpleBroker drop). Acceptable: read state refresh từ REST. Same pattern như missed MESSAGE_CREATED.
+
+### 3f.5 Interaction với `unreadCount`
+
+- `unreadCount` trong `ConversationSummaryDto` (từ `GET /api/conversations`) = `COUNT(messages WHERE conversation_id = conv AND created_at > caller.lastRead.created_at AND type != 'SYSTEM')`. Xem API_CONTRACT.md mục "unreadCount compute rule (v1.4.0-w7-read)".
+- Khi user đánh dấu read qua `.read` frame → sau commit, next GET conversations sẽ thấy `unreadCount = 0` (hoặc giảm) cho conv đó.
+- FE optimistic: khi caller gửi `.read(msgId)` thành công (nhận READ_UPDATED với `userId === callerId`) → set cache `['conversations']` item `unreadCount = 0` ngay. KHÔNG chờ REST refetch.
+
+### 3f.6 BE handler pseudo-code (non-normative)
+
+```java
+@Component
+public class ChatReadHandler {
+
+  @MessageMapping("/conv.{convId}.read")
+  public void handleRead(
+      @DestinationVariable UUID convId,
+      @Payload ReadReceiptPayload payload,
+      Principal principal) {
+    UUID userId = UUID.fromString(principal.getName());
+
+    // 1. Rate limit (Redis INCR TTL 2s).
+    if (!rateLimiter.tryAcquireMsgRead(userId, convId)) {
+      throw new MessageDeliveryException("MSG_RATE_LIMITED");
+    }
+
+    // 2. Validate payload.
+    if (payload.messageId() == null) {
+      throw new MessageDeliveryException("VALIDATION_FAILED");
+    }
+
+    // 3. Load state (1 query).
+    ReadState state = readReceiptRepository.loadState(userId, convId, payload.messageId());
+    if (state == null || state.incomingCreatedAt() == null) {
+      throw new MessageDeliveryException("MSG_NOT_FOUND");
+    }
+
+    // 4. Idempotent forward-only check.
+    if (state.currentCreatedAt() != null
+        && !state.incomingCreatedAt().isAfter(state.currentCreatedAt())) {
+      return; // no-op silent
+    }
+
+    // 5. Update + fire event.
+    readReceiptService.markRead(userId, convId, payload.messageId()); // @Transactional
+    // @TransactionalEventListener(AFTER_COMMIT) → broadcast READ_UPDATED.
+  }
+
+  @MessageExceptionHandler(MessageDeliveryException.class)
+  @SendToUser(destinations = "/queue/errors", broadcast = false)
+  public ReadErrorPayload handleError(MessageDeliveryException ex) {
+    return new ReadErrorPayload("READ", errorMessage(ex), errorCode(ex));
+  }
+}
+```
+
+### 3f.7 FE hook pseudo-code (non-normative)
+
+```ts
+// useMarkAsRead.ts — debounce + auto-fire on viewport
+export function useMarkAsRead(convId: string) {
+  const stomp = useStompClient();
+  const debouncedSend = useMemo(
+    () => debounce((messageId: string) => {
+      stomp?.publish({
+        destination: `/app/conv.${convId}.read`,
+        body: JSON.stringify({ messageId }),
+      });
+    }, 500),
+    [stomp, convId],
+  );
+
+  // call this when message enters viewport bottom
+  return (messageId: string) => debouncedSend(messageId);
+}
+
+// useReadUpdatedSubscription.ts — patch cache
+export function useReadUpdatedSubscription(convId: string) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const sub = stomp.subscribe(`/topic/conv.${convId}`, (msg) => {
+      const env = JSON.parse(msg.body) as WsEvent;
+      if (env.type !== "READ_UPDATED") return;
+      const { userId, lastReadMessageId } = env.payload;
+      qc.setQueryData(["conversation", convId], (old: ConversationDto) => {
+        if (!old) return old;
+        return {
+          ...old,
+          members: old.members.map((m) =>
+            m.userId === userId ? { ...m, lastReadMessageId } : m,
+          ),
+        };
+      });
+      // if self-echo → also reset unreadCount
+      const callerId = getCurrentUserId();
+      if (userId === callerId) {
+        qc.setQueryData(["conversations"], (old: ConversationsPage) => {
+          if (!old) return old;
+          return {
+            ...old,
+            content: old.content.map((c) =>
+              c.id === convId ? { ...c, unreadCount: 0 } : c,
+            ),
+          };
+        });
+      }
+    });
+    return () => sub.unsubscribe();
+  }, [convId, qc]);
+}
+```
+
+---
+
 ## 4. BE Implementation Guide — W4-D3
 
 ### 4.1 Spring Config (bắt buộc)
@@ -1799,7 +2051,7 @@ BE gửi STOMP ERROR frame với header `message` chứa error code. FE map theo
 | `/app/conv.{id}.edit` | SEND | `STRICT_MEMBER` | `MessageDeliveryException("FORBIDDEN")` → ERROR `{operation:"EDIT", code:"FORBIDDEN"}` |
 | `/app/conv.{id}.delete` | SEND | `STRICT_MEMBER` | `MessageDeliveryException("FORBIDDEN")` → ERROR `{operation:"DELETE", code:"FORBIDDEN"}` |
 | `/app/conv.{id}.typing` | SEND | `SILENT_DROP` | Frame accepted by interceptor, `ChatTypingHandler` silent-drops non-member |
-| `/app/conv.{id}.read` | SEND | `SILENT_DROP` | (Tuần 5) Frame accepted, handler xử lý |
+| `/app/conv.{id}.read` | SEND | `STRICT_MEMBER` (W7-D5) | Non-member → ERROR `/user/queue/errors` `{operation: "READ", code: "NOT_MEMBER"}`. Lý do đổi từ `SILENT_DROP` (spec cũ W5) sang `STRICT_MEMBER`: read receipt persist vào DB (`conversation_members.last_read_message_id`) + broadcast `READ_UPDATED` cho toàn bộ members → non-member gửi vào có thể leak read state / spam DB write. Validation trong handler (messageId thuộc conv) vẫn cần — interceptor chỉ check membership. |
 | `/app/conv.{id}.<unknown>` | SEND | `STRICT_MEMBER` (default safe) | `MessageDeliveryException("FORBIDDEN")` |
 | `/topic/conv.{id}` | SUBSCRIBE | `STRICT_MEMBER` | `MessageDeliveryException("FORBIDDEN")` → STOMP ERROR frame |
 
@@ -1906,6 +2158,7 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 
 | Ngày | Version | Thay đổi |
 |------|---------|---------|
+| 2026-04-22 | v1.9-w7 | **W7-D5 Read receipts**. (1) **§2 Destinations** — row `/app/conv.{convId}.read` đổi policy từ `SILENT_DROP` (spec cũ W5 placeholder) sang **`STRICT_MEMBER`** (lý do: read receipt persist DB + broadcast → non-member gửi có thể leak state / spam DB write). Rate limit đổi `1 event/5s` → `1 event/2s/user/conv` (scroll event cần fire nhanh hơn). (2) **§3.13 READ_UPDATED NEW** — outbound event trên `/topic/conv.{convId}`, payload `{conversationId, userId, lastReadMessageId, readAt}`. FE action: patch `ConversationDto.members[].lastReadMessageId`; self-echo → reset `unreadCount = 0` optimistic; ignore silently nếu member không có trong cache (race). **readBy per-message compute CLIENT-SIDE** — BE không compute + không broadcast per-message readers list; FE filter `members[]` theo `lastReadMessageAt >= message.createdAt`. Rationale: giảm payload (1 pointer/member vs N*M matrix). (3) **§3f NEW — Read Receipt via STOMP spec**: inbound `/app/conv.{convId}.read` payload `{messageId}` (KHÔNG có clientId — không optimistic UI, không cần dedup ID). Validation: auth → member → rate-limit → UUID format → message exists → message thuộc conv (anti-enum merged vào `MSG_NOT_FOUND` V1; `MSG_NOT_IN_CONV` reserved không emit) → **idempotent forward-only** (compare `createdAt`; incoming <= current → silent no-op KHÔNG broadcast). Error codes: `AUTH_REQUIRED`, `NOT_MEMBER`, `VALIDATION_FAILED`, `MSG_NOT_FOUND`, `MSG_NOT_IN_CONV` (reserved), `MSG_RATE_LIMITED`, `INTERNAL`. **FE handling policy**: ERROR frame KHÔNG toast/alert user (read không phải user-initiated explicit action) — silent console log + retry chỉ với `INTERNAL` (1 lần, 5s delay). (4) **§7.1 Destination Policy Table** update — row `.read` đổi `SILENT_DROP` → `STRICT_MEMBER` với ERROR `{operation: "READ", code: "NOT_MEMBER"}`. (5) **Relationship với unreadCount** (§3.13 + §3f.5): `unreadCount` trong ConversationSummaryDto server-compute per-caller (xem API_CONTRACT.md v1.4.0-w7-read). Self-echo READ_UPDATED → FE set `unreadCount = 0` optimistic. Other-user READ_UPDATED → KHÔNG đụng `unreadCount` của caller. (6) Race cases documented (§3f.4): kick race, hard-delete message (FK ON DELETE SET NULL), multi-tab, member-removed race với READ_UPDATED frame ordering, reconnect catch-up qua REST. BE impl hint + FE hook pseudo-code (non-normative). **Depends on**: Migration V12 (`V12__add_last_read_message_id.sql`) add column `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index (conversation_id, last_read_message_id). Xem API_CONTRACT.md v1.4.0-w7-read mục "Schema V12 migration (W7-D5)" + "MemberDto extended shape" + "unreadCount compute rule". **Skip v1.8**: không có v1.8-w7 intermediate — jump 1.7 → 1.9 để sync version tag với API_CONTRACT.md bump (v1.2 → v1.4 cùng nhịp W7-D5). |
 | 2026-04-22 | v1.7-w7 | **W7-D4 SYSTEM messages finalized** (từ placeholder của v1.5/v1.6-w7). SYSTEM piggyback trên `MESSAGE_CREATED` §3.1 với `type: "SYSTEM"` — KHÔNG STOMP event type mới. (1) **§3.1 MESSAGE_CREATED payload extended**: thêm 2 field `systemEventType` (enum 8 values: GROUP_CREATED, MEMBER_ADDED, MEMBER_REMOVED, MEMBER_LEFT, ROLE_PROMOTED, ROLE_DEMOTED, OWNER_TRANSFERRED, GROUP_RENAMED) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). Khi `type=SYSTEM`: `sender=null`, `content=""` (empty string, KHÔNG null), `attachments=[]`, `replyToMessage=null`, `editedAt/deletedAt/deletedBy=null`. FE branch render `<SystemMessageItem>` vs `<MessageItem>` theo `type`. Dedupe theo `id` (áp dụng cho cả SYSTEM). (2) **§3.12 SYSTEM_MESSAGE** placeholder → finalized với mapping table trigger → event type. (3) **§3e.1 NEW — SYSTEM Render contract**: full-width centered italic gray bubble, copy mapping template 8 enum (vi-VN V1 hardcode), fallback unknown enum → "(sự kiện hệ thống)", FE truncate tên 40 chars CSS-level, edit/delete menu disabled (defense in depth), BE reject `SYSTEM_MESSAGE_NOT_EDITABLE` / `SYSTEM_MESSAGE_NOT_DELETABLE`. (4) **Ordering**: OWNER leave auto-transfer → OWNER_TRANSFERRED SYSTEM TRƯỚC MEMBER_LEFT SYSTEM (createdAt ASC). Group mgmt event (§3.6-3.11) và SYSTEM MESSAGE_CREATED fire song song — FE 2 handler riêng, không rely on frame order giữa 2 loại. (5) BE reuse existing `MessageCreatedEvent` + `@TransactionalEventListener(AFTER_COMMIT)` pipe — 0 infra change. Schema Migration V10 (xem API_CONTRACT.md): ADD COLUMN system_event_type + system_metadata JSONB; DROP NOT NULL sender_id (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency`. KHÔNG ảnh hưởng TEXT flow — `systemEventType`/`systemMetadata=null` với mọi TEXT/IMAGE/FILE message. |
 | 2026-04-19 | v0.1 | Initial skeleton (không dùng, đã overwrite bởi v1.0-draft-w4). |
 | 2026-04-19 | v1.0-draft-w4 | Draft contract W4: REST-gửi + STOMP-broadcast model. `/topic/conv.{id}` + `MESSAGE_CREATED` event shape IDENTICAL với `POST /messages` REST response. BE implementation guide (WebSocketConfig + AuthChannelInterceptor + `@TransactionalEventListener(AFTER_COMMIT)`). FE guide (stompClient singleton + useConvSubscription hook với dedupe bắt buộc). Security: message size 64KB, origin từ config, member check ở SUBSCRIBE. Limitations V1 documented. Placeholder MESSAGE_UPDATED/DELETED (W6), TYPING/PRESENCE (W5). |

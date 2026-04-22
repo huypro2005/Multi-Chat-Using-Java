@@ -30,6 +30,7 @@ export interface MemberDto {
   fullName: string
   avatarUrl: string | null
   role: MemberRole
+  lastReadMessageId: string | null // W7-D5: read receipt pointer
   joinedAt: string // ISO8601
 }
 

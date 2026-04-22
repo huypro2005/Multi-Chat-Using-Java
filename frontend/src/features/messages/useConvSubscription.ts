@@ -86,6 +86,14 @@ interface GroupDeletedPayload {
   deletedBy: { userId: string; username: string; fullName: string }
 }
 
+// W7-D5 READ_UPDATED payload (§3.13 SOCKET_EVENTS.md)
+interface ReadUpdatedPayload {
+  conversationId: string
+  userId: string
+  lastReadMessageId: string
+  readAt: string
+}
+
 function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boolean {
   if (!tempMsg.clientTempId) return false
   if (tempMsg.type !== incoming.type) return false
@@ -174,6 +182,12 @@ export function useConvSubscription(conversationId: string | undefined): void {
               conversationId!,
               event.payload as GroupDeletedPayload,
               navigateRef.current,
+            )
+          } else if (event.type === 'READ_UPDATED') {
+            handleReadUpdated(
+              queryClient,
+              conversationId!,
+              event.payload as ReadUpdatedPayload,
             )
           }
         } catch (e) {
@@ -509,6 +523,36 @@ function handleGroupDeleted(
     navigate('/')
   }
   toast.warning(`Nhóm "${groupName}" đã bị xóa`)
+}
+
+// ---------------------------------------------------------------------------
+// W7-D5 Helper: READ_UPDATED — patch member.lastReadMessageId in conv detail cache
+// No invalidate needed — setQueryData triggers re-render of ReadTicks directly.
+// Self-echo idempotent: if cached value === payload value → skip (§3.13 step 5).
+// ---------------------------------------------------------------------------
+function handleReadUpdated(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: ReadUpdatedPayload,
+): void {
+  queryClient.setQueryData(
+    conversationKeys.detail(conversationId),
+    (old: ConversationDto | undefined) => {
+      if (!old) return old
+
+      const memberIdx = old.members.findIndex((m) => m.userId === payload.userId)
+      // Race: member not in cache (race with MEMBER_REMOVED) → ignore silently (§3.13 step 2 fallback)
+      if (memberIdx === -1) return old
+
+      const existing = old.members[memberIdx]
+      // Self-echo idempotent check (§3.13 step 5)
+      if (existing.lastReadMessageId === payload.lastReadMessageId) return old
+
+      const newMembers = [...old.members]
+      newMembers[memberIdx] = { ...existing, lastReadMessageId: payload.lastReadMessageId }
+      return { ...old, members: newMembers }
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

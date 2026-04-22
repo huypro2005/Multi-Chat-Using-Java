@@ -5,6 +5,15 @@
 
 ---
 
+[2026-04-22 W7-D5] feat: read receipt — ReadTicks ✓/✓✓ + handleReadUpdated + useAutoMarkRead
+- types/conversation.ts: thêm lastReadMessageId: string | null vào MemberDto
+- ReadTicks.tsx: ✓ (gray) khi 0 readers, ✓✓ (blue) khi có reader; V1 approximation lastReadMessageId non-null = đã đọc; chỉ hiện cho own messages; ẩn khi sending/failed
+- MessageItem.tsx: thêm members?: MemberDto[] + currentUserId?: string props; render ReadTicks thay thế static ✓ tick khi members available; fallback về static ✓ khi members empty
+- MessagesList.tsx: thêm useConversation (cached) để lấy members; pass members + currentUserId xuống MessageItem; derive lastMessageId (non-system, non-optimistic); gọi useAutoMarkRead
+- hooks/useAutoMarkRead.ts: debounce 500ms; dedupe lastSentRef; reset khi convId đổi; getStompClient().publish đến /app/conv.{id}.read; silent fail khi not connected
+- useConvSubscription.ts: thêm ReadUpdatedPayload interface + handleReadUpdated (setQueryData in-place, idempotent, race-safe)
+- tsc: 0 errors; eslint: 0 warnings
+
 [2026-04-22 W7-D4-fix] refactor: avatar native img public URL (ADR-021) — xóa useProtectedObjectUrl cho avatars
 - UserAvatar.tsx: bỏ useProtectedObjectUrl; dùng native <img src=avatarUrl> + div fallback overlay pattern; DEFAULT_USER_AVATAR constant
 - ConversationListItem.tsx: bỏ useProtectedObjectUrl; native img + DEFAULT_GROUP_AVATAR fallback cho GROUP

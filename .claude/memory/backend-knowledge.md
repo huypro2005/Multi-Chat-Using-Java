@@ -524,8 +524,38 @@ V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-in
 
 ---
 
+### Read Receipt Pattern (W7-D5)
+
+**Forward-only idempotent** (ReadReceiptService.markRead):
+- Load current `lastReadMessageId` → findById → compare `currentLastRead.createdAt.isBefore(incoming.createdAt)`.
+- Nếu `false` (current >= incoming) → no-op return, KHÔNG publish event, KHÔNG save.
+- Nếu current FK hard-deleted (`findById` trả empty) → treat as null path → advance always.
+- Event published ONLY when actually advancing → broadcaster AFTER_COMMIT fires only on real update.
+
+**unreadCount native query (NULL-safe lastReadId)**:
+```sql
+SELECT LEAST(COUNT(*), 99) FROM messages
+WHERE conversation_id = CAST(:convId AS UUID)
+  AND deleted_at IS NULL
+  AND type != 'SYSTEM'
+  AND (:lastReadId IS NULL
+       OR created_at > (SELECT created_at FROM messages WHERE id = CAST(:lastReadId AS UUID)))
+```
+- Gọi với `String` params (UUID.toString() / null) — H2 + Postgres đều accept.
+- Cap 99: LEAST() ở SQL, tránh COUNT toàn bộ rows cho large conv.
+- Fail-graceful trong ConversationService.buildSummary(): try-catch toàn bộ countUnread, return 0 nếu exception (tránh break list endpoint).
+
+**ChatReadReceiptHandler pattern** (fire-and-forget):
+- Rate limit: `rate:msg-read:{userId}:{convId}` TTL 2s, INCR > 1 → MSG_RATE_LIMITED.
+- No ACK (khác SEND/EDIT/DELETE) — readReceipt không cần client-side confirm.
+- ErrorPayload `{operation:"READ", clientId:null, ...}` — không có clientId per contract §3f.3.
+- SILENT_DROP đã config trong AuthChannelInterceptor cho `.read` — handler tự làm member check qua service.
+
+---
+
 ## Changelog file này
 
+- 2026-04-22 W7D5: Thêm Read Receipt Pattern — forward-only idempotent (compare createdAt), countUnread NULL-safe native query (LEAST cap 99, SYSTEM exclusion), ChatReadReceiptHandler fire-and-forget (no ACK, ErrorPayload clientId=null).
 - 2026-04-22 W7D4-fix: Thêm Hybrid File Visibility Pattern (ADR-021) — is_public flag + /public endpoint, FileConstants fixed UUIDs, @PostConstruct validate defaults (graceful missing), SecurityConfig order matters, Lombok `boolean isPublic` → `isPublic()` not `isIsPublic()`, FileCleanupJob skip defaults. H2 test seed programmatic cho V11 skipped.
 - 2026-04-21 W7D2: Thêm Member Management Pattern — race-safe lock H2-compatible (native FOR UPDATE + SELECT rows), role hierarchy encapsulation qua canRemoveMember(target), auto-transfer query native CASE, OWNER→ADMIN sau transfer, partial-success response shape, @TransactionalEventListener REQUIRES_NEW cho DB access, user-specific /queue/conv-added|conv-removed.
 - 2026-04-21 W7D1: Thêm Group Chat Schema + CRUD Pattern (ADR-020) — MemberRole permission methods, CHECK constraint shape, soft-delete filter, ON DELETE SET NULL cho owner_id, Tristate DTO qua @JsonAnySetter Map, LinkedHashMap cho broadcast null-tolerant, avatar attach flow (markAttached), Event Publisher broadcast, naming drift V7→V9, member sort role+joinedAt, targetUserId backward-compat, DataSource metadata cho column verification test.

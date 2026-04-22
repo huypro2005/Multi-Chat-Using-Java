@@ -3,6 +3,7 @@ import { format } from 'date-fns'
 import { AlertCircle, Check, Loader2, RotateCcw, X } from 'lucide-react'
 import UserAvatar from '@/components/UserAvatar'
 import type { MessageDto, MessageListResponse } from '@/types/message'
+import type { MemberDto } from '@/types/conversation'
 import { useAuthStore } from '@/stores/authStore'
 import { useQueryClient } from '@tanstack/react-query'
 import { messageKeys } from '@/features/conversations/queryKeys'
@@ -13,6 +14,7 @@ import { MessageActions } from './MessageActions'
 import { SystemMessage } from './SystemMessage'
 import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
 import { ReplyQuote } from './ReplyQuote'
+import { ReadTicks } from './ReadTicks'
 import { AttachmentGallery } from '@/features/files/components/AttachmentGallery'
 import { FileCard } from '@/features/files/components/FileCard'
 
@@ -32,6 +34,10 @@ interface Props {
   showAvatar: boolean
   /** Callback khi user bấm Reply button */
   onReply?: (message: MessageDto) => void
+  /** Members list để compute ReadTicks (W7-D5) */
+  members?: MemberDto[]
+  /** Current user id để compute ReadTicks */
+  currentUserId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +225,7 @@ function InlineEditArea({
 // MessageItemInner — the actual bubble render for TEXT/IMAGE/FILE messages
 // Separated so MessageItem can dispatch SYSTEM early without hook order issues.
 // ---------------------------------------------------------------------------
-function MessageItemInner({ message, isOwn, showAvatar, onReply }: Props) {
+function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], currentUserId = '' }: Props) {
   const [isEditing, setIsEditing] = useState(false)
 
   // Dùng clientTempId để detect optimistic; nếu không có → dùng heuristic id
@@ -355,16 +361,23 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply }: Props) {
             )}
           </div>
 
-          {/* Status icon — ẩn khi message đã bị xoá */}
+          {/* Status icon + ReadTicks — ẩn khi message đã bị xoá */}
           {!isDeleted && (
             <div
-              className="self-end mb-1 flex-shrink-0"
+              className="self-end mb-1 flex-shrink-0 flex items-center gap-0.5"
               aria-label={isSending ? 'Đang gửi' : isFailed ? 'Gửi thất bại' : 'Đã gửi'}
             >
               {isSending ? (
                 <Loader2 size={12} className="text-indigo-400 animate-spin" />
               ) : isFailed ? (
                 <AlertCircle size={12} className="text-red-400" />
+              ) : members.length > 0 ? (
+                // ReadTicks handles single ✓ vs ✓✓ when members available
+                <ReadTicks
+                  message={message}
+                  members={members}
+                  currentUserId={currentUserId}
+                />
               ) : (
                 <span className="text-indigo-400 text-xs leading-none">✓</span>
               )}
@@ -469,8 +482,9 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply }: Props) {
 // Defense-in-depth: MessagesList already handles the split, but this guards
 // against standalone usage.
 // ---------------------------------------------------------------------------
-const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply }: Props) {
-  const currentUserId = useAuthStore((s) => s.user?.id ?? '')
+const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply, members, currentUserId: currentUserIdProp }: Props) {
+  const currentUserIdFromStore = useAuthStore((s) => s.user?.id ?? '')
+  const currentUserId = currentUserIdProp ?? currentUserIdFromStore
 
   if (message.type === 'SYSTEM') {
     return <SystemMessage message={message} currentUserId={currentUserId} />
@@ -482,6 +496,8 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
       isOwn={isOwn}
       showAvatar={showAvatar}
       onReply={onReply}
+      members={members}
+      currentUserId={currentUserId}
     />
   )
 })

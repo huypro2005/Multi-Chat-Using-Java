@@ -377,6 +377,28 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 
 ---
 
+## W7-D5 Read Receipt Patterns
+
+### ReadTicks V1 approximation
+- `member.lastReadMessageId !== null` → coi là đã đọc conv (V1 approx, đủ cho MVP).
+- Exact check cần compare `createdAt` của `lastReadMessageId` vs message — phức tạp, để V2.
+- Nếu `lastReadMessageId` không có trong messages cache (old message) → treat as "unknown, assume read" (§3.13 step 3).
+- ReadTicks chỉ render cho `message.sender?.id === currentUserId` AND `status !== 'sending|failed'`.
+
+### handleReadUpdated — setQueryData in-place (không invalidate)
+- Pattern: `queryClient.setQueryData(conversationKeys.detail(id), old => patch member)`.
+- Race-safe: nếu member không tồn tại trong cache (MEMBER_REMOVED trước) → return old silently.
+- Idempotent: `if (existing.lastReadMessageId === payload.lastReadMessageId) return old` (self-echo dedup).
+- KHÔNG cần `invalidateQueries` — setQueryData trigger re-render ReadTicks đủ rồi.
+
+### useAutoMarkRead debounce 500ms
+- File: `features/messages/hooks/useAutoMarkRead.ts`.
+- Dùng `getStompClient().publish({ destination: /app/conv.{id}.read, body: {messageId} })`.
+- `lastSentRef` dedupe — không gửi lại cùng messageId.
+- Reset `lastSentRef` khi `convId` đổi (useEffect deps [convId]).
+- Silent fail khi STOMP not connected (không throw, không toast — read receipt không cần ACK).
+- Gọi từ `MessagesList` dùng `lastMessageId` = last non-system, non-optimistic message id.
+
 ## Thư viện đã chọn
 
 | Library | Ghi chú |

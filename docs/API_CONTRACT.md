@@ -392,8 +392,12 @@ Validation rules:
 
 ---
 
-## Conversations API (v1.1.0-w7 — Group Chat Member Management finalized)
+## Conversations API (v1.4.0-w7-read — Read Receipts + unreadCount real compute)
 
+> **Version bump W7-D5 (2026-04-22)**: v1.3.0-w7 → **v1.4.0-w7-read** (minor). Lý do: thêm Read Receipts + enable `unreadCount` real compute (bỏ placeholder 0). Changes vs v1.3.0-w7: (1) **Schema V12 migration** (`V12__add_last_read_message_id.sql`) — thêm column `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index `(conversation_id, last_read_message_id)` cho query readBy computation. (2) **MemberDto extended** — thêm field `lastReadMessageId: uuid | null` vào member object trả về từ `GET /api/conversations/{id}` (members[]), `POST /api/conversations` response (created members), `MEMBER_ADDED` STOMP broadcast (new member có `lastReadMessageId = null`). FE compute "readBy per message" client-side từ field này (không cần BE compute). (3) **`unreadCount` compute rule** — placeholder 0 → real compute `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM')`. Edge: `lastReadMessageId = null` → count all non-SYSTEM messages. **SYSTEM KHÔNG count** (đổi từ v1.2.0-w7-system rule — xem "unreadCount compute rule" mục bên dưới cho rationale). (4) **STOMP `/app/conv.{convId}.read`** (xem SOCKET_EVENTS.md §3f v1.9-w7) — inbound idempotent forward-only, broadcast `READ_UPDATED` §3.13 lên `/topic/conv.{id}`. (5) Không đụng Auth / Users / Messages / Files sections — read feature isolated trong Conversations domain. KHÔNG breaking cho existing shape (additive field `lastReadMessageId` + same-shape `unreadCount: number` nhưng giờ > 0). Xem changelog W7-D5 cuối file.
+>
+> **Version bump W7-D4 (2026-04-22)**: v1.2.0-w7-system (SYSTEM messages — MessageDto extend, migration V10) — see Changelog. Giữ chung Conversations API umbrella vì SYSTEM msg trigger từ group management endpoints. v1.3.0-w7 được reserve/skip — next bump đi trực tiếp lên v1.4.0-w7-read để sync nhịp bump version với SOCKET_EVENTS.md (v1.7 → v1.9).
+>
 > **Version bump W7-D2 (2026-04-21)**: v1.0.0-w7 → **v1.1.0-w7** (minor). Lý do: finalize 5 member management endpoints trước BE/FE implement D2 — (1) partial success response shape cho add-members (`added[] + skipped[]` với `reason`), (2) error code naming refactor (`CANNOT_KICK_SELF`, `CANNOT_TRANSFER_TO_SELF`, `CANNOT_CHANGE_OWNER_ROLE`, `MEMBER_LIMIT_EXCEEDED`, `CANNOT_LEAVE_EMPTY_GROUP`, `INVALID_ROLE` — thay thế/bổ sung cho `INVALID_ROLE_CHANGE`, `GROUP_FULL`, `CANNOT_REMOVE_SELF` legacy), (3) thêm user-specific STOMP destinations `/user/{userId}/queue/conv-added` + `/user/{userId}/queue/conv-removed` để BE notify riêng user vừa bị add/kick, (4) OWNER_TRANSFERRED thêm `autoTransferred: boolean` (true khi OWNER leave auto-transfer, false khi `/transfer-owner` explicit), (5) formalize no-op idempotent behavior (PATCH role với same role → 200 OK, không broadcast). Không đụng schema, không có migration mới. Xem Changelog W7-D2 entry cuối file.
 >
 > **Version bump W7-D1 (2026-04-21)**: v0.9.5-files-extended → **v1.0.0-w7**. Lý do major bump: thêm full Group Chat management (W7-D1) — role enum (OWNER/ADMIN/MEMBER), metadata group (name/avatar/owner), + 7 endpoints mới (PATCH/DELETE conv, add/remove/leave/role-change/transfer-owner). Xem ADR-020. Schema migration V7 (`V7__add_group_chat.sql`) thêm `member_role` enum + columns `joined_at`, `conversations.name/avatar_file_id/owner_id` + CHECK constraint type-specific. Breaking: `POST /api/conversations` payload cho GROUP đổi — thêm `name` + `avatarFileId` optional; `type="GROUP"` BẮT BUỘC có `name` + `memberIds` ≥ 2 (tổng member ≥ 3 gồm caller).
@@ -449,6 +453,136 @@ ALTER TABLE conversations
 **Backfill note**: V7 migration chạy khi chưa có GROUP conversation trong DB (W1-W6 chỉ test ONE_ON_ONE). Nếu production đã có row GROUP pre-W7, cần backfill `name` + `owner_id` TRƯỚC khi apply CHECK constraint — V1 acceptable không có rows.
 
 > **Naming drift nhẹ**: Migration dùng `DIRECT` / `GROUP` trong doc ADR-020, nhưng DB column `type` enum giữ `ONE_ON_ONE` | `GROUP` theo ADR-012. CHECK constraint code trên đã sync lại `'ONE_ON_ONE'` để khớp DB. Trong text/docs có thể dùng "DIRECT" đồng nghĩa "ONE_ON_ONE" cho ngắn gọn; code luôn dùng `ONE_ON_ONE`.
+
+---
+
+### Schema V12 migration (W7-D5 — Read Receipts)
+
+File: `backend/src/main/resources/db/migration/V12__add_last_read_message_id.sql`
+
+```sql
+-- V12: Read receipts — per-member pointer tới message cuối cùng đã đọc (W7-D5).
+-- Additive: nullable column, KHÔNG breaking. Rows cũ → NULL (chưa đọc), next STOMP .read frame sẽ set.
+
+ALTER TABLE conversation_members
+  ADD COLUMN last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL;
+
+-- Index cho composite query khi FE compute readBy per-message:
+--   SELECT user_id, last_read_message_id FROM conversation_members WHERE conversation_id = ?;
+-- (conversation_id already indexed via PK/FK; last_read_message_id column gắn thêm để query readBy filter nhanh nếu cần).
+CREATE INDEX idx_conv_members_last_read
+  ON conversation_members(conversation_id, last_read_message_id);
+```
+
+**Migration notes**:
+
+- **FK `ON DELETE SET NULL`** (BLOCKING choice): nếu message được `last_read_message_id` trỏ tới bị HARD-delete (rare — V1 dùng soft-delete mặc định, xem ADR-022) → field auto-set NULL. Next `.read` frame từ user đó sẽ advance bình thường từ NULL. Alternative `RESTRICT` rejected: có thể block hard-delete legitimate (admin tool xoá message dirty), tạo phụ thuộc ngầm. Alternative `CASCADE` rejected: xoá member row khỏi conv vì 1 message bị xoá → mất context nghiêm trọng.
+- **Không backfill giá trị**: rows pre-W12 giữ `last_read_message_id = NULL`. Behavior equivalent "user chưa từng mở conv" — `unreadCount` sẽ = tổng non-SYSTEM messages trong conv cho đến khi user đánh dấu read lần đầu qua STOMP. Acceptable UX (FE có thể auto-fire `.read` lần đầu khi user mở conv).
+- **Không UNIQUE constraint** trên `(conversation_id, user_id, last_read_message_id)` — PK composite `(conversation_id, user_id)` đã unique per-member; `last_read_message_id` chỉ là pointer mutable. Không cần constraint phụ.
+- **Foreign key composite validation at application level**: DB không enforce "message thuộc conversation_id" (FK chỉ reference `messages.id`, không compound). BE handler MUST validate `message.conversation_id == member.conversation_id` trước khi UPDATE (xem SOCKET_EVENTS.md §3f.2 step 6). Nếu bypass → dirty data không enforce DB-level.
+- **Rollback**: `ALTER TABLE conversation_members DROP COLUMN last_read_message_id;` + `DROP INDEX idx_conv_members_last_read;`. Safe rollback — không dữ liệu nào khác phụ thuộc.
+
+---
+
+### MemberDto — extended shape (v1.4.0-w7-read)
+
+Shape chuẩn của member object (dùng trong response `POST /api/conversations` thành viên khi tạo, `GET /api/conversations/{id}` `members[]`, và STOMP broadcast `MEMBER_ADDED` `member` field — xem SOCKET_EVENTS.md §3.7):
+
+```json
+{
+  "userId": "uuid",
+  "username": "string",
+  "fullName": "string",
+  "avatarUrl": "string | null",
+  "role": "OWNER | ADMIN | MEMBER",
+  "joinedAt": "ISO8601",
+  "lastReadMessageId": "uuid | null"
+}
+```
+
+**Field rules**:
+
+| Field | Rule |
+|-------|------|
+| `userId` | UUID v4. Key để FE dedup members list. |
+| `username` / `fullName` / `avatarUrl` | Snapshot từ `users` table tại thời điểm query. Update live (không snapshot time-travel như `systemMetadata.actorName` của SYSTEM msg). |
+| `role` | Enum `OWNER` (đúng 1 per GROUP), `ADMIN`, `MEMBER`. ONE_ON_ONE: cả 2 member đều có role nhưng không có semantic — FE ignore. |
+| `joinedAt` | ISO-8601 UTC. Không đổi sau khi set. |
+| `lastReadMessageId` (**v1.4.0-w7-read**) | UUID của message cuối cùng user đã đánh dấu đọc trong conv, hoặc `null` nếu chưa bao giờ đánh dấu. Update trigger: STOMP `/app/conv.{convId}.read` (§3f SOCKET_EVENTS.md) — idempotent forward-only. Khi message ref bị hard-delete → FK `ON DELETE SET NULL` tự chuyển về null. |
+
+**Rule BE rendering**:
+1. **MEMBER_ADDED broadcast** (STOMP §3.7): new member khi vừa được add có `lastReadMessageId = null` (chưa đọc message nào trong conv). FE cache patch dùng giá trị này.
+2. **GET /api/conversations/{id}** (`members[]`): BE query JOIN `conversation_members` + include `last_read_message_id` trong SELECT. Chạy đồng thời với query load `users` table cho `username/fullName/avatarUrl`.
+3. **READ_UPDATED broadcast** (STOMP §3.13): payload KHÔNG trả toàn bộ member object — chỉ `{conversationId, userId, lastReadMessageId, readAt}`. FE tự patch 1 field trong cache.
+4. **POST /api/conversations response** (tạo conversation mới): creator có `lastReadMessageId = null` (chưa có message nào khi vừa create). Nếu `createGroup` auto-insert SYSTEM msg `GROUP_CREATED` (xem W7-D4) → creator vẫn có `lastReadMessageId = null` (auto-fire `.read` xảy ra client-side sau khi FE render — không phải server-side).
+
+**Client-side readBy compute** (pattern BE expect FE theo):
+
+```ts
+function readBy(message: MessageDto, members: MemberDto[], messagesById: Map<string, MessageDto>): string[] {
+  return members
+    .filter((m) => m.userId !== message.sender?.id) // exclude sender
+    .filter((m) => {
+      if (!m.lastReadMessageId) return false;
+      const lastRead = messagesById.get(m.lastReadMessageId);
+      if (!lastRead) return true; // lastRead message chưa load → assume đã đọc (tránh flash unread)
+      return new Date(lastRead.createdAt) >= new Date(message.createdAt);
+    })
+    .map((m) => m.userId);
+}
+```
+
+> **BE MUST NOT compute readBy list per message** — payload explosion với group ≥ 10 member, 1000+ messages. Client-side compute rẻ (Array.filter O(M*N) với M ≤ 50 member, N ≤ 50 messages visible — negligible). Nếu future scale cần server-side compute (group 500+), tách endpoint riêng `/api/messages/{id}/read-by` trả list userId (V2).
+
+---
+
+### unreadCount compute rule (v1.4.0-w7-read)
+
+`unreadCount` field trong `ConversationSummaryDto` (từ `GET /api/conversations` list endpoint) server-computed theo công thức:
+
+```
+unreadCount = COUNT(*)
+FROM messages m
+WHERE m.conversation_id = :convId
+  AND m.type != 'SYSTEM'
+  AND m.deleted_at IS NULL  -- không count soft-deleted
+  AND (
+    :lastReadMessageId IS NULL  -- user chưa từng đánh dấu → count tất cả
+    OR m.created_at > (SELECT created_at FROM messages WHERE id = :lastReadMessageId)
+  )
+```
+
+**Rules**:
+
+1. **Per-caller**: tính từ `conversation_members.last_read_message_id` của CALLER (user gọi `GET /api/conversations`). Mỗi request cùng conv, 2 user khác nhau → 2 `unreadCount` khác nhau.
+2. **SYSTEM exclusion** (BLOCKING): `type = 'SYSTEM'` KHÔNG count. Lý do: system msg fire rất nhiều trong group active (member add/kick/rename) — count vào unread làm badge phình to vô nghĩa. User không cần "đánh dấu đọc" system notice chủ động. Supersedes rule cũ v1.2.0-w7-system. Xem "Validation rules cho SYSTEM messages" rule 3 (updated).
+3. **Soft-deleted exclusion**: `deleted_at IS NOT NULL` → không count. User không muốn thấy badge tăng vì message đã bị xóa. Nhất quán với FE render placeholder "🚫 Tin nhắn đã bị xóa" (không count là unread).
+4. **NULL lastReadMessageId**: user chưa bao giờ đánh dấu đọc → count TẤT CẢ non-SYSTEM non-deleted messages. Acceptable UX (chỉ xảy ra conv mới tạo / user mới join).
+5. **Cap value V1**: nếu count > 99 → trả `99` (frontend hiển thị "99+"). BE: `LEAST(count, 99)`. Mục đích: tránh "9999 unread" gây shock UX. Cap apply TRƯỚC khi serialize — field vẫn là `number`. Optional optimization (FE có thể cap client-side thay); V1 khuyến cáo BE cap để giảm load COUNT(*) khi conv cực nhiều msg (thực tế V1 <4000 msg/ngày total — OK).
+6. **Performance**: query COUNT(*) trên 1 conv → index `messages(conversation_id, created_at)` đã có (V4 migration). Filter `type != 'SYSTEM' AND deleted_at IS NULL` filter ngoài index → chấp nhận full scan per-conv (V1 ≤ few thousand rows per conv). V2 có thể add partial index `WHERE type != 'SYSTEM' AND deleted_at IS NULL` nếu query slow.
+7. **Update trigger** (invalidation cho FE cache):
+   - Self-echo READ_UPDATED (§3.13) → FE optimistic set `unreadCount = 0`. KHÔNG chờ REST.
+   - Other-user READ_UPDATED → KHÔNG đụng `unreadCount` của caller.
+   - New MESSAGE_CREATED trong conv (caller là member nhưng KHÔNG phải sender, KHÔNG phải SYSTEM) → FE increment `unreadCount` cached +1. Soft-delete MESSAGE_DELETED → FE decrement nếu message đó trong unread range (khó track chính xác — acceptable stale until next REST refetch).
+   - Invalidation fallback: 30s poll hoặc reconnect → gọi lại `GET /api/conversations` (đã có pattern catch-up). BE source-of-truth.
+
+**Behavior table**:
+
+| Caller `lastReadMessageId` | Conv có 10 TEXT + 3 SYSTEM + 1 SOFT-DELETED | Expected `unreadCount` |
+|----------------------------|---------------------------------------------|------------------------|
+| `null` (chưa đọc) | Total non-SYSTEM non-deleted = 10 | **10** |
+| Message 5 (TEXT, `createdAt` = T5) | Messages sau T5 = 5 TEXT (msg 6-10), SYSTEM và deleted loại → count 5 | **5** |
+| Message 10 (TEXT, newest) | Không có msg nào sau T10 | **0** |
+
+**Contract test guidance** (reviewer recommend):
+
+- Test 1: Fresh conv, 0 messages → `unreadCount = 0` (COUNT empty).
+- Test 2: 5 TEXT messages, member chưa đánh dấu read → `unreadCount = 5`.
+- Test 3: 5 TEXT + 3 SYSTEM, member chưa đánh dấu read → `unreadCount = 5` (SYSTEM loại).
+- Test 4: 10 TEXT, member `lastReadMessageId` = msg 10 → `unreadCount = 0`.
+- Test 5: 10 TEXT, member `lastReadMessageId` = msg 5, msg 8 đã soft-delete → `unreadCount = 4` (msg 6,7,9,10; 8 loại deleted).
+- Test 6: 100+ TEXT, member `lastReadMessageId` = null → `unreadCount = 99` (cap).
+- Test 7: 2 tabs, tab A send `.read(msg 10)` → broadcast READ_UPDATED → tab A optimistic set `unreadCount = 0`; tab B nhận self-echo với `userId === self` → cũng set `unreadCount = 0`. Sau next `GET /api/conversations` → REST confirm `unreadCount = 0`.
 
 ---
 
@@ -624,7 +758,7 @@ Field notes:
   - `GROUP`: trùng `name` / `avatarUrl` của conversation. Nếu `avatarUrl` null → FE tự fallback (ví dụ avatar compose 2-3 thành viên đầu).
 - `memberCount`: tính từ `COUNT(*) FROM conversation_members WHERE conversation_id = ?`.
 - `lastMessageAt`: `null` nếu chưa có message nào.
-- `unreadCount`: V1 placeholder — luôn trả `0` cho tới khi implement unread counter (Redis `unread:{userId}:{convId}`) ở tuần 4. FE phải handle `number` field, không assume > 0.
+- `unreadCount`: **v1.4.0-w7-read** (W7-D5) — server-computed thật sự từ `members[].lastReadMessageId` thay vì placeholder 0. Shape KHÔNG đổi (integer ≥ 0). Xem mục "unreadCount compute rule (v1.4.0-w7-read)" bên dưới cho công thức đầy đủ, edge case `lastReadMessageId = null` (count all non-SYSTEM), và behavior `type='SYSTEM'` (KHÔNG count — xem Rationale). FE vẫn chỉ đọc field `unreadCount: number` — KHÔNG breaking (trước đây luôn 0, giờ có thể > 0; FE phải handle cả 2 case tương tự trước).
 - `mutedUntil`: ISO-8601 hoặc `null`. FE hiển thị icon mute nếu `mutedUntil` trong tương lai.
 
 **Sort**: `lastMessageAt DESC NULLS LAST, createdAt DESC` (conversation mới tạo chưa có tin nằm dưới cùng).
@@ -672,7 +806,8 @@ Field notes:
       "fullName": "string",
       "avatarUrl": "string | null",
       "role": "OWNER" | "ADMIN" | "MEMBER",
-      "joinedAt": "ISO8601"
+      "joinedAt": "ISO8601",
+      "lastReadMessageId": "uuid | null"
     }
   ],
   "owner": { "userId": "uuid", "username": "string", "fullName": "string" } | null,
@@ -692,7 +827,8 @@ Field notes:
 **Notes**:
 - **Authorization merge với not-found**: nếu conv tồn tại nhưng caller không phải member → trả `404 CONV_NOT_FOUND` (không phải `403 AUTH_FORBIDDEN`). Lý do: tránh tiết lộ "conv này tồn tại" qua error code khác nhau. Đây là pattern chống enumeration — thống nhất với cách `/login` dùng cùng error cho user-not-found và wrong-password.
 - **Member list sort (W7)**: BE trả `members[]` sort theo `role DESC, joinedAt ASC` (OWNER đầu → ADMINs cũ nhất → MEMBERs cũ nhất). Sidebar / DetailPage render theo order này không cần sort lại FE.
-- BE implement hiện đã có `ConversationRepository.findByIdWithMembers(UUID)` (JOIN FETCH) — dùng trực tiếp, tránh N+1. W7 cập nhật query include `role` + `joined_at` + LEFT JOIN `users` cho `owner` (có thể NULL sau cascade).
+- **`lastReadMessageId` (v1.4.0-w7-read, W7-D5)**: UUID của message user này đã đánh dấu đọc đến, hoặc `null` nếu chưa bao giờ đánh dấu (user mới join conv / chưa từng mở conv). FE dùng **client-side** để compute "readBy per message" — với mỗi message `m`, tìm members có `lastReadMessageAt(lastReadMessageId) >= m.createdAt` (loại bỏ sender). BE KHÔNG compute readBy list per-message (tránh payload explosion). Update trigger: STOMP `/app/conv.{convId}.read` (xem SOCKET_EVENTS.md §3f) — idempotent forward-only; broadcast `READ_UPDATED` về `/topic/conv.{id}` sau commit (§3.13). Nếu message tương ứng bị hard-delete sau này → DB FK `ON DELETE SET NULL` → field chuyển về null (V2 ít khi xảy ra vì default soft-delete). Xem Migration V12.
+- BE implement hiện đã có `ConversationRepository.findByIdWithMembers(UUID)` (JOIN FETCH) — dùng trực tiếp, tránh N+1. W7 cập nhật query include `role` + `joined_at` + LEFT JOIN `users` cho `owner` (có thể NULL sau cascade). **W7-D5**: thêm `last_read_message_id` vào SELECT columns của `conversation_members` join.
 
 ---
 
@@ -1788,7 +1924,7 @@ SYSTEM messages có ràng buộc đặc biệt khác TEXT:
    - REST: **403** `SYSTEM_MESSAGE_NOT_DELETABLE`.
    - *Reasoning*: SYSTEM messages là audit trail của group actions — cho user xóa sẽ mất lịch sử ai làm gì. V2 xem xét OWNER privilege xóa system msg nếu có complaint.
 
-3. **SYSTEM count towards unread** — FE counter `conversation.unreadCount` (từ `GET /api/conversations`) BAO GỒM SYSTEM messages chưa read. BE tính unread bằng số messages sau `member.lastReadAt` trong conv, KHÔNG filter `type`. Rationale: system events (user vừa join, OWNER transfer) là info user cần biết; khác với typing indicator (transient, không count).
+3. **SYSTEM KHÔNG count towards unread** — **Superseded v1.4.0-w7-read (W7-D5)**. Rule cũ v1.2.0-w7-system: SYSTEM count (rationale "user cần biết"). Rule mới v1.4.0-w7-read: `unreadCount` = `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM')` — SYSTEM **bị loại** khỏi count. Lý do đổi: (a) SYSTEM message fire khắp mọi group action (add/kick/rename) — group sôi động sẽ có `unreadCount` phình to vì system msg, làm badge UX kém; (b) mọi chat app (Messenger, Telegram) đều KHÔNG count system notice vào unread; (c) user không cần "đánh dấu đọc" system msg một cách chủ động — chúng là passive info. Typing indicator cũng không count (transient, không vào bảng messages V1). **Impact migration**: existing conv có SYSTEM msg pre-W7-D5 → next GET /api/conversations sẽ thấy `unreadCount` thấp hơn (đã loại SYSTEM) — UX improvement, không breaking FE.
 
 4. **SYSTEM không có reactions V1** — endpoint reactions (nếu triển khai ở phase sau) phải reject SYSTEM với `SYSTEM_MESSAGE_NO_REACTIONS` (scope sau — không trong v1.2.0-w7-system). Hiện tại V1 không có reactions endpoint.
 
@@ -1907,6 +2043,7 @@ ALTER TABLE messages
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-22 | v1.4.0-w7-read | **W7-D5 Read Receipts + unreadCount real compute**. (1) **Migration V12** (`V12__add_last_read_message_id.sql`): ADD COLUMN `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index `(conversation_id, last_read_message_id)`. Additive, nullable, non-breaking. Rows cũ NULL. FK `ON DELETE SET NULL` (không CASCADE/RESTRICT — rationale: giữ member khi hard-delete message, auto-reset pointer thay vì block). BE MUST validate composite `message.conversation_id == member.conversation_id` ở application level (DB không enforce compound FK). (2) **MemberDto extended shape**: thêm field `lastReadMessageId: uuid | null` vào member object trả về từ `GET /api/conversations/{id}` members[], `POST /api/conversations` response, STOMP `MEMBER_ADDED` `member` (new member luôn null). BE MUST NOT compute readBy list per message — FE tự filter `members[]` theo `lastReadMessageAt >= message.createdAt` (exclude sender). Pattern code snippet documented. (3) **`unreadCount` compute rule**: placeholder 0 → real compute `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM' AND deleted_at IS NULL)`. `lastReadMessageId = null` → count all non-SYSTEM non-deleted. Cap `LEAST(count, 99)` (UX "99+"). Per-caller (mỗi user `GET /api/conversations` thấy unreadCount của chính mình). **SYSTEM KHÔNG count** (đổi từ rule v1.2.0-w7-system — xem "Validation rules cho SYSTEM messages" rule 3 superseded note: rationale: system msg fire rất nhiều trong group active, count vào unread làm badge phình to vô nghĩa; nhất quán với mọi chat app lớn). (4) **STOMP `/app/conv.{convId}.read`** — xem SOCKET_EVENTS.md v1.9-w7 §3f: payload `{messageId}` (KHÔNG có clientId), idempotent forward-only (compare `createdAt`, incoming <= current → silent no-op không broadcast), broadcast `READ_UPDATED` §3.13 lên `/topic/conv.{id}` sau commit. Error codes: `AUTH_REQUIRED`, `NOT_MEMBER`, `VALIDATION_FAILED`, `MSG_NOT_FOUND` (anti-enum merge cả "not in conv"), `MSG_NOT_IN_CONV` (reserved, không emit V1), `MSG_RATE_LIMITED` (1 event/2s/user/conv), `INTERNAL`. (5) **Conversations API header** bump v1.1.0-w7 → v1.4.0-w7-read (skip v1.3.0-w7 — sync version number với SOCKET_EVENTS.md v1.7 → v1.9 nhịp bump cùng W7-D5; v1.2.0-w7-system giữ tag cho SYSTEM messages trước đó). (6) KHÔNG đụng Auth / Users / Messages POST/GET / Files sections. KHÔNG breaking shape cho existing — additive field + same-type `unreadCount: number`. (7) Contract test guidance: 7 test cases documented (empty conv, caller null-read, SYSTEM loại, newest-read, soft-deleted loại, cap 99, multi-tab self-echo). BLOCKING cho BE W7-D5: idempotent forward-only logic (compare createdAt, KHÔNG compare UUID), SYSTEM + soft-deleted filter trong `unreadCount` COUNT, FK `ON DELETE SET NULL` (không CASCADE), validate cross-conv composite trong application layer. BLOCKING cho FE W7-D5: readBy client-side compute, optimistic `unreadCount = 0` khi self-echo READ_UPDATED, debounce 500ms trước khi fire STOMP `.read` + server rate limit 2s defense-in-depth. |
 | 2026-04-22 | v1.2.0-w7-system | **W7-D4 SYSTEM messages**. Extend `MessageDto` (additive, non-breaking cho TEXT path) với 2 optional field: `systemEventType` (enum 8 values: `GROUP_CREATED`, `MEMBER_ADDED`, `MEMBER_REMOVED`, `MEMBER_LEFT`, `ROLE_PROMOTED`, `ROLE_DEMOTED`, `OWNER_TRANSFERRED`, `GROUP_RENAMED`) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). `sender` = `null` cho SYSTEM (rationale: tránh maintain "system user" row). `content` = `""` (empty string, không null — FE render từ metadata). `type='SYSTEM'` bổ sung vào type enum cho type field của message (trước đây đã declare trong enum nhưng chưa có usage). **BE publish policy**: sau khi service method commit xong → save SYSTEM row + publish `MessageCreatedEvent` → reuse broadcast pipe (`/topic/conv.{id}` MESSAGE_CREATED) — KHÔNG tạo STOMP event type mới. Mapping service → SYSTEM: `createGroup` → 1× GROUP_CREATED; `addMembers` → N× MEMBER_ADDED (per user added, KHÔNG tạo cho skipped); `removeMember` → MEMBER_REMOVED; `leaveGroup` non-OWNER → MEMBER_LEFT; `leaveGroup` OWNER auto-transfer → OWNER_TRANSFERRED (autoTransferred=true) **TRƯỚC** MEMBER_LEFT (ordering BLOCKING); `changeRole` → ROLE_PROMOTED hoặc ROLE_DEMOTED (no-op silent không fire); `transferOwner` explicit → OWNER_TRANSFERRED (autoTransferred=false); `updateGroupInfo` rename → GROUP_RENAMED (chỉ nếu `oldName != newName` trim-compare); `updateGroupInfo` avatar-only → **KHÔNG** fire SYSTEM msg V1 (CONVERSATION_UPDATED đã notify UI; V2 xem xét). **Validation**: SYSTEM NOT editable → `SYSTEM_MESSAGE_NOT_EDITABLE` (403 REST / STOMP); NOT deletable → `SYSTEM_MESSAGE_NOT_DELETABLE` (403 REST / STOMP); count towards unread; không reactions V1; không quote/reply (`VALIDATION_FAILED`); pagination GET /messages trả inline với TEXT. **Migration V10** (`V10__add_system_message_fields.sql`): ADD COLUMN `system_event_type VARCHAR(50)` + `system_metadata JSONB`; ALTER `sender_id` DROP NOT NULL (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency` (type='SYSTEM' ↔ system_event_type non-null AND sender_id null; type!=SYSTEM ↔ cả 2 system field null). 2 error codes mới (ngoại lệ anti-enum documented). KHÔNG đổi shape REST POST /messages (endpoint deprecated, không ảnh hưởng). KHÔNG đổi STOMP SEND payload — client vẫn không gửi SYSTEM (server-only). BLOCKING cho BE W7-D4: order OWNER_TRANSFERRED trước MEMBER_LEFT trong leaveGroup OWNER path; insert SYSTEM msg TRƯỚC delete member row trong removeMember; CHECK constraint catch dirty INSERT. |
 | 2026-04-21 | v1.1.0-w7 | **W7-D2 contract finalize** cho 5 member management endpoints trước BE/FE implement. Changes vs v1.0.0-w7: (1) **POST /{id}/members** response đổi từ single-shape `{added[]}` → partial-success `{added[], skipped[{userId, reason: ALREADY_MEMBER|USER_NOT_FOUND|BLOCKED}]}` — 201 Created thay vì 200; status 201 khi có ít nhất 1 added hoặc khi tất cả skipped (vẫn success). `GROUP_FULL` → `MEMBER_LIMIT_EXCEEDED` (409, details `{currentCount, attemptedCount, limit: 50}`, all-or-nothing). `GROUP_MEMBER_NOT_FOUND` + `GROUP_MEMBER_ALREADY_IN` deprecated — chuyển sang per-user `skipped[].reason`. (2) **DELETE /{id}/members/{uid}**: `CANNOT_REMOVE_SELF` → `CANNOT_KICK_SELF`; `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`; `CANNOT_REMOVE_OWNER` removed (merged vào INSUFFICIENT_PERMISSION). Thêm user-specific broadcast `/user/{kickedUserId}/queue/conv-removed` với `{conversationId, reason: "KICKED"}`. (3) **POST /{id}/leave**: thêm `CANNOT_LEAVE_EMPTY_GROUP` (400) khi OWNER là member duy nhất — V1 không auto-delete. OWNER leave auto-transfer nay fire `OWNER_TRANSFERRED` (với `autoTransferred: true`) thay vì `ROLE_CHANGED` — consistent với `/transfer-owner`. Thứ tự broadcast: OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED. `MEMBER_REMOVED` với `reason: "LEFT"` có `removedBy: null` (khác KICKED: non-null). `SELECT FOR UPDATE` trên caller row chống race W7-1. (4) **PATCH /role**: response bỏ `oldRole`, thêm `changedBy: {userId, username}`. No-op (newRole == currentRole) → 200 OK idempotent KHÔNG broadcast. `INVALID_ROLE_CHANGE` tách thành 3 codes: `INVALID_ROLE` (400, body `role=OWNER`), `CANNOT_CHANGE_OWNER_ROLE` (403, target=OWNER), silent-idempotent cho no-op. `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`. (5) **POST /transfer-owner**: body field `newOwnerId` → `targetUserId` (rename for consistency path `/members/{userId}`). Response `oldOwner` → `previousOwner` + thêm `username`. `INVALID_ROLE_CHANGE` → `CANNOT_TRANSFER_TO_SELF`. Broadcast OWNER_TRANSFERRED với `autoTransferred: false`. (6) **Authorization matrix appendix** finalize + thêm "error code → HTTP status cheat sheet". (7) **Add user-specific STOMP destinations** `/user/{userId}/queue/conv-added` (ConversationSummaryDto) + `/user/{userId}/queue/conv-removed` (`{conversationId, reason}`) — xem SOCKET_EVENTS.md §2 + §3.7/3.8. KHÔNG đụng schema, không migration mới. BLOCKING cho BE W7-D2 implementation: tên code mới, response shape mới, broadcast ordering mới. |
 | 2026-04-21 | v1.0.0-w7 | **W7-D1 Group Chat backfill** (major bump — W3 spec gốc yêu cầu group chat + role management nhưng đã skip, W7 backfill). Schema V7 migration (`V7__add_group_chat.sql`): CREATE TYPE `member_role` ENUM ('OWNER','ADMIN','MEMBER'); ALTER `conversation_members` ADD role + joined_at; ALTER `conversations` ADD name + avatar_file_id (FK → files) + owner_id (FK → users, ON DELETE SET NULL); CHECK constraint `chk_group_metadata` (GROUP phải có name+owner, ONE_ON_ONE phải cả 2 NULL); indexes conv+role, conv+joined_at, owner (partial). `POST /api/conversations` update payload: ONE_ON_ONE dùng `targetUserId` (backward-compat với memberIds[0]); GROUP bắt buộc `name` (1-100) + `memberIds` (2-49) + `avatarFileId` optional. Response shape thêm `owner: {userId, username, fullName} | null`. 7 endpoints mới: PATCH /{id} (rename/avatar, OWNER+ADMIN), DELETE /{id} (soft delete, OWNER only), POST /{id}/members (add batch ≤10, OWNER+ADMIN), DELETE /{id}/members/{uid} (kick, role matrix), POST /{id}/leave (any member, OWNER triggers auto-transfer), PATCH /{id}/members/{uid}/role (ADMIN↔MEMBER, OWNER only), POST /{id}/transfer-owner (OWNER only, atomic 2-way swap). Auto-transfer rule khi OWNER leave: oldest-ADMIN → oldest-MEMBER → NULL (empty group preserved V1, monitoring alert >7d). Error codes mới (15): GROUP_NAME_REQUIRED, GROUP_MEMBERS_MIN, GROUP_MEMBERS_MAX, GROUP_MEMBER_NOT_FOUND, GROUP_AVATAR_NOT_OWNED, GROUP_AVATAR_NOT_IMAGE, GROUP_MEMBER_ALREADY_IN, GROUP_FULL, NOT_GROUP, INSUFFICIENT_PERMISSION, CANNOT_REMOVE_OWNER, CANNOT_REMOVE_SELF, INVALID_ROLE_CHANGE. Appendix Authorization Matrix. ADR-020 (Group Chat Architecture). WARNINGS W7-1/2/3 (auto-transfer race, empty group edge case, max-50 enforcement with FOR UPDATE lock). |

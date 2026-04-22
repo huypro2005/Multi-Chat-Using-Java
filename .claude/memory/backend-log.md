@@ -16,6 +16,28 @@
 
 ---
 
+## [W7-D5] feat: read receipt (markRead, unreadCount, READ_UPDATED broadcast) — 293 tests pass (11 new)
+
+**Scope**: Read receipt — STOMP handler, ReadReceiptService, MessageBroadcaster (READ_UPDATED), MemberDto.lastReadMessageId, unreadCount real compute in ConversationService.
+
+**Files created**:
+- `V12__add_last_read_message_id.sql`: FK constraint + index (entity field đã có từ trước).
+- `ReadReceiptPayload.java`: record `{messageId}`.
+- `ReadUpdatedEvent.java`: record `{convId, userId, messageId, readAt}`.
+- `ReadReceiptService.java`: markRead — NOT_MEMBER(403), MSG_NOT_FOUND(404), MSG_NOT_IN_CONV(403), forward-only idempotent (compare createdAt), AFTER_COMMIT publish event.
+- `ChatReadReceiptHandler.java`: @MessageMapping("/conv.{convId}.read"), rate limit 1/2s Redis INCR TTL 2s, @MessageExceptionHandler → /queue/errors {operation:"READ"}, no ACK.
+- `ReadReceiptTest.java`: 11 unit tests (Mockito).
+
+**Files modified**:
+- `MessageBroadcaster.java`: thêm `onReadUpdated()` — AFTER_COMMIT broadcast READ_UPDATED tới `/topic/conv.{convId}`.
+- `MemberDto.java`: thêm `UUID lastReadMessageId`, `MemberDto.from()` include field.
+- `MessageRepository.java`: thêm `countUnread(convId, lastReadId)` native query — LEAST(COUNT(*), 99), filter type!='SYSTEM' + deleted_at IS NULL, NULL-safe lastReadId subquery.
+- `ConversationService.java`: inject MessageRepository, `buildSummary()` compute real unreadCount từ `myMembership.getLastReadMessageId()`.
+
+**Pre-existing failures** (NOT caused by this commit): MemberManagementTest, GroupConversationTest, SystemMessageTest, FileControllerTest, FileVisibilityTest, ConversationControllerTest (8/20) — tất cả fail ở `setUp()` với `InvalidDataAccessApiUsage: Could not deserialize Map<String,Object>` từ Message.systemMetadata H2 column khi tests share in-memory DB state.
+
+---
+
 ## [W7-D4-fix] feat: Model 4 hybrid file visibility (ADR-021) + default avatars + ADMIN permission — 282 tests pass (12 new)
 
 **Scope**: Hybrid file visibility + default avatars + regression tests cho ADMIN add members.

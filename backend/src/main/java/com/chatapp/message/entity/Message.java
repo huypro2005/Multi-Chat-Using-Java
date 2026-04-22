@@ -1,6 +1,7 @@
 package com.chatapp.message.entity;
 
 import com.chatapp.conversation.entity.Conversation;
+import com.chatapp.message.converter.JsonMapConverter;
 import com.chatapp.message.enums.MessageType;
 import com.chatapp.user.entity.User;
 import jakarta.persistence.*;
@@ -9,8 +10,6 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-import com.chatapp.message.converter.JsonMapConverter;
-import jakarta.persistence.Convert;
 
 import java.time.OffsetDateTime;
 import java.util.Map;

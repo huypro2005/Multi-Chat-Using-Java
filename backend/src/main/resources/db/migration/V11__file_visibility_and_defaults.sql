@@ -15,7 +15,7 @@
 --
 -- PHYSICAL FILES:
 --  - default/avatar_default.jpg và default/group_default.jpg PHẢI copy tay
---    vào ${STORAGE_PATH}/default/ sau deploy. Migration chỉ tạo DB pointer.
+--    vào STORAGE_LOCAL_BASE_PATH/default/ sau deploy. Migration chỉ tạo DB pointer.
 --  - BE startup log WARN (soft check) nếu disk thiếu.
 -- ============================================================
 

@@ -3,6 +3,8 @@ package com.chatapp.message.repository;
 import com.chatapp.message.entity.Message;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.OffsetDateTime;
@@ -57,4 +59,40 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
             UUID conversationId,
             OffsetDateTime after,
             Pageable pageable);
+
+    /**
+     * Count unread messages cho caller theo lastReadMessageId.
+     *
+     * Logic (contract v1.4.0-w7-read):
+     * - KHÔNG count SYSTEM messages (lý do: system events fire nhiều trong group active —
+     *   count vào unread làm badge phình vô nghĩa; user không cần đánh dấu đọc system notice).
+     * - KHÔNG count soft-deleted messages (deletedAt IS NOT NULL).
+     * - lastReadId IS NULL → count tất cả (user chưa từng đọc conv này).
+     * - lastReadId NOT NULL → count messages có createdAt > created_at của lastRead message.
+     *
+     * Native query: JPQL không support subquery trong WHERE một cách portable với H2/Postgres.
+     * CAST pattern: tránh H2 không nhận UUID type parameter trong native query.
+     *
+     * Cap (contract rule 5): gọi LEAST để tránh badge "9999+" gây shock UX.
+     * Cap value 99: trả về min(actual_count, 99) — FE hiển thị "99+".
+     *
+     * @param convId     UUID string của conversation.
+     * @param lastReadId UUID string của last read message; null nếu chưa đánh dấu.
+     * @return count capped at 99 (per contract v1.4.0-w7-read rule 5).
+     */
+    @Query(value = """
+            SELECT LEAST(COUNT(*), 99) FROM messages
+            WHERE conversation_id = CAST(:convId AS UUID)
+              AND deleted_at IS NULL
+              AND type != 'SYSTEM'
+              AND (
+                :lastReadId IS NULL
+                OR created_at > (
+                    SELECT created_at FROM messages WHERE id = CAST(:lastReadId AS UUID)
+                )
+              )
+            """, nativeQuery = true)
+    long countUnread(
+            @Param("convId") String convId,
+            @Param("lastReadId") String lastReadId);
 }

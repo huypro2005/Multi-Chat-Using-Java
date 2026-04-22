@@ -14,6 +14,7 @@ import com.chatapp.file.constant.FileConstants;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.message.constant.SystemEventType;
+import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.message.service.SystemMessageService;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
@@ -44,6 +45,7 @@ public class ConversationService {
     private final ConversationMemberRepository memberRepository;
     private final UserRepository userRepository;
     private final FileRecordRepository fileRecordRepository;
+    private final MessageRepository messageRepository;
     private final EntityManager entityManager;
     private final StringRedisTemplate redisTemplate;
     private final ApplicationEventPublisher eventPublisher;
@@ -406,6 +408,19 @@ public class ConversationService {
             mutedUntil = myMembership.getMutedUntil().toInstant();
         }
 
+        // unreadCount: server-computed per-caller (v1.4.0-w7-read)
+        // Count non-SYSTEM, non-deleted messages after caller's lastReadMessageId.createdAt.
+        // lastReadMessageId = null → count all (user has never marked read in this conv).
+        int unreadCount = 0;
+        try {
+            UUID lastReadMsgId = myMembership != null ? myMembership.getLastReadMessageId() : null;
+            String lastReadIdStr = lastReadMsgId != null ? lastReadMsgId.toString() : null;
+            unreadCount = (int) messageRepository.countUnread(convId.toString(), lastReadIdStr);
+        } catch (Exception e) {
+            // Fail-graceful: log warn, return 0 to avoid breaking list endpoint
+            log.warn("[UNREAD] Failed to compute unreadCount for convId={}: {}", convId, e.getMessage());
+        }
+
         return new ConversationSummaryDto(
                 convId,
                 type,
@@ -415,7 +430,7 @@ public class ConversationService {
                 displayAvatarUrl,
                 (int) memberCount,
                 lastMessageAt,
-                0, // V1 placeholder
+                unreadCount,
                 mutedUntil
         );
     }

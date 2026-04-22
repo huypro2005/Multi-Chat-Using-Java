@@ -2,8 +2,10 @@ import { useRef, useState, useEffect, useMemo, useCallback } from 'react'
 import { RefreshCw, MessageCircle } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import { useMessages } from '../hooks'
+import { useConversation } from '@/features/conversations/hooks'
 import MessageItem from './MessageItem'
 import { SystemMessage } from './SystemMessage'
+import { useAutoMarkRead } from '../hooks/useAutoMarkRead'
 import type { MessageDto } from '@/types/message'
 
 // ---------------------------------------------------------------------------
@@ -107,6 +109,10 @@ export function MessagesList({ conversationId, onReply }: Props) {
     isFetchingNextPage,
   } = useMessages(conversationId)
 
+  // Fetch conversation detail (cached — no extra network call if ConversationDetailPage already fetched)
+  const { data: conversation } = useConversation(conversationId)
+  const members = conversation?.members ?? []
+
   // Infinite query cache stores pages as:
   // - pages[0]   = newest window
   // - pages[1..] = older windows loaded by fetchNextPage()
@@ -115,6 +121,18 @@ export function MessagesList({ conversationId, onReply }: Props) {
     if (!data) return []
     return [...data.pages].reverse().flatMap((page) => page.items)
   }, [data])
+
+  // Last confirmed message id (non-optimistic, non-system) for auto mark-read
+  const lastMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.type !== 'SYSTEM' && !m.clientTempId) return m.id
+    }
+    return undefined
+  }, [messages])
+
+  // Auto send read receipt when viewing conversation
+  useAutoMarkRead(conversationId, lastMessageId)
 
   // --- Scroll refs ---
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -214,6 +232,8 @@ export function MessagesList({ conversationId, onReply }: Props) {
             isOwn={isOwn ?? false}
             showAvatar={shouldShowAvatar(messages, idx)}
             onReply={onReply}
+            members={members}
+            currentUserId={user?.id ?? ''}
           />
         )
       })}
