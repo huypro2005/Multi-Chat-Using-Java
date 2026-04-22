@@ -7,6 +7,7 @@
 
 ## Recent activity
 
+- [W7-D4] SYSTEM messages (BE service + FE render + i18n + migration V10) — APPROVED. 270 tests pass (+13 SystemMessageTest). 8 event types wired đúng, ordering OWNER_TRANSFERRED trước MEMBER_LEFT verified (SM-06), avatar-only no-rename verified (SM-11), edit/delete guard trước anti-enum (SM-12/13). 5 patterns mới + 2 pitfalls documented.
 - [Reviewer] review W7-D3 FE group UI: FAIL→PASS. Blocking: GROUP_DELETED payload drift (FE typedef vs BE event). Fix: read from cache. 5 warnings logged.
 - [W6-D5] Security audit 18/18 PASS. Memory consolidate reviewer-log 689→313. WARNINGS W6-1/2/4 resolved.
 
@@ -21,6 +22,54 @@ Key decisions: ...
 Patterns confirmed: ...
 Contract: ...
 ```
+
+---
+
+## [W7-D4] SYSTEM messages (service + render + immutability guard) — APPROVED
+
+Verdict: APPROVED (0 BLOCKING). 270/270 tests pass (+13 SystemMessageTest SM-01 → SM-13). Contract v1.2.0-w7-system + SOCKET v1.7-w7 finalized.
+
+Blocking: none.
+
+Checklist PASS:
+- BE hook đủ 8 event: GROUP_CREATED (createGroup), MEMBER_ADDED per added user (addMembers, skipped excluded — verified SM-03), MEMBER_REMOVED (removeMember, insert BEFORE hard-delete), MEMBER_LEFT (leaveGroup non-OWNER), OWNER_TRANSFERRED (autoTransferred=true leave, =false transfer), ROLE_PROMOTED/DEMOTED (changeRole), GROUP_RENAMED (updateGroupInfo chỉ khi changes.containsKey("name")).
+- Event order OWNER leave: OWNER_TRANSFERRED TRƯỚC MEMBER_LEFT verified SM-06 (createdAt ASC comparator).
+- Avatar-only PATCH NO system message (SM-11 verify count=0).
+- Immutability guard: editViaStomp + deleteViaStomp check `type == SYSTEM` TRƯỚC anti-enum merge, throw SYSTEM_MESSAGE_NOT_EDITABLE / SYSTEM_MESSAGE_NOT_DELETABLE (403) — verified SM-12/13.
+- REST endpoints: KHÔNG có PUT/DELETE /api/messages/{id} trong codebase (tất cả edit/delete qua STOMP), nên không có gap — document trong contract "nếu endpoint này có triển khai sau".
+- V10 migration: sender_id DROP NOT NULL (SYSTEM không có user sender); CHECK chk_message_system_consistency (type=SYSTEM ↔ system_event_type non-null AND sender_id null); JSONB column systemMetadata qua JsonMapConverter (portable H2/Postgres).
+- MessageDto extend systemEventType + systemMetadata (2 optional field, null cho mọi TEXT/IMAGE/FILE). MessageMapper.toDto pass through 2 field.
+- FE SystemMessage component: centered italic pill, role="status", 8 event type i18n vi-VN + fallback "(sự kiện hệ thống)" + substitution "Bạn"/"bạn" actor/target.
+- FE dispatcher: MessagesList branch theo type; MessageItem memo wrapper cũng dispatch (defense-in-depth). MessageItemInner tách khỏi wrapper tránh hooks order violation.
+- FE null-safety audit sau đổi sender: MessageDto | null: useConvSubscription.appendToCache (self-dedup), MessagesList.shouldShowAvatar, isOwn, ReplyPreviewBox (sender?.fullName ?? 'hệ thống'), MessageItem avatar + sender name hiding. Toàn bộ dùng optional chaining.
+- FE ACK error handler: SYSTEM_MESSAGE_NOT_EDITABLE toast + clear edit marker defensive; SYSTEM_MESSAGE_NOT_DELETABLE toast without revert (SYSTEM không có deleteStatus).
+- SystemMessageService reuse existing MessageCreatedEvent + @TransactionalEventListener(AFTER_COMMIT) — KHÔNG tạo STOMP event type mới.
+- @Transactional propagation REQUIRED (default) → join caller TX → atomic với action.
+
+Key decisions:
+- Anti-enum exception documented cho SYSTEM_MESSAGE_NOT_EDITABLE/NOT_DELETABLE — vì SYSTEM visible cho mọi member, distinguish không leak. Error code rõ giúp FE toast đúng ngữ cảnh.
+- JsonMapConverter thay @JdbcTypeCode(SqlTypes.JSON) — H2 test mode fail với JdbcTypeCode (String→Map parse error), converter portable qua Jackson direct.
+- content="" (empty string) thay vì null cho SYSTEM — FE render từ metadata, không cần null check content.
+- sender=null thay vì "system user" UUID đặc biệt — tránh maintain row đặc biệt trong users table.
+- V1 index idx_messages_system_type commented (V2 add khi query pattern emerge).
+
+Patterns confirmed (5 mới):
+1. Server-generated message subtype service (SystemMessageService.createAndPublish)
+2. Immutable message subtype guard trước anti-enum (exception documented)
+3. JPA JsonMapConverter cho JSONB portable H2/Postgres (PITFALL + FIX)
+4. Dispatcher pattern cho message polymorphism (list-level + component-level defense)
+5. SYSTEM message i18n với "Bạn"/"bạn" role substitution + fallback unknown enum
+
+Pitfalls documented:
+1. Mockito Boolean.FALSE default + Jackson bool unbox (assert wrapped không primitive)
+2. Optional field defensive in TypeScript union (audit tất cả `.sender.` usage khi DTO lỏng)
+
+Warnings non-blocking:
+- SystemMessageService.createAndPublish gọi `messageRepository.findById(message.getId()).orElseThrow()` reload sau save — redundant DB roundtrip (save() đã trả managed entity). Micro-optimization V2.
+- `SystemMessageService` @Transactional trên class + method — redundant annotation nhưng không sai. Clean up nếu refactor.
+- Flyway migration V10 comment "Relax sender_id nullable" — documented rationale rõ, keep.
+
+Contract: API v1.2.0-w7-system + SOCKET v1.7-w7 finalized. Full changelog table cập nhật trong cả 2 file.
 
 ---
 
