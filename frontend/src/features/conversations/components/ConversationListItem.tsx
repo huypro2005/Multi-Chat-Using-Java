@@ -22,14 +22,15 @@ const ConversationListItem = memo(function ConversationListItem({
   onClick,
 }: Props) {
   const initial = conversation.displayName.charAt(0).toUpperCase()
-  const protectedAvatarUrl = useProtectedObjectUrl(
-    conversation.displayAvatarUrl?.startsWith('/api/files/')
-      ? conversation.displayAvatarUrl
-      : null,
-  )
-  const displayAvatarSrc = conversation.displayAvatarUrl?.startsWith('/api/files/')
-    ? protectedAvatarUrl
-    : conversation.displayAvatarUrl
+  const isPublicUrl = !!conversation.displayAvatarUrl && conversation.displayAvatarUrl.endsWith('/public')
+  const isPrivateUrl = !!conversation.displayAvatarUrl &&
+    conversation.displayAvatarUrl.startsWith('/api/files/') && !isPublicUrl
+  const protectedAvatarUrl = useProtectedObjectUrl(isPrivateUrl ? conversation.displayAvatarUrl : null)
+  const displayAvatarSrc = isPublicUrl
+    ? conversation.displayAvatarUrl
+    : isPrivateUrl
+      ? protectedAvatarUrl
+      : conversation.displayAvatarUrl
 
   return (
     <button

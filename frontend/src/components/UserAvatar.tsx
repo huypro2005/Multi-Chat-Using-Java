@@ -7,15 +7,17 @@ interface Props {
 
 /**
  * UserAvatar — shared component dùng cho search results, conversation list, v.v.
- * - Có avatarUrl → <img>
- * - Không có avatarUrl → div với initial letter, bg-indigo-100 text-indigo-700
+ * - Public URL (/public suffix, ADR-021): native <img src> — no auth needed.
+ * - Private URL (/api/files/{id} without /public): useProtectedObjectUrl hook.
+ * - Không có avatarUrl → div với initial letter.
  */
 export default function UserAvatar({ user, size = 40 }: Props) {
   const initial = (user.fullName ?? user.username ?? '?').charAt(0).toUpperCase()
-  const shouldUseProtectedFetch =
-    !!user.avatarUrl && user.avatarUrl.startsWith('/api/files/')
-  const protectedUrl = useProtectedObjectUrl(shouldUseProtectedFetch ? user.avatarUrl : null)
-  const avatarSrc = shouldUseProtectedFetch ? protectedUrl : user.avatarUrl
+  const isPublicUrl = !!user.avatarUrl && user.avatarUrl.endsWith('/public')
+  const isPrivateUrl = !!user.avatarUrl && user.avatarUrl.startsWith('/api/files/') && !isPublicUrl
+
+  const protectedUrl = useProtectedObjectUrl(isPrivateUrl ? user.avatarUrl : null)
+  const avatarSrc = isPublicUrl ? user.avatarUrl : isPrivateUrl ? protectedUrl : user.avatarUrl
 
   if (avatarSrc) {
     return (

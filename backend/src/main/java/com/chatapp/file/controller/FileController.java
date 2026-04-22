@@ -193,9 +193,9 @@ public class FileController {
         String safeFilename = sanitizeForHeader(record.getOriginalName());
         String contentDisposition = "inline; filename=\"" + safeFilename + "\"";
 
+        // Omit Content-Length: DB size=0 for seeded defaults — let chunked transfer handle it.
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(record.getMime()))
-                .contentLength(record.getSizeBytes())
                 .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition)
                 .header("X-Content-Type-Options", "nosniff")
                 .eTag("\"" + record.getId() + "\"")
