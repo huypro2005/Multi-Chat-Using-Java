@@ -1279,13 +1279,15 @@ FE dùng TypeScript tương đương (tính các boolean này từ `members[].ro
 
 ---
 
-## Messages API (v0.6.0-messages-rest — W4-D1)
+## Messages API (v0.6.0-messages-rest — W4-D1, updated v1.2.0-w7-system for SYSTEM messages)
 
 Base URL: `/api/conversations/{convId}/messages`
 
 Auth: Bearer JWT bắt buộc cho tất cả endpoints.
 
 ### MessageDto shape
+
+> **Historical note**: Đây là shape gốc W4-D1. Xem shape **finalized** (với `attachments` W6-D1 và `systemEventType` / `systemMetadata` W7-D4) ở mục **"MessageDto — finalized shape (v1.2.0-w7-system)"** bên dưới. Shape đầy đủ là nguồn duy nhất FE/BE dùng.
 
 ```json
 {
@@ -1608,7 +1610,7 @@ Field notes:
 
 > **Breaking change for MessageDto**: Thêm field `attachments` vào mọi MessageDto (REST response, STOMP ACK, STOMP broadcast MESSAGE_CREATED). `content` trở thành nullable khi có attachments (1 trong 2 phải non-null). BE + FE phải deploy đồng bộ.
 
-**Updated MessageDto shape**:
+**Updated MessageDto shape (W6-D1)**:
 
 ```json
 {
@@ -1652,6 +1654,188 @@ Field rules:
   - `SYSTEM` do server phát (không có attachment).
 
 **BE mapper note** (BLOCKING): `MessageMapper.toDto` phải load `attachments` qua `JOIN message_attachments ORDER BY display_order ASC`, map từng row sang `FileDto` reuse `FileMapper`. Khi message `deletedAt != null` → strip cả `content=null` (đã có từ W5-D3) VÀ `attachments=[]` (W6-D1 mới). Lý do: attachment cũng là "content" đã xoá, không leak URL sau delete.
+
+---
+
+### MessageDto — finalized shape (v1.2.0-w7-system, W7-D4)
+
+> **Additive change** (non-breaking cho TEXT path): thêm 2 optional field `systemEventType` + `systemMetadata` vào MessageDto để support SYSTEM messages (in-chat system notifications cho group events: create, add/remove/leave member, role change, owner transfer, rename). Hai field này `null` với mọi message `type != 'SYSTEM'`. BE + FE deploy đồng bộ — BE không broadcast SYSTEM frame cho tới khi FE có handler; FE luôn tolerant 2 field mới = null.
+
+**Finalized MessageDto shape** (áp dụng cho MỌI endpoint/event serialize message — REST list, REST POST response, STOMP ACK SEND, STOMP broadcast `MESSAGE_CREATED`, STOMP broadcast `MESSAGE_UPDATED` reuse minimal, STOMP ACK EDIT, STOMP ACK DELETE (chỉ echo id+metadata)):
+
+```json
+{
+  "id": "uuid",
+  "conversationId": "uuid",
+  "sender": {
+    "id": "uuid",
+    "username": "string",
+    "fullName": "string",
+    "avatarUrl": "string|null"
+  } | null,
+  "type": "TEXT | IMAGE | FILE | SYSTEM",
+  "content": "string | null",
+  "attachments": [ FileDto, ... ],
+  "replyToMessage": {
+    "id": "uuid",
+    "senderName": "string",
+    "contentPreview": "string | null",
+    "deletedAt": "ISO8601 | null"
+  } | null,
+  "editedAt": "ISO8601 | null",
+  "deletedAt": "ISO8601 | null",
+  "deletedBy": "uuid | null",
+  "systemEventType": "GROUP_CREATED | MEMBER_ADDED | MEMBER_REMOVED | MEMBER_LEFT | ROLE_PROMOTED | ROLE_DEMOTED | OWNER_TRANSFERRED | GROUP_RENAMED | null",
+  "systemMetadata": { ... } | null,
+  "createdAt": "ISO8601 UTC"
+}
+```
+
+**Rule về `type`**:
+- `type == 'TEXT' | 'IMAGE' | 'FILE'` → user-generated message. `systemEventType` và `systemMetadata` PHẢI `null`. `sender` non-null.
+- `type == 'SYSTEM'` → server-generated system message. `content` PHẢI là empty string `""` (KHÔNG null — FE không cần `content ?? ''` check, đồng bộ với render từ metadata). `systemEventType` non-null (1 trong 8 enum). `systemMetadata` non-null JSONB object theo shape per-event-type bên dưới. `attachments` = `[]` (empty array — SYSTEM không có attachment V1). `replyToMessage` = `null` (SYSTEM không reply). `editedAt` = `null` (SYSTEM không editable — xem §Validation). `deletedAt` = `null` thông thường (xem §Validation cho delete rules). `sender`:
+  - V1 choice: `sender` = `null` (SYSTEM không thuộc về user nào — actor nằm trong `systemMetadata.actorId`/`actorName`). FE render "avatar system icon" fallback khi `sender == null && type == 'SYSTEM'`.
+  - *Rationale*: tránh phải maintain "system user" UUID đặc biệt trong `users` table. `sender_id` column trong DB nullable cho SYSTEM (xem Migration V10).
+
+**`systemEventType` enum** (8 values, W7-D4):
+
+| Enum | Trigger (service method commit xong) | `systemMetadata` shape |
+|------|--------------------------------------|------------------------|
+| `GROUP_CREATED` | `createGroup` (POST /api/conversations type=GROUP) | `{actorId, actorName}` |
+| `MEMBER_ADDED` | `addMembers` (POST /api/conversations/{id}/members) — **1 SYSTEM msg per user added**; KHÔNG tạo cho user trong `skipped[]` | `{actorId, actorName, targetId, targetName}` |
+| `MEMBER_REMOVED` | `removeMember` (DELETE /api/conversations/{id}/members/{uid}, KICKED) | `{actorId, actorName, targetId, targetName}` |
+| `MEMBER_LEFT` | `leaveGroup` (POST /api/conversations/{id}/leave) — non-OWNER path, hoặc OWNER leave sau khi auto-transfer xong | `{actorId, actorName}` (actor == target khi LEFT — không cần target fields) |
+| `ROLE_PROMOTED` | `changeRole` (PATCH /role) với `newRole='ADMIN'` và `oldRole='MEMBER'` | `{actorId, actorName, targetId, targetName}` |
+| `ROLE_DEMOTED` | `changeRole` với `newRole='MEMBER'` và `oldRole='ADMIN'` | `{actorId, actorName, targetId, targetName}` |
+| `OWNER_TRANSFERRED` | (a) `transferOwner` explicit (POST /transfer-owner) → `autoTransferred: false`; (b) `leaveGroup` OWNER path auto-transfer → `autoTransferred: true` | `{actorId, actorName, targetId, targetName, autoTransferred}` |
+| `GROUP_RENAMED` | `updateGroupInfo` (PATCH /api/conversations/{id}) khi `name` thực sự đổi (trim-compare `oldName != newName`) | `{actorId, actorName, oldValue, newValue}` |
+
+**`systemMetadata` field dictionary** (JSONB object — field nào không apply cho event type thì bỏ hẳn khỏi JSON, KHÔNG để `null`):
+
+| Field | Type | Khi nào có | Ý nghĩa |
+|-------|------|-----------|---------|
+| `actorId` | `uuid` | Luôn luôn | User thực hiện action. Bắt buộc cho MỌI system event. |
+| `actorName` | `string` | Luôn luôn | Snapshot của `actor.fullName` tại thời điểm event fire — để render đúng cả khi actor đổi tên/xoá account sau đó. |
+| `targetId` | `uuid` | `MEMBER_ADDED`, `MEMBER_REMOVED`, `ROLE_PROMOTED`, `ROLE_DEMOTED`, `OWNER_TRANSFERRED` | User bị action. Với `MEMBER_LEFT` và `GROUP_CREATED` / `GROUP_RENAMED` không có target — bỏ field. |
+| `targetName` | `string` | Cùng điều kiện với `targetId` | Snapshot `target.fullName` tại thời điểm event. |
+| `oldValue` | `string` | `GROUP_RENAMED` | Tên cũ của group (trim-ed). |
+| `newValue` | `string` | `GROUP_RENAMED` | Tên mới của group (trim-ed). |
+| `autoTransferred` | `boolean` | `OWNER_TRANSFERRED` | `true` = auto-transfer từ OWNER leave; `false` = explicit /transfer-owner. FE dùng để chọn copy khác nhau. |
+
+**Ví dụ** (SYSTEM message trả về từ `GET /api/conversations/{id}/messages`):
+
+```json
+{
+  "id": "a6f2...",
+  "conversationId": "c1...",
+  "sender": null,
+  "type": "SYSTEM",
+  "content": "",
+  "attachments": [],
+  "replyToMessage": null,
+  "editedAt": null,
+  "deletedAt": null,
+  "deletedBy": null,
+  "systemEventType": "MEMBER_ADDED",
+  "systemMetadata": {
+    "actorId": "a1...",
+    "actorName": "Nguyễn Văn A",
+    "targetId": "b2...",
+    "targetName": "Trần Thị B"
+  },
+  "createdAt": "2026-04-22T10:30:00Z"
+}
+```
+
+**BE publish policy** (BLOCKING cho W7-D4 implementation):
+
+Tạo SYSTEM message trong CÙNG transaction với service method, hoặc trong `@TransactionalEventListener(BEFORE_COMMIT)` → save row `messages` → publish `MessageCreatedEvent(convId, systemDto)` → reuse existing broadcast flow (`AFTER_COMMIT` listener broadcast `/topic/conv.{id}` với envelope `{type: "MESSAGE_CREATED", payload: MessageDto}`). **KHÔNG tạo event `/topic/conv.{id}` type mới** — SYSTEM piggyback trên MESSAGE_CREATED.
+
+Mapping service method → SYSTEM event(s):
+
+| Service method | SYSTEM event(s) fire | Ordering constraint |
+|----------------|---------------------|---------------------|
+| `createGroup` | 1× `GROUP_CREATED` | Fire sau khi group + members batch insert commit. |
+| `addMembers` | N× `MEMBER_ADDED` (N = số user trong `added[]`) | 1 SYSTEM msg per added user. KHÔNG tạo cho user trong `skipped[]`. Order insert ≈ order add (không strict). |
+| `removeMember` | 1× `MEMBER_REMOVED` | Sau khi delete `conversation_members` row, trước khi return 204. |
+| `leaveGroup` non-OWNER path | 1× `MEMBER_LEFT` | Sau khi delete row. |
+| `leaveGroup` OWNER auto-transfer path | 1× `OWNER_TRANSFERRED` (autoTransferred=true) **TRƯỚC** 1× `MEMBER_LEFT` | Ordering BLOCKING: OWNER_TRANSFERRED ghi vào messages table với `createdAt` SỚM HƠN (hoặc bằng) MEMBER_LEFT. BE dùng 2 call `messageRepository.save()` liên tiếp — row order bảo đảm bởi sequence/timestamp. |
+| `leaveGroup` OWNER empty-group path | Không fire SYSTEM message | OWNER leave một mình (không có member khác) → endpoint trả 400 `CANNOT_LEAVE_EMPTY_GROUP` (xem PATCH /leave). Không có action hợp lệ = không có system msg. |
+| `changeRole` MEMBER→ADMIN | 1× `ROLE_PROMOTED` | Sau khi update role row. No-op (newRole == currentRole) → KHÔNG fire (đồng bộ với broadcast ROLE_CHANGED silent idempotent). |
+| `changeRole` ADMIN→MEMBER | 1× `ROLE_DEMOTED` | Tương tự. |
+| `transferOwner` | 1× `OWNER_TRANSFERRED` (autoTransferred=false) | Sau atomic 2-way swap commit. |
+| `updateGroupInfo` — name thực sự đổi | 1× `GROUP_RENAMED` | Chỉ fire khi `oldName.trim() != newName.trim()`. No-op rename (gửi PATCH cùng name) → không fire. |
+| `updateGroupInfo` — avatar only | **KHÔNG** fire SYSTEM message (V1) | Rationale: avatar change ít meaningful cho chat history; CONVERSATION_UPDATED đã notify UI. V2 xem xét `GROUP_AVATAR_CHANGED` nếu user feedback. |
+
+**Race / ordering note**:
+- `MEMBER_REMOVED` SYSTEM message INSERT phải xảy ra TRƯỚC khi `conversation_members` row bị xoá — nếu không, user bị kick sẽ thấy `createdAt` của system msg sau khi đã bị remove → UX confusing. Hiện implement: service order = (1) insert system msg, (2) delete member row, (3) commit. Broadcast MEMBER_REMOVED event (`/topic` §3.8 SOCKET_EVENTS.md) vẫn broadcast TRƯỚC hard-delete (như quy tắc W7-D2).
+- `GROUP_CREATED` SYSTEM msg là first message của group → `createdAt` ≤ `createdAt` của mọi user message tiếp theo (bảo đảm bởi timestamp đơn điệu từ DB).
+- Khi có concurrent actions (2 OWNER/ADMIN cùng add member khác nhau), order system messages theo `createdAt` DB — không cần FE handler special, MESSAGE_CREATED append bình thường.
+
+---
+
+### Validation rules cho SYSTEM messages (W7-D4)
+
+SYSTEM messages có ràng buộc đặc biệt khác TEXT:
+
+1. **NOT editable by user** — bất kỳ endpoint edit nào (STOMP `/app/conv.{id}.edit`, REST `PUT /api/messages/{id}` nếu tồn tại fallback) gặp message với `type='SYSTEM'` → reject:
+   - STOMP: ERROR payload `{operation: "EDIT", clientId, code: "SYSTEM_MESSAGE_NOT_EDITABLE", error: "Tin nhắn hệ thống không thể chỉnh sửa"}`.
+   - REST `PUT /api/messages/{id}` (nếu endpoint này có triển khai sau): **403** `SYSTEM_MESSAGE_NOT_EDITABLE`.
+   - Anti-enum: check `type='SYSTEM'` TRƯỚC anti-enum `MSG_NOT_FOUND` merge (vì FE cần error code riêng để toast "tin hệ thống"). Ngoại lệ documented của anti-enum rule.
+
+2. **NOT deletable by user** — endpoint delete (`/app/conv.{id}.delete`, REST `DELETE /api/messages/{id}`) gặp message với `type='SYSTEM'` → reject:
+   - STOMP: ERROR payload `{operation: "DELETE", clientId, code: "SYSTEM_MESSAGE_NOT_DELETABLE", error: "Tin nhắn hệ thống không thể xóa"}`.
+   - REST: **403** `SYSTEM_MESSAGE_NOT_DELETABLE`.
+   - *Reasoning*: SYSTEM messages là audit trail của group actions — cho user xóa sẽ mất lịch sử ai làm gì. V2 xem xét OWNER privilege xóa system msg nếu có complaint.
+
+3. **SYSTEM count towards unread** — FE counter `conversation.unreadCount` (từ `GET /api/conversations`) BAO GỒM SYSTEM messages chưa read. BE tính unread bằng số messages sau `member.lastReadAt` trong conv, KHÔNG filter `type`. Rationale: system events (user vừa join, OWNER transfer) là info user cần biết; khác với typing indicator (transient, không count).
+
+4. **SYSTEM không có reactions V1** — endpoint reactions (nếu triển khai ở phase sau) phải reject SYSTEM với `SYSTEM_MESSAGE_NO_REACTIONS` (scope sau — không trong v1.2.0-w7-system). Hiện tại V1 không có reactions endpoint.
+
+5. **SYSTEM không thể quote/reply** — STOMP SEND với `replyToMessageId` trỏ tới SYSTEM message → anti-enum fallback `VALIDATION_FAILED` (không leak "đây là system msg"). Rationale: user không nên reply vào "X đã được thêm vào nhóm".
+
+6. **Pagination inclusion** — `GET /api/conversations/{id}/messages` (cả `cursor` và `after` pagination) TRẢ VỀ SYSTEM messages inline với TEXT messages, sort theo `createdAt` ASC. FE render inline (xem `SOCKET_EVENTS.md` §3e.1 Render SYSTEM contract). `limit=50` count SYSTEM giống TEXT — không skip.
+
+---
+
+### Migration V10 — SYSTEM messages columns (W7-D4)
+
+**Flyway migration**: `V10__add_system_message_fields.sql`
+
+```sql
+-- V10: Add SYSTEM message support (W7-D4)
+-- Adds 2 nullable columns to messages table. Existing rows: both NULL (TEXT/IMAGE/FILE).
+
+ALTER TABLE messages
+  ADD COLUMN system_event_type VARCHAR(50),
+  ADD COLUMN system_metadata JSONB;
+
+-- Relax sender_id nullable for SYSTEM messages (server-generated, no user actor in sender slot).
+-- Existing NOT NULL constraint on sender_id drop → allow NULL.
+ALTER TABLE messages
+  ALTER COLUMN sender_id DROP NOT NULL;
+
+-- CHECK constraint: type='SYSTEM' requires system_event_type non-null;
+-- type != 'SYSTEM' requires system_event_type IS NULL (prevent dirty data).
+ALTER TABLE messages
+  ADD CONSTRAINT chk_message_system_consistency
+  CHECK (
+    (type = 'SYSTEM' AND system_event_type IS NOT NULL AND sender_id IS NULL)
+    OR
+    (type != 'SYSTEM' AND system_event_type IS NULL AND system_metadata IS NULL)
+  );
+
+-- Index cho query "system events in conv" (V2 có thể cần — V1 không query riêng).
+-- CREATE INDEX idx_messages_system_type ON messages (conversation_id, system_event_type)
+--   WHERE type = 'SYSTEM';
+-- V1 comment out — chưa cần, thêm sau nếu query pattern xuất hiện.
+```
+
+**Migration notes**:
+- Cả 2 column nullable cho backward-compat — rows cũ (pre-W10) giữ NULL cho cả 2 field.
+- `sender_id` chuyển từ NOT NULL → nullable. Existing data không affect (all sender_id hiện non-null). BE code paths load `sender` phải handle null: `MessageMapper.toDto` check `message.sender == null ? null : UserSummaryDto.from(message.sender)`.
+- CHECK constraint catch dirty write: nếu BE vô tình INSERT với `type='TEXT'` + `system_event_type='X'`, DB reject → handler trả 500 INTERNAL (bug cần fix, không phải user-facing error).
+- `systemMetadata` JSONB (không TEXT) → query field bên trong sau này (V2) bằng `->>` operator. V1 BE serialize Java `Map<String, Object>` → PostgreSQL JSONB qua Hibernate UserType hoặc `@JdbcTypeCode(SqlTypes.JSON)` (Hibernate 6+).
 
 ---
 
@@ -1708,10 +1892,22 @@ Field rules:
 
 ---
 
+### Error codes mới (v1.2.0-w7-system)
+
+| Code | HTTP (REST) / STOMP ERROR | Điều kiện |
+|------|---------------------------|-----------|
+| `SYSTEM_MESSAGE_NOT_EDITABLE` | 403 / STOMP | User attempt edit message với `type='SYSTEM'`. SYSTEM messages immutable. |
+| `SYSTEM_MESSAGE_NOT_DELETABLE` | 403 / STOMP | User attempt delete message với `type='SYSTEM'`. SYSTEM messages không xóa được V1. |
+
+> **Ngoại lệ anti-enum** (documented): hai code này KHÔNG merge vào `MSG_NOT_FOUND` dù tương đồng với quy tắc "non-owner edit/delete → MSG_NOT_FOUND". Lý do: SYSTEM message visible cho mọi member (không hidden), việc distinguish `SYSTEM_MESSAGE_NOT_EDITABLE` vs `MSG_NOT_FOUND` không leak gì (FE biết đây là SYSTEM từ `type` field của message cache). Error code rõ ràng giúp FE toast message đúng ngữ cảnh ("tin hệ thống không sửa được" vs "tin không tồn tại").
+
+---
+
 ## Changelog
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-22 | v1.2.0-w7-system | **W7-D4 SYSTEM messages**. Extend `MessageDto` (additive, non-breaking cho TEXT path) với 2 optional field: `systemEventType` (enum 8 values: `GROUP_CREATED`, `MEMBER_ADDED`, `MEMBER_REMOVED`, `MEMBER_LEFT`, `ROLE_PROMOTED`, `ROLE_DEMOTED`, `OWNER_TRANSFERRED`, `GROUP_RENAMED`) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). `sender` = `null` cho SYSTEM (rationale: tránh maintain "system user" row). `content` = `""` (empty string, không null — FE render từ metadata). `type='SYSTEM'` bổ sung vào type enum cho type field của message (trước đây đã declare trong enum nhưng chưa có usage). **BE publish policy**: sau khi service method commit xong → save SYSTEM row + publish `MessageCreatedEvent` → reuse broadcast pipe (`/topic/conv.{id}` MESSAGE_CREATED) — KHÔNG tạo STOMP event type mới. Mapping service → SYSTEM: `createGroup` → 1× GROUP_CREATED; `addMembers` → N× MEMBER_ADDED (per user added, KHÔNG tạo cho skipped); `removeMember` → MEMBER_REMOVED; `leaveGroup` non-OWNER → MEMBER_LEFT; `leaveGroup` OWNER auto-transfer → OWNER_TRANSFERRED (autoTransferred=true) **TRƯỚC** MEMBER_LEFT (ordering BLOCKING); `changeRole` → ROLE_PROMOTED hoặc ROLE_DEMOTED (no-op silent không fire); `transferOwner` explicit → OWNER_TRANSFERRED (autoTransferred=false); `updateGroupInfo` rename → GROUP_RENAMED (chỉ nếu `oldName != newName` trim-compare); `updateGroupInfo` avatar-only → **KHÔNG** fire SYSTEM msg V1 (CONVERSATION_UPDATED đã notify UI; V2 xem xét). **Validation**: SYSTEM NOT editable → `SYSTEM_MESSAGE_NOT_EDITABLE` (403 REST / STOMP); NOT deletable → `SYSTEM_MESSAGE_NOT_DELETABLE` (403 REST / STOMP); count towards unread; không reactions V1; không quote/reply (`VALIDATION_FAILED`); pagination GET /messages trả inline với TEXT. **Migration V10** (`V10__add_system_message_fields.sql`): ADD COLUMN `system_event_type VARCHAR(50)` + `system_metadata JSONB`; ALTER `sender_id` DROP NOT NULL (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency` (type='SYSTEM' ↔ system_event_type non-null AND sender_id null; type!=SYSTEM ↔ cả 2 system field null). 2 error codes mới (ngoại lệ anti-enum documented). KHÔNG đổi shape REST POST /messages (endpoint deprecated, không ảnh hưởng). KHÔNG đổi STOMP SEND payload — client vẫn không gửi SYSTEM (server-only). BLOCKING cho BE W7-D4: order OWNER_TRANSFERRED trước MEMBER_LEFT trong leaveGroup OWNER path; insert SYSTEM msg TRƯỚC delete member row trong removeMember; CHECK constraint catch dirty INSERT. |
 | 2026-04-21 | v1.1.0-w7 | **W7-D2 contract finalize** cho 5 member management endpoints trước BE/FE implement. Changes vs v1.0.0-w7: (1) **POST /{id}/members** response đổi từ single-shape `{added[]}` → partial-success `{added[], skipped[{userId, reason: ALREADY_MEMBER|USER_NOT_FOUND|BLOCKED}]}` — 201 Created thay vì 200; status 201 khi có ít nhất 1 added hoặc khi tất cả skipped (vẫn success). `GROUP_FULL` → `MEMBER_LIMIT_EXCEEDED` (409, details `{currentCount, attemptedCount, limit: 50}`, all-or-nothing). `GROUP_MEMBER_NOT_FOUND` + `GROUP_MEMBER_ALREADY_IN` deprecated — chuyển sang per-user `skipped[].reason`. (2) **DELETE /{id}/members/{uid}**: `CANNOT_REMOVE_SELF` → `CANNOT_KICK_SELF`; `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`; `CANNOT_REMOVE_OWNER` removed (merged vào INSUFFICIENT_PERMISSION). Thêm user-specific broadcast `/user/{kickedUserId}/queue/conv-removed` với `{conversationId, reason: "KICKED"}`. (3) **POST /{id}/leave**: thêm `CANNOT_LEAVE_EMPTY_GROUP` (400) khi OWNER là member duy nhất — V1 không auto-delete. OWNER leave auto-transfer nay fire `OWNER_TRANSFERRED` (với `autoTransferred: true`) thay vì `ROLE_CHANGED` — consistent với `/transfer-owner`. Thứ tự broadcast: OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED. `MEMBER_REMOVED` với `reason: "LEFT"` có `removedBy: null` (khác KICKED: non-null). `SELECT FOR UPDATE` trên caller row chống race W7-1. (4) **PATCH /role**: response bỏ `oldRole`, thêm `changedBy: {userId, username}`. No-op (newRole == currentRole) → 200 OK idempotent KHÔNG broadcast. `INVALID_ROLE_CHANGE` tách thành 3 codes: `INVALID_ROLE` (400, body `role=OWNER`), `CANNOT_CHANGE_OWNER_ROLE` (403, target=OWNER), silent-idempotent cho no-op. `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`. (5) **POST /transfer-owner**: body field `newOwnerId` → `targetUserId` (rename for consistency path `/members/{userId}`). Response `oldOwner` → `previousOwner` + thêm `username`. `INVALID_ROLE_CHANGE` → `CANNOT_TRANSFER_TO_SELF`. Broadcast OWNER_TRANSFERRED với `autoTransferred: false`. (6) **Authorization matrix appendix** finalize + thêm "error code → HTTP status cheat sheet". (7) **Add user-specific STOMP destinations** `/user/{userId}/queue/conv-added` (ConversationSummaryDto) + `/user/{userId}/queue/conv-removed` (`{conversationId, reason}`) — xem SOCKET_EVENTS.md §2 + §3.7/3.8. KHÔNG đụng schema, không migration mới. BLOCKING cho BE W7-D2 implementation: tên code mới, response shape mới, broadcast ordering mới. |
 | 2026-04-21 | v1.0.0-w7 | **W7-D1 Group Chat backfill** (major bump — W3 spec gốc yêu cầu group chat + role management nhưng đã skip, W7 backfill). Schema V7 migration (`V7__add_group_chat.sql`): CREATE TYPE `member_role` ENUM ('OWNER','ADMIN','MEMBER'); ALTER `conversation_members` ADD role + joined_at; ALTER `conversations` ADD name + avatar_file_id (FK → files) + owner_id (FK → users, ON DELETE SET NULL); CHECK constraint `chk_group_metadata` (GROUP phải có name+owner, ONE_ON_ONE phải cả 2 NULL); indexes conv+role, conv+joined_at, owner (partial). `POST /api/conversations` update payload: ONE_ON_ONE dùng `targetUserId` (backward-compat với memberIds[0]); GROUP bắt buộc `name` (1-100) + `memberIds` (2-49) + `avatarFileId` optional. Response shape thêm `owner: {userId, username, fullName} | null`. 7 endpoints mới: PATCH /{id} (rename/avatar, OWNER+ADMIN), DELETE /{id} (soft delete, OWNER only), POST /{id}/members (add batch ≤10, OWNER+ADMIN), DELETE /{id}/members/{uid} (kick, role matrix), POST /{id}/leave (any member, OWNER triggers auto-transfer), PATCH /{id}/members/{uid}/role (ADMIN↔MEMBER, OWNER only), POST /{id}/transfer-owner (OWNER only, atomic 2-way swap). Auto-transfer rule khi OWNER leave: oldest-ADMIN → oldest-MEMBER → NULL (empty group preserved V1, monitoring alert >7d). Error codes mới (15): GROUP_NAME_REQUIRED, GROUP_MEMBERS_MIN, GROUP_MEMBERS_MAX, GROUP_MEMBER_NOT_FOUND, GROUP_AVATAR_NOT_OWNED, GROUP_AVATAR_NOT_IMAGE, GROUP_MEMBER_ALREADY_IN, GROUP_FULL, NOT_GROUP, INSUFFICIENT_PERMISSION, CANNOT_REMOVE_OWNER, CANNOT_REMOVE_SELF, INVALID_ROLE_CHANGE. Appendix Authorization Matrix. ADR-020 (Group Chat Architecture). WARNINGS W7-1/2/3 (auto-transfer race, empty group edge case, max-50 enforcement with FOR UPDATE lock). |
 | 2026-04-21 | v0.9.5-files-extended | **W6-D4-extend**: Mở rộng MIME whitelist từ 5 type (image jpeg/png/webp/gif + pdf) sang 14 type chia 2 group: Group A (images, gallery 1–5/message) + Group B (non-image: pdf, docx, xlsx, pptx, doc, xls, ppt, txt, zip, 7z — exactly 1/message). Documented blacklist (executables, scripts, XSS vectors svg/html). Mixing rules formalized: Group A only OR exactly 1 Group B; trộn → `MSG_ATTACHMENTS_MIXED`; 2+ Group B → `MSG_ATTACHMENTS_MIXED`. Thêm field `iconType` vào `FileDto`: enum `IMAGE | PDF | WORD | EXCEL | POWERPOINT | TEXT | ARCHIVE | GENERIC` server-computed từ MIME (FE dùng để chọn icon, không bind MIME trực tiếp → dễ extend whitelist sau). Thumbnail endpoint vẫn chỉ phục vụ Group A images; Group B trả 404 (FE fallback `iconType` icon static). Update `MSG_ATTACHMENTS_TOO_MANY` chỉ cho >5 images; >1 Group B fall vào `MSG_ATTACHMENTS_MIXED`. WARNINGS thêm office macro risk + blacklist maintenance cycle. |

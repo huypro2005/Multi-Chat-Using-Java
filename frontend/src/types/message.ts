@@ -40,10 +40,37 @@ export interface AttachmentDto {
   expiresAt: string // ISO8601
 }
 
+// ---------------------------------------------------------------------------
+// SYSTEM message metadata (v1.2.0-w7-system)
+// Only present when type == 'SYSTEM'. All fields optional (apply-or-absent per event type).
+// ---------------------------------------------------------------------------
+export const SystemEventType = {
+  GROUP_CREATED: 'GROUP_CREATED',
+  MEMBER_ADDED: 'MEMBER_ADDED',
+  MEMBER_REMOVED: 'MEMBER_REMOVED',
+  MEMBER_LEFT: 'MEMBER_LEFT',
+  ROLE_PROMOTED: 'ROLE_PROMOTED',
+  ROLE_DEMOTED: 'ROLE_DEMOTED',
+  OWNER_TRANSFERRED: 'OWNER_TRANSFERRED',
+  GROUP_RENAMED: 'GROUP_RENAMED',
+} as const
+export type SystemEventType = (typeof SystemEventType)[keyof typeof SystemEventType]
+
+export interface SystemMetadata {
+  actorId?: string
+  actorName?: string
+  targetId?: string
+  targetName?: string
+  oldValue?: string
+  newValue?: string
+  autoTransferred?: boolean
+}
+
 export interface MessageDto {
   id: string
   conversationId: string
-  sender: MessageSenderDto
+  // null khi type == 'SYSTEM' (SYSTEM messages không có user sender)
+  sender: MessageSenderDto | null
   type: MessageType
   content: string | null // null khi message đã bị soft-delete (deletedAt != null) hoặc attachment-only
   attachments: AttachmentDto[] // luôn array, không null (BE trả [] nếu không có)
@@ -53,6 +80,9 @@ export interface MessageDto {
   // Soft-delete fields — set bởi BE khi xoá, null nếu chưa bị xoá
   deletedAt: string | null // ISO8601
   deletedBy: string | null // UUID string
+  // SYSTEM message fields (v1.2.0-w7-system) — null cho mọi type != 'SYSTEM'
+  systemEventType?: SystemEventType | null
+  systemMetadata?: SystemMetadata | null
   // Optimistic / Path B fields — chỉ set trên client, không có trong REST response
   clientTempId?: string
   status?: 'sending' | 'sent' | 'failed'

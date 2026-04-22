@@ -253,6 +253,21 @@ export function useAckErrorSubscription(): void {
                 return
               }
 
+              // SYSTEM message protection: toast + do not mark edit error on UI
+              if (code === 'SYSTEM_MESSAGE_NOT_EDITABLE') {
+                toast.error('Không thể sửa tin nhắn hệ thống')
+                // Clear any edit marker if present (defensive)
+                queryClient.setQueryData(
+                  messageKeys.all(entry.convId),
+                  (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) =>
+                    patchMessageById(old, entry.messageId, {
+                      failureCode: undefined,
+                      failureReason: undefined,
+                    }),
+                )
+                break
+              }
+
               // Mark edit error — content vẫn là bản DB cũ (không bị lệch) vì
               // ta không patch content trong optimistic step.
               queryClient.setQueryData(
@@ -272,6 +287,12 @@ export function useAckErrorSubscription(): void {
               if (!deleteEntry) return
 
               deleteTimerRegistry.clear(clientId)
+
+              // SYSTEM message protection: toast without reverting UI (SYSTEM never had deleteStatus)
+              if (code === 'SYSTEM_MESSAGE_NOT_DELETABLE') {
+                toast.error('Không thể xóa tin nhắn hệ thống')
+                break
+              }
 
               // Revert deleteStatus — xoá thất bại, user có thể thử lại
               queryClient.setQueryData(

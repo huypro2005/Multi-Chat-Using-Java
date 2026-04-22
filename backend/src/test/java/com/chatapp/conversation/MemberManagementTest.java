@@ -5,6 +5,7 @@ import com.chatapp.conversation.entity.ConversationMember;
 import com.chatapp.conversation.enums.MemberRole;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
+import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -67,6 +68,7 @@ class MemberManagementTest {
     @Autowired private UserAuthProviderRepository userAuthProviderRepository;
     @Autowired private ConversationRepository conversationRepository;
     @Autowired private ConversationMemberRepository memberRepository;
+    @Autowired private MessageRepository messageRepository;
 
     @MockBean private StringRedisTemplate redisTemplate;
     @MockBean private FirebaseAuth firebaseAuth;
@@ -78,6 +80,7 @@ class MemberManagementTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
+        messageRepository.deleteAll();  // delete messages first (FK → conversations)
         memberRepository.deleteAll();
         conversationRepository.deleteAll();
         userAuthProviderRepository.deleteAll();

@@ -12,6 +12,8 @@ import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
+import com.chatapp.message.constant.SystemEventType;
+import com.chatapp.message.service.SystemMessageService;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
 import jakarta.persistence.EntityManager;
@@ -44,6 +46,7 @@ public class ConversationService {
     private final EntityManager entityManager;
     private final StringRedisTemplate redisTemplate;
     private final ApplicationEventPublisher eventPublisher;
+    private final SystemMessageService systemMessageService;
 
     private static final Set<String> IMAGE_MIMES = Set.of(
             "image/jpeg", "image/png", "image/webp", "image/gif"
@@ -271,6 +274,15 @@ public class ConversationService {
         entityManager.clear();
         Conversation saved = conversationRepository.findByIdWithMembers(conversation.getId())
                 .orElseThrow();
+
+        // W7-D4: GROUP_CREATED system message — fire within same @Transactional
+        systemMessageService.createAndPublish(
+                conversation.getId(),
+                currentUser.getId(),
+                SystemEventType.GROUP_CREATED,
+                Collections.emptyMap()
+        );
+
         return ConversationDto.from(saved, this::resolveUser);
     }
 
@@ -452,6 +464,7 @@ public class ConversationService {
 
         // Build changes map + apply updates
         Map<String, Object> changes = new LinkedHashMap<>();
+        String oldGroupName = conv.getName(); // capture before any update (for GROUP_RENAMED metadata)
 
         if (req.hasName()) {
             String newName = req.getName();
@@ -505,6 +518,19 @@ public class ConversationService {
         }
 
         conversationRepository.save(conv);
+
+        // W7-D4: GROUP_RENAMED system message — only when name actually changed
+        if (changes.containsKey("name")) {
+            Map<String, Object> renamedMeta = new java.util.HashMap<>();
+            renamedMeta.put("oldValue", oldGroupName != null ? oldGroupName : "");
+            renamedMeta.put("newValue", changes.get("name").toString());
+            systemMessageService.createAndPublish(
+                    conversationId,
+                    currentUserId,
+                    SystemEventType.GROUP_RENAMED,
+                    renamedMeta
+            );
+        }
 
         // Publish event — broadcaster fire AFTER_COMMIT qua /topic/conv.{id}
         User actor = userRepository.findById(currentUserId).orElse(null);

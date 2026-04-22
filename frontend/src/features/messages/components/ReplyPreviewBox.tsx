@@ -31,7 +31,7 @@ export function ReplyPreviewBox({ replyingTo, onCancel }: Props) {
     >
       <div className="min-w-0 flex-1">
         <div className="text-xs font-bold text-blue-600">
-          Trả lời {replyingTo.sender.fullName}
+          Trả lời {replyingTo.sender?.fullName ?? 'hệ thống'}
         </div>
         <div className="text-sm text-gray-500 italic truncate max-w-xs">
           {replyingTo.deletedAt

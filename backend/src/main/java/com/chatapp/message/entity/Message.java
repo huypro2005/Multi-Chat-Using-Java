@@ -9,8 +9,11 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import com.chatapp.message.converter.JsonMapConverter;
+import jakarta.persistence.Convert;
 
 import java.time.OffsetDateTime;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -90,6 +93,27 @@ public class Message {
      */
     @Column(name = "deleted_by")
     private UUID deletedBy;
+
+    /**
+     * SYSTEM message event type (e.g. GROUP_CREATED, MEMBER_ADDED).
+     * Null for all non-SYSTEM messages. Non-null required for SYSTEM messages.
+     * See SystemEventType constants.
+     */
+    @Column(name = "system_event_type", length = 50)
+    private String systemEventType;
+
+    /**
+     * SYSTEM message metadata — structured JSONB containing actorId, actorName,
+     * and optional fields like targetId, targetName, oldValue, newValue, autoTransferred.
+     * Null for non-SYSTEM messages. Non-null for SYSTEM messages.
+     *
+     * Uses JsonMapConverter (portable H2/PostgreSQL): H2 stores as VARCHAR, Postgres as JSONB.
+     * @JdbcTypeCode(SqlTypes.JSON) was replaced because H2 returns JSON as a raw String
+     * rather than parsed JSON, causing MismatchedInputException in Hibernate 6 (W7-D4 pitfall).
+     */
+    @Convert(converter = JsonMapConverter.class)
+    @Column(name = "system_metadata")
+    private Map<String, Object> systemMetadata;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

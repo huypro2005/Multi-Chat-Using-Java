@@ -3,6 +3,7 @@ import { RefreshCw, MessageCircle } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import { useMessages } from '../hooks'
 import MessageItem from './MessageItem'
+import { SystemMessage } from './SystemMessage'
 import type { MessageDto } from '@/types/message'
 
 // ---------------------------------------------------------------------------
@@ -15,12 +16,16 @@ interface Props {
 
 // ---------------------------------------------------------------------------
 // shouldShowAvatar — hiện avatar khi đầu nhóm hoặc gap > 1 phút
+// SYSTEM messages (sender=null) không có avatar → luôn trả false
 // ---------------------------------------------------------------------------
 function shouldShowAvatar(messages: MessageDto[], index: number): boolean {
-  if (index === 0) return true
   const curr = messages[index]
+  // SYSTEM messages không có sender → không bao giờ hiện avatar
+  if (!curr.sender) return false
+  if (index === 0) return true
   const prev = messages[index - 1]
-  if (curr.sender.id !== prev.sender.id) return true
+  // Nếu message trước là SYSTEM hoặc sender khác → hiện avatar
+  if (!prev.sender || curr.sender.id !== prev.sender.id) return true
   const gap = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime()
   return gap > 60_000
 }
@@ -190,12 +195,23 @@ export function MessagesList({ conversationId, onReply }: Props) {
 
       {/* Message list */}
       {messages.map((msg, idx) => {
-        const isOwn = msg.sender.id === user?.id
+        // SYSTEM messages: render centered pill, skip avatar/actions/reply logic
+        if (msg.type === 'SYSTEM') {
+          return (
+            <SystemMessage
+              key={msg.id}
+              message={msg}
+              currentUserId={user?.id ?? ''}
+            />
+          )
+        }
+
+        const isOwn = msg.sender?.id === user?.id
         return (
           <MessageItem
             key={msg.id}
             message={msg}
-            isOwn={isOwn}
+            isOwn={isOwn ?? false}
             showAvatar={shouldShowAvatar(messages, idx)}
             onReply={onReply}
           />

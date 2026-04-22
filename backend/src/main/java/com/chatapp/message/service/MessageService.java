@@ -422,9 +422,17 @@ public class MessageService {
             return;
         }
 
-        // Step 4: Load message — anti-enumeration: merge all not-found/not-owner cases → MSG_NOT_FOUND
+        // Step 4: Load message — check SYSTEM BEFORE anti-enum (contract §Validation W7-D4)
         Message message = messageRepository.findById(payload.messageId()).orElse(null);
 
+        // Guard: SYSTEM messages are immutable — check type BEFORE anti-enum merge
+        if (message != null && MessageType.SYSTEM == message.getType()) {
+            throw new AppException(HttpStatus.FORBIDDEN, "SYSTEM_MESSAGE_NOT_EDITABLE",
+                    "Tin nhắn hệ thống không thể chỉnh sửa",
+                    Map.of("clientEditId", clientEditId));
+        }
+
+        // Anti-enumeration: merge null / wrong conv / not owner / soft-deleted → MSG_NOT_FOUND
         if (message == null
                 || !message.getConversation().getId().equals(convId)
                 || message.getSender() == null
@@ -533,9 +541,17 @@ public class MessageService {
             return;
         }
 
-        // Step 4: Load message — anti-enumeration: merge all not-found/not-owner/already-deleted → MSG_NOT_FOUND
+        // Step 4: Load message — check SYSTEM BEFORE anti-enum (contract §Validation W7-D4)
         Message message = messageRepository.findById(payload.messageId()).orElse(null);
 
+        // Guard: SYSTEM messages cannot be deleted — check type BEFORE anti-enum merge
+        if (message != null && MessageType.SYSTEM == message.getType()) {
+            throw new AppException(HttpStatus.FORBIDDEN, "SYSTEM_MESSAGE_NOT_DELETABLE",
+                    "Tin nhắn hệ thống không thể xóa",
+                    Map.of("clientDeleteId", clientDeleteId));
+        }
+
+        // Anti-enumeration: merge null / wrong conv / not owner / already-deleted → MSG_NOT_FOUND
         if (message == null
                 || !message.getConversation().getId().equals(convId)
                 || message.getSender() == null

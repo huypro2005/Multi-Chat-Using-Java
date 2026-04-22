@@ -3,12 +3,14 @@ import { format } from 'date-fns'
 import { AlertCircle, Check, Loader2, RotateCcw, X } from 'lucide-react'
 import UserAvatar from '@/components/UserAvatar'
 import type { MessageDto, MessageListResponse } from '@/types/message'
+import { useAuthStore } from '@/stores/authStore'
 import { useQueryClient } from '@tanstack/react-query'
 import { messageKeys } from '@/features/conversations/queryKeys'
 import { useSendMessage } from '../hooks'
 import { useEditMessage } from '../useEditMessage'
 import { useDeleteMessage } from '../useDeleteMessage'
 import { MessageActions } from './MessageActions'
+import { SystemMessage } from './SystemMessage'
 import { DeletedMessagePlaceholder } from './DeletedMessagePlaceholder'
 import { ReplyQuote } from './ReplyQuote'
 import { AttachmentGallery } from '@/features/files/components/AttachmentGallery'
@@ -214,9 +216,10 @@ function InlineEditArea({
 }
 
 // ---------------------------------------------------------------------------
-// MessageItem — bọc React.memo vì list có thể 100+ items
+// MessageItemInner — the actual bubble render for TEXT/IMAGE/FILE messages
+// Separated so MessageItem can dispatch SYSTEM early without hook order issues.
 // ---------------------------------------------------------------------------
-const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply }: Props) {
+function MessageItemInner({ message, isOwn, showAvatar, onReply }: Props) {
   const [isEditing, setIsEditing] = useState(false)
 
   // Dùng clientTempId để detect optimistic; nếu không có → dùng heuristic id
@@ -382,14 +385,14 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
     <div className="flex justify-start items-end gap-1.5 group">
       {/* Avatar — chỉ hiện khi showAvatar=true, giữ chỗ khi false */}
       <div className="flex-shrink-0 self-end" style={{ width: 28, height: 28 }}>
-        {showAvatar ? (
+        {showAvatar && message.sender ? (
           <UserAvatar user={message.sender} size={28} />
         ) : null}
       </div>
 
       <div className="max-w-xs sm:max-w-sm md:max-w-md">
         {/* Sender name — chỉ hiện khi showAvatar=true */}
-        {showAvatar && (
+        {showAvatar && message.sender && (
           <p className="text-xs text-gray-500 mb-0.5 ml-1">{message.sender.fullName}</p>
         )}
 
@@ -457,6 +460,29 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
         {timeLabel}
       </span>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// MessageItem — dispatcher (memo wrapper)
+// Routes SYSTEM messages to SystemMessage; all others to MessageItemInner.
+// Defense-in-depth: MessagesList already handles the split, but this guards
+// against standalone usage.
+// ---------------------------------------------------------------------------
+const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply }: Props) {
+  const currentUserId = useAuthStore((s) => s.user?.id ?? '')
+
+  if (message.type === 'SYSTEM') {
+    return <SystemMessage message={message} currentUserId={currentUserId} />
+  }
+
+  return (
+    <MessageItemInner
+      message={message}
+      isOwn={isOwn}
+      showAvatar={showAvatar}
+      onReply={onReply}
+    />
   )
 })
 

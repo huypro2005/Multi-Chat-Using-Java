@@ -4,6 +4,7 @@ import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.enums.ConversationType;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
+import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,6 +81,9 @@ class ConversationControllerTest {
     @Autowired
     private ConversationMemberRepository conversationMemberRepository;
 
+    @Autowired
+    private MessageRepository messageRepository;
+
     @MockBean
     private StringRedisTemplate redisTemplate;
 
@@ -92,6 +96,7 @@ class ConversationControllerTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
+        messageRepository.deleteAll();  // delete messages first (FK → conversations)
         conversationMemberRepository.deleteAll();
         conversationRepository.deleteAll();
         userAuthProviderRepository.deleteAll();

@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.6-w7_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`_
+_Version: v1.7-w7_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`; **W7-D4 SYSTEM messages** piggyback trên MESSAGE_CREATED với `type: "SYSTEM"` + `systemEventType` + `systemMetadata`_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -85,11 +85,15 @@ Tất cả events trên `/topic/conv.{convId}` có envelope chung:
 
 Trường `type` luôn UPPERCASE snake-like. `payload` là object tự do, shape quy định theo từng `type`.
 
-### 3.1 MESSAGE_CREATED (Tuần 4)
+### 3.1 MESSAGE_CREATED (Tuần 4, extended W6-D1 + W7-D4)
 
-**Trigger**: BE broadcast sau khi `POST /api/conversations/{id}/messages` save thành công.
+**Trigger**:
+- User message: BE broadcast sau khi `POST /api/conversations/{id}/messages` hoặc STOMP `/app/conv.{id}.message` save thành công (`@TransactionalEventListener(AFTER_COMMIT)`).
+- **SYSTEM message (W7-D4 new)**: BE broadcast sau khi service method group-management (create/add/remove/leave/role/transfer/rename) commit xong — save SYSTEM row + publish `MessageCreatedEvent(convId, systemDto)` → cùng pipe broadcast `MESSAGE_CREATED`. **KHÔNG event type mới.**
 
-**Payload**: `MessageDto` — **shape IDENTICAL với REST response** của `POST /api/conversations/{convId}/messages` trong `API_CONTRACT.md` mục v0.6.0-messages-rest (+ v0.9.0-files cập nhật).
+**Payload**: `MessageDto` — **shape IDENTICAL với REST response** của `POST /api/conversations/{convId}/messages` và GET list (`API_CONTRACT.md` mục "MessageDto — finalized shape (v1.2.0-w7-system)").
+
+**Envelope (TEXT/IMAGE/FILE — user message)**:
 
 ```json
 {
@@ -124,20 +128,69 @@ Trường `type` luôn UPPERCASE snake-like. `payload` là object tự do, shape
     "editedAt": null,
     "deletedAt": null,
     "deletedBy": null,
+    "systemEventType": null,
+    "systemMetadata": null,
     "createdAt": "2026-04-20T10:00:00Z"
   }
 }
 ```
 
-> **Rule vàng**: BE PHẢI dùng cùng 1 `MessageMapper` / serialization cho cả REST response và broadcast payload. Nếu shape lệch → FE sẽ mismatch runtime. Reviewer sẽ check điều này ở W4-D3 review. W6-D1: `attachments` là array (có thể rỗng `[]`), **không bao giờ `null`** — FE không phải check null.
+**Envelope (SYSTEM — server-generated, W7-D4)**:
+
+```json
+{
+  "type": "MESSAGE_CREATED",
+  "payload": {
+    "id": "uuid",
+    "conversationId": "uuid",
+    "sender": null,
+    "type": "SYSTEM",
+    "content": "",
+    "attachments": [],
+    "replyToMessage": null,
+    "editedAt": null,
+    "deletedAt": null,
+    "deletedBy": null,
+    "systemEventType": "GROUP_CREATED | MEMBER_ADDED | MEMBER_REMOVED | MEMBER_LEFT | ROLE_PROMOTED | ROLE_DEMOTED | OWNER_TRANSFERRED | GROUP_RENAMED",
+    "systemMetadata": {
+      "actorId": "uuid",
+      "actorName": "string",
+      "targetId": "uuid (optional)",
+      "targetName": "string (optional)",
+      "oldValue": "string (optional — chỉ GROUP_RENAMED)",
+      "newValue": "string (optional — chỉ GROUP_RENAMED)",
+      "autoTransferred": "boolean (optional — chỉ OWNER_TRANSFERRED)"
+    },
+    "createdAt": "2026-04-22T10:30:00Z"
+  }
+}
+```
+
+**Field rules khi `type == 'SYSTEM'`**:
+- `sender` **luôn `null`** (xem rationale API_CONTRACT.md "finalized shape"). FE pattern `payload.sender?.fullName` phải null-safe.
+- `content` **luôn `""`** (empty string, KHÔNG null). FE render từ `systemMetadata` theo `systemEventType` — không hiển thị `content`.
+- `attachments` **luôn `[]`**. SYSTEM không có file đính kèm V1.
+- `replyToMessage` **luôn `null`**.
+- `editedAt`, `deletedAt`, `deletedBy` **luôn `null`** (SYSTEM không editable / không deletable — xem API_CONTRACT.md validation rules).
+- `systemEventType` là 1 trong 8 enum chính xác (uppercase, snake-case). FE dùng để branch copy render.
+- `systemMetadata` object (JSONB từ DB). Field apply-or-absent: field nào không thuộc event type → key KHÔNG có trong JSON (không `null`). Xem API_CONTRACT.md "systemMetadata field dictionary" để biết chính xác field nào có cho event nào.
+
+> **Rule vàng**: BE PHẢI dùng cùng 1 `MessageMapper` / serialization cho cả REST response và broadcast payload. Nếu shape lệch → FE sẽ mismatch runtime. Reviewer sẽ check điều này ở W4-D3 review (cho TEXT) và W7-D4 review (cho SYSTEM). W6-D1: `attachments` là array (có thể rỗng `[]`), **không bao giờ `null`** — FE không phải check null.
 
 **FE action khi nhận MESSAGE_CREATED**:
 1. Parse `frame.body` → `WsEvent<MessageDto>`.
-2. **Dedupe check** (BẮT BUỘC): kiểm tra `messages.some(m => m.id === payload.id)`. Nếu `true` → skip hoàn toàn (idempotent).
+2. **Dedupe check** (BẮT BUỘC): kiểm tra `messages.some(m => m.id === payload.id)`. Nếu `true` → skip hoàn toàn (idempotent). Áp dụng cho cả SYSTEM (tuy SYSTEM không có tempId nhưng id server-generated nên dedupe theo id vẫn chuẩn).
 3. Nếu chưa có → append vào React Query cache `messageKeys.all(convId)`.
-4. Invalidate / update `useConversations` list để sidebar cập nhật `lastMessageAt` + re-sort.
+4. Invalidate / update `useConversations` list để sidebar cập nhật `lastMessageAt` + re-sort. **SYSTEM cũng update `lastMessageAt`** (ví dụ "Nhóm vừa được tạo" là activity mới nhất của conv).
+5. **Branch render theo `type`**:
+   - `TEXT | IMAGE | FILE` → `<MessageItem>` bình thường.
+   - `SYSTEM` → `<SystemMessageItem>` full-width italic gray (xem §3e.1 SYSTEM render contract).
 
-> **Tại sao BẮT BUỘC dedupe?**: Sender A gửi REST `POST /messages` → React Query `onSuccess` set message vào cache với id thật → BE ALSO broadcast MESSAGE_CREATED qua `/topic/conv.{id}` → A nhận broadcast với CÙNG id → nếu không dedupe sẽ duplicate UI. Sender B (receiver) nhận broadcast → không có trong cache → append bình thường.
+> **Tại sao BẮT BUỘC dedupe?**: Sender A gửi REST `POST /messages` → React Query `onSuccess` set message vào cache với id thật → BE ALSO broadcast MESSAGE_CREATED qua `/topic/conv.{id}` → A nhận broadcast với CÙNG id → nếu không dedupe sẽ duplicate UI. Sender B (receiver) nhận broadcast → không có trong cache → append bình thường. Áp dụng cho SYSTEM để defensive.
+
+**Ordering với group management events** (W7-D4):
+- SYSTEM `MEMBER_REMOVED` MESSAGE_CREATED broadcast **SAU** event `MEMBER_REMOVED` (§3.8) hay **TRƯỚC**? → **KHÔNG strict ordering** giữa 2 loại frame (SYSTEM msg vs member event) — FE handler cả 2 idempotent. Nhưng BE dùng cùng 1 `@TransactionalEventListener(AFTER_COMMIT)` queue → actual order thường là: (1) MEMBER_REMOVED event frame, (2) SYSTEM MESSAGE_CREATED frame. FE không rely on order, chỉ cần cả 2 handler hoàn thành trong cùng tick.
+- SYSTEM `OWNER_TRANSFERRED` + SYSTEM `MEMBER_LEFT` trong OWNER leave auto-transfer: 2 SYSTEM messages fire tuần tự, ORDER BLOCKING — OWNER_TRANSFERRED message có `createdAt` < MEMBER_LEFT message. FE cache append theo `createdAt` ASC → render đúng thứ tự. (Xem §3e.1 cho chi tiết render "X chuyển quyền cho Y" rồi "X đã rời nhóm".)
 
 ### 3.2 MESSAGE_UPDATED _(Tuần 5 — W5-D2)_
 
@@ -515,15 +568,44 @@ FE xử lý tuần tự: sau #1 cache có new OWNER ở vị trí đầu, sau #2
 4. Nếu không đang mở conv → toast nhẹ "Nhóm {conv.name} đã bị xoá" (persist 5s), FE remove sidebar item.
 5. Unsubscribe `/topic/conv.{id}` nếu còn subscribe (cleanup effect trong ConversationDetailPage sẽ tự lo nếu navigate).
 
-### 3.12 SYSTEM_MESSAGE _(Tuần 7 — W7-D4 placeholder)_
+### 3.12 SYSTEM_MESSAGE _(Tuần 7 — W7-D4 finalized in v1.7-w7)_
 
-**Status**: Ngày 1 chưa implement. Placeholder cho W7-D4.
+**Status**: Finalized. SYSTEM messages fire qua MESSAGE_CREATED event (§3.1) với `type: "SYSTEM"` — KHÔNG phải event STOMP type mới. Xem shape đầy đủ tại §3.1 "Envelope (SYSTEM)".
 
-**Kế hoạch**: Khi group event (rename, add member, kick, role change, transfer owner) xảy ra, BE có thể insert 1 row `messages` với `type='SYSTEM'`, `sender_id=NULL` (hoặc system user UUID đặc biệt), `content=` predefined template (ví dụ `"X đã thêm Y vào nhóm"`). Content format dùng placeholder `{actor}`, `{target}` để FE i18n sau.
+**Chuyển biến từ placeholder**:
+- v1.5-w7 / v1.6-w7: placeholder. Ngày 1-3 chưa implement — chỉ broadcast CONVERSATION_UPDATED / MEMBER_ADDED / etc để update UI member list.
+- v1.7-w7 (W7-D4): SYSTEM messages chính thức — insert row `messages` với `type='SYSTEM'`, `sender_id=NULL`, `content=''`, fields mới `system_event_type` + `system_metadata` (JSONB). Broadcast qua existing MESSAGE_CREATED pipe.
 
-Broadcast sẽ dùng event type `MESSAGE_CREATED` hiện có (§3.1) với `type: "SYSTEM"` — không phải event mới. Không broadcast thêm event riêng vì 2 event (CONVERSATION_UPDATED + MESSAGE_CREATED system) sẽ confuse FE order.
+**Trigger list** (reuse §3.1 MESSAGE_CREATED):
 
-**Rationale tách Ngày 4**: Ngày 1 focus schema + basic endpoints. System message format + i18n + FE render cần design kỹ hơn (avoid xung đột với MessageItem render hiện tại). Sẽ update contract này khi Ngày 4 chốt.
+| Service method trigger | `systemEventType` broadcast | Số frames |
+|------------------------|----------------------------|-----------|
+| `createGroup` commit | `GROUP_CREATED` | 1 |
+| `addMembers` commit | `MEMBER_ADDED` | N (1 per added user trong `added[]`, KHÔNG cho `skipped[]`) |
+| `removeMember` commit (kick) | `MEMBER_REMOVED` | 1 |
+| `leaveGroup` non-OWNER commit | `MEMBER_LEFT` | 1 |
+| `leaveGroup` OWNER auto-transfer commit | `OWNER_TRANSFERRED` (autoTransferred=true) **→** `MEMBER_LEFT` | 2 (OWNER_TRANSFERRED trước) |
+| `leaveGroup` OWNER empty-group | — | 0 (endpoint reject 400 CANNOT_LEAVE_EMPTY_GROUP) |
+| `changeRole` MEMBER→ADMIN commit | `ROLE_PROMOTED` | 1 |
+| `changeRole` ADMIN→MEMBER commit | `ROLE_DEMOTED` | 1 |
+| `changeRole` no-op (newRole == currentRole) | — | 0 (đồng bộ ROLE_CHANGED silent idempotent §3.9) |
+| `transferOwner` commit (explicit) | `OWNER_TRANSFERRED` (autoTransferred=false) | 1 |
+| `updateGroupInfo` name đổi | `GROUP_RENAMED` | 1 (chỉ khi `oldName.trim() != newName.trim()`) |
+| `updateGroupInfo` avatar only | — | 0 (V1; CONVERSATION_UPDATED đã notify UI) |
+
+**Relationship với group management events** (§3.6 - §3.11):
+- Group management events (`CONVERSATION_UPDATED`, `MEMBER_ADDED`, `MEMBER_REMOVED`, `ROLE_CHANGED`, `OWNER_TRANSFERRED`, `GROUP_DELETED`) → patch cache members list + sidebar conv metadata + toast.
+- SYSTEM messages (MESSAGE_CREATED with type=SYSTEM) → append inline vào message timeline để user thấy history trong chat window.
+- **2 loại frame song song** — FE có 2 handler riêng, không merge logic. Ví dụ add member: `MEMBER_ADDED` (§3.7) patch members list; MESSAGE_CREATED (§3.1) type=SYSTEM append system bubble vào timeline.
+- Duplicate concern: không. Member event cập nhật member list; SYSTEM msg là historical record trong message list. 2 cache khác nhau, không conflict.
+
+**Ordering caveats (BE side)**:
+- BE pattern: service method transaction gồm (1) core action (delete row, update role...), (2) INSERT system message, (3) publish `MessageCreatedEvent` + group event. `AFTER_COMMIT` listener fire cả 2 frame. Actual wire order phụ thuộc listener thứ tự đăng ký — FE KHÔNG rely on order giữa `MEMBER_ADDED` event và `MEMBER_ADDED` SYSTEM msg.
+- Với OWNER leave: BẮT BUỘC save OWNER_TRANSFERRED system row TRƯỚC MEMBER_LEFT system row — `createdAt` ASC giữ thứ tự trong message list. Cùng 1 `AFTER_COMMIT`, 2 save liên tiếp → sequence id đảm bảo order.
+
+**FE action** (khi nhận MESSAGE_CREATED với type=SYSTEM):
+- Xem §3.1 FE action bước 5 — branch render `<SystemMessageItem>`.
+- Xem §3e.1 Render SYSTEM contract (bên dưới) — copy mapping từ `systemEventType` + `systemMetadata` sang user-facing string.
 
 ---
 
@@ -1098,6 +1180,79 @@ Tương tự edit nhưng đơn giản hơn (không có textarea, không có "can
 ### FE dedupe / idempotency
 - Khi nhận MESSAGE_DELETED broadcast nhiều lần cùng id (rare): FE set `deletedAt + deletedBy + content=null` lặp lại — idempotent, không cần check `deletedAt` đã set.
 - Nếu REST list trả message đã có `deletedAt` thì FE render placeholder ngay (không cần chờ broadcast).
+
+---
+
+## 3e.1 SYSTEM Message Rendering (FE contract) — W7-D4
+
+Áp dụng cho mọi nơi render message timeline (ConversationDetailPage, search results khi FE search reach SYSTEM — out-of-scope V1).
+
+### Hiển thị
+- **Bubble layout**: **full-width centered**, KHÔNG có avatar, KHÔNG có sender name cột trái. Khác với TEXT bubble (có sender avatar + align trái/phải theo sender).
+- **Typography**: italic, small (Tailwind `text-xs italic text-gray-500 dark:text-gray-400`), line-height compact.
+- **Container**: `flex justify-center my-1 px-4` — system bubble không chiếm nhiều không gian, không break chat flow.
+- **KHÔNG hover actions** — không edit, không reply, không delete, không react, không copy. `message.type === 'SYSTEM'` → skip render menu entirely.
+- **Timestamp**: KHÔNG hiện timestamp riêng (V1). Rationale: system events clustered gần nhau dễ spam timestamp; user hover vào bubble có thể show tooltip `createdAt` (optional). Nếu 2 TEXT message cách xa nhau, SYSTEM ở giữa dùng `createdAt` của SYSTEM để hiện divider date nếu cross-day (reuse logic divider sẵn có).
+- **Role group pattern**: nếu nhiều SYSTEM messages cùng loại liền kề nhau (ví dụ batch add 5 members → 5× MEMBER_ADDED), FE CÓ THỂ hiển thị từng cái riêng (default V1) hoặc gộp "X đã thêm 5 người: A, B, C, D, E" (V2 optional, không bắt buộc).
+
+### Copy mapping (TEXT template, vi-VN, V1 hardcode — V2 i18n)
+
+FE render `message.content` **bỏ qua** (luôn `""`); derive copy từ `systemEventType` + `systemMetadata`:
+
+| `systemEventType` | Template (variables từ `systemMetadata`) |
+|-------------------|------------------------------------------|
+| `GROUP_CREATED` | `{actorName} đã tạo nhóm` |
+| `MEMBER_ADDED` | `{actorName} đã thêm {targetName} vào nhóm` |
+| `MEMBER_REMOVED` | `{actorName} đã xóa {targetName} khỏi nhóm` |
+| `MEMBER_LEFT` | `{actorName} đã rời nhóm` |
+| `ROLE_PROMOTED` | `{actorName} đã đặt {targetName} làm quản trị viên` |
+| `ROLE_DEMOTED` | `{actorName} đã gỡ quyền quản trị của {targetName}` |
+| `OWNER_TRANSFERRED` (`autoTransferred: false`) | `{actorName} đã chuyển quyền trưởng nhóm cho {targetName}` |
+| `OWNER_TRANSFERRED` (`autoTransferred: true`) | `{actorName} đã rời nhóm và chuyển quyền trưởng nhóm cho {targetName}` (hoặc tách 2 bubble với MEMBER_LEFT ngay sau — FE chọn; reviewer khuyến nghị template "rời + transfer" gộp nếu FE muốn compact, vì 2 bubble tương tự cùng actor sẽ dài) |
+| `GROUP_RENAMED` | `{actorName} đã đổi tên nhóm từ "{oldValue}" thành "{newValue}"` |
+
+**Fallback rules**:
+- `actorName` hoặc `targetName` có thể là tên rất dài — FE truncate 40 chars + `...` ở render layer (CSS `text-ellipsis` với max-width hoặc JS substring). KHÔNG truncate trong metadata (BE snapshot giữ full).
+- Nếu `systemMetadata` thiếu field bắt buộc cho template (ví dụ `MEMBER_ADDED` thiếu `targetName`) — rare, chỉ xảy ra do BE bug: FE render `"(sự kiện hệ thống)"` fallback generic + log warning tới console. KHÔNG crash.
+- Unknown `systemEventType` (FE version cũ hơn BE, enum mới add): render `"(sự kiện hệ thống)"` fallback. Defensive coding — không white-screen.
+
+### Ví dụ render (DOM)
+
+```html
+<!-- MEMBER_ADDED -->
+<div class="flex justify-center my-1 px-4">
+  <span class="text-xs italic text-gray-500 dark:text-gray-400">
+    Nguyễn Văn A đã thêm Trần Thị B vào nhóm
+  </span>
+</div>
+
+<!-- OWNER_TRANSFERRED autoTransferred=true -->
+<div class="flex justify-center my-1 px-4">
+  <span class="text-xs italic text-gray-500 dark:text-gray-400">
+    Nguyễn Văn A đã rời nhóm và chuyển quyền trưởng nhóm cho Trần Thị B
+  </span>
+</div>
+
+<!-- GROUP_RENAMED -->
+<div class="flex justify-center my-1 px-4">
+  <span class="text-xs italic text-gray-500 dark:text-gray-400">
+    Nguyễn Văn A đã đổi tên nhóm từ "Team Old" thành "Team New"
+  </span>
+</div>
+```
+
+### Contract BE → FE (unchanged)
+- SYSTEM MessageDto shape đầy đủ ở API_CONTRACT.md "MessageDto — finalized shape (v1.2.0-w7-system)". `systemEventType` + `systemMetadata` non-null khi `type == 'SYSTEM'`.
+- BE KHÔNG truncate `actorName`/`targetName` — giữ full. FE responsible for truncation (CSS).
+- BE snapshot `actorName`/`targetName` tại thời điểm event fire (KHÔNG join live users table khi render). Nếu actor đổi fullName sau event → message history vẫn hiện tên cũ. Accepted design — historical accuracy.
+
+### FE dedupe / idempotency
+- SYSTEM MESSAGE_CREATED broadcast lặp lại (rare với SimpleBroker) → dedupe theo `message.id` như bước 2 của §3.1 FE action. Idempotent.
+- REST `GET /api/conversations/{id}/messages` trả SYSTEM messages inline với TEXT — FE render cả hai trong cùng 1 list component (`<MessageList>` dispatches theo `type`).
+
+### Edit-after-SYSTEM / Delete-after-SYSTEM (BLOCKING edge case)
+- FE MUST disable edit/delete menu khi `message.type === 'SYSTEM'` — defense in depth. Nếu user somehow trigger edit STOMP frame (devtools, bypass UI) → BE reject `SYSTEM_MESSAGE_NOT_EDITABLE` (403 / STOMP ERROR) → FE toast "Tin nhắn hệ thống không thể chỉnh sửa" + log warn. KHÔNG silent drop (để tránh regression bug nhỡ FE enable accidentally).
+- Tương tự delete: reject `SYSTEM_MESSAGE_NOT_DELETABLE` + toast.
 
 ---
 
@@ -1751,6 +1906,7 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 
 | Ngày | Version | Thay đổi |
 |------|---------|---------|
+| 2026-04-22 | v1.7-w7 | **W7-D4 SYSTEM messages finalized** (từ placeholder của v1.5/v1.6-w7). SYSTEM piggyback trên `MESSAGE_CREATED` §3.1 với `type: "SYSTEM"` — KHÔNG STOMP event type mới. (1) **§3.1 MESSAGE_CREATED payload extended**: thêm 2 field `systemEventType` (enum 8 values: GROUP_CREATED, MEMBER_ADDED, MEMBER_REMOVED, MEMBER_LEFT, ROLE_PROMOTED, ROLE_DEMOTED, OWNER_TRANSFERRED, GROUP_RENAMED) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). Khi `type=SYSTEM`: `sender=null`, `content=""` (empty string, KHÔNG null), `attachments=[]`, `replyToMessage=null`, `editedAt/deletedAt/deletedBy=null`. FE branch render `<SystemMessageItem>` vs `<MessageItem>` theo `type`. Dedupe theo `id` (áp dụng cho cả SYSTEM). (2) **§3.12 SYSTEM_MESSAGE** placeholder → finalized với mapping table trigger → event type. (3) **§3e.1 NEW — SYSTEM Render contract**: full-width centered italic gray bubble, copy mapping template 8 enum (vi-VN V1 hardcode), fallback unknown enum → "(sự kiện hệ thống)", FE truncate tên 40 chars CSS-level, edit/delete menu disabled (defense in depth), BE reject `SYSTEM_MESSAGE_NOT_EDITABLE` / `SYSTEM_MESSAGE_NOT_DELETABLE`. (4) **Ordering**: OWNER leave auto-transfer → OWNER_TRANSFERRED SYSTEM TRƯỚC MEMBER_LEFT SYSTEM (createdAt ASC). Group mgmt event (§3.6-3.11) và SYSTEM MESSAGE_CREATED fire song song — FE 2 handler riêng, không rely on frame order giữa 2 loại. (5) BE reuse existing `MessageCreatedEvent` + `@TransactionalEventListener(AFTER_COMMIT)` pipe — 0 infra change. Schema Migration V10 (xem API_CONTRACT.md): ADD COLUMN system_event_type + system_metadata JSONB; DROP NOT NULL sender_id (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency`. KHÔNG ảnh hưởng TEXT flow — `systemEventType`/`systemMetadata=null` với mọi TEXT/IMAGE/FILE message. |
 | 2026-04-19 | v0.1 | Initial skeleton (không dùng, đã overwrite bởi v1.0-draft-w4). |
 | 2026-04-19 | v1.0-draft-w4 | Draft contract W4: REST-gửi + STOMP-broadcast model. `/topic/conv.{id}` + `MESSAGE_CREATED` event shape IDENTICAL với `POST /messages` REST response. BE implementation guide (WebSocketConfig + AuthChannelInterceptor + `@TransactionalEventListener(AFTER_COMMIT)`). FE guide (stompClient singleton + useConvSubscription hook với dedupe bắt buộc). Security: message size 64KB, origin từ config, member check ở SUBSCRIBE. Limitations V1 documented. Placeholder MESSAGE_UPDATED/DELETED (W6), TYPING/PRESENCE (W5). |
 | 2026-04-20 | v1.1-w4 | **Path B (ADR-016)**: Chuyển send path từ REST → STOMP. Thêm inbound `/app/conv.{convId}.message` với payload `{tempId, content, type}`. Thêm 2 user queue `/user/queue/acks` (payload `{tempId, message}`) + `/user/queue/errors` (payload `{tempId, error, code}`). Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s atomic SET NX EX. FE tempId lifecycle state machine: optimistic → ACK/ERROR/timeout 10s. BE handler + `@MessageExceptionHandler` pattern. Rate limit 30/phút khớp REST. REST `POST /messages` không deprecated — giữ cho batch/bot/fallback. Error codes mới: MSG_CONTENT_TOO_LONG, MSG_RATE_LIMITED, FORBIDDEN, INTERNAL. Bỏ "draft" suffix vì contract đã được accept sau W4D4. |

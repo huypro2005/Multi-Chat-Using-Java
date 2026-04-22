@@ -88,7 +88,9 @@ public class MessageMapper {
                 message.getEditedAt(),
                 message.getCreatedAt(),
                 message.getDeletedAt(),
-                deletedBy
+                deletedBy,
+                message.getSystemEventType(),
+                message.getSystemMetadata()
         );
     }
 
@@ -158,7 +160,23 @@ public class MessageMapper {
                 record.getSizeBytes(),
                 baseUrl,
                 thumbUrl,
+                resolveIconType(record.getMime()),
                 record.getExpiresAt()
         );
+    }
+
+    /**
+     * Keep iconType mapping consistent with FileService.toDto().
+     */
+    private static String resolveIconType(String mime) {
+        if (mime == null) return "GENERIC";
+        if (mime.startsWith("image/")) return "IMAGE";
+        if ("application/pdf".equals(mime)) return "PDF";
+        if (mime.contains("wordprocessingml") || "application/msword".equals(mime)) return "WORD";
+        if (mime.contains("spreadsheetml") || "application/vnd.ms-excel".equals(mime)) return "EXCEL";
+        if (mime.contains("presentationml") || "application/vnd.ms-powerpoint".equals(mime)) return "POWERPOINT";
+        if ("text/plain".equals(mime)) return "TEXT";
+        if (mime.contains("zip") || mime.contains("7z")) return "ARCHIVE";
+        return "GENERIC";
     }
 }

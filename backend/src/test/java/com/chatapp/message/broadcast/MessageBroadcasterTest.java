@@ -58,7 +58,9 @@ class MessageBroadcasterTest {
                 null,
                 OffsetDateTime.now(ZoneOffset.UTC),
                 null,
-                null
+                null,
+                null,   // systemEventType (W7-D4)
+                null    // systemMetadata (W7-D4)
         );
     }
 

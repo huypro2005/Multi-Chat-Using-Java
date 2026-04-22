@@ -314,7 +314,8 @@ function appendToCache(
 
       // Nếu là tin của chính mình, ưu tiên replace optimistic temp gần nhất thay vì append mới.
       // Tránh case UI hiện 2 bubble: 1 cái thành công + 1 cái vẫn loading.
-      if (currentUserId && newMsg.sender.id === currentUserId) {
+      // SYSTEM messages (sender=null) không có optimistic → skip self-check
+      if (currentUserId && newMsg.sender && newMsg.sender.id === currentUserId) {
         let replaced = false
         const pages = old.pages.map((page) => {
           if (replaced) return page

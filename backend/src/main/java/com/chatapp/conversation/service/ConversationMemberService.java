@@ -20,6 +20,8 @@ import com.chatapp.conversation.event.RoleChangedEvent;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
+import com.chatapp.message.constant.SystemEventType;
+import com.chatapp.message.service.SystemMessageService;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -33,6 +35,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -63,6 +66,7 @@ public class ConversationMemberService {
     private final ConversationMemberRepository memberRepository;
     private final UserRepository userRepository;
     private final ApplicationEventPublisher eventPublisher;
+    private final SystemMessageService systemMessageService;
 
     // =========================================================================
     // POST /api/conversations/{id}/members — addMembers
@@ -148,6 +152,12 @@ public class ConversationMemberService {
 
             // 10. Publish event per added user
             eventPublisher.publishEvent(new MemberAddedEvent(convId, userId, actorId));
+
+            // W7-D4: MEMBER_ADDED system message (1 per added user, KHÔNG cho skipped)
+            Map<String, Object> addedMeta = new LinkedHashMap<>();
+            addedMeta.put("targetId", userId.toString());
+            addedMeta.put("targetName", user.getFullName());
+            systemMessageService.createAndPublish(convId, actorId, SystemEventType.MEMBER_ADDED, addedMeta);
         }
 
         return new AddMembersResponse(added, skipped);
@@ -189,6 +199,12 @@ public class ConversationMemberService {
                     "Bạn không có quyền kick thành viên này");
         }
 
+        // W7-D4: MEMBER_REMOVED system message BEFORE hard-delete (contract ordering)
+        Map<String, Object> removedMeta = new LinkedHashMap<>();
+        removedMeta.put("targetId", targetUserId.toString());
+        removedMeta.put("targetName", target.getUser().getFullName());
+        systemMessageService.createAndPublish(convId, actorId, SystemEventType.MEMBER_REMOVED, removedMeta);
+
         // 6. Hard-delete target row
         memberRepository.delete(target);
 
@@ -228,6 +244,8 @@ public class ConversationMemberService {
 
             // Pick first candidate (oldest ADMIN, fallback oldest MEMBER)
             ConversationMember newOwner = candidates.get(0);
+            UUID newOwnerId = newOwner.getUser().getId();
+            String newOwnerName = newOwner.getUser().getFullName();
 
             // Atomic swap: demote caller OWNER → MEMBER (trước delete),
             // promote candidate → OWNER.
@@ -237,13 +255,20 @@ public class ConversationMemberService {
             memberRepository.save(newOwner);
 
             // Update conversations.owner_id
-            conv.setOwnerId(newOwner.getUser().getId());
+            conv.setOwnerId(newOwnerId);
             conversationRepository.save(conv);
 
             // Publish OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED (contract §3.10)
             eventPublisher.publishEvent(new OwnerTransferredEvent(
-                    convId, actorId, newOwner.getUser().getId(), true
+                    convId, actorId, newOwnerId, true
             ));
+
+            // W7-D4: OWNER_TRANSFERRED system message (autoTransferred=true) — BEFORE MEMBER_LEFT
+            Map<String, Object> transferredMeta = new LinkedHashMap<>();
+            transferredMeta.put("targetId", newOwnerId.toString());
+            transferredMeta.put("targetName", newOwnerName);
+            transferredMeta.put("autoTransferred", true);
+            systemMessageService.createAndPublish(convId, actorId, SystemEventType.OWNER_TRANSFERRED, transferredMeta);
         }
 
         // 4. Hard-delete caller row
@@ -251,6 +276,9 @@ public class ConversationMemberService {
 
         // 5. Publish MEMBER_REMOVED (reason=LEFT, removedBy=null)
         eventPublisher.publishEvent(new MemberRemovedEvent(convId, actorId, null, "LEFT"));
+
+        // W7-D4: MEMBER_LEFT system message (after the delete — actor is gone)
+        systemMessageService.createAndPublish(convId, actorId, SystemEventType.MEMBER_LEFT, Collections.emptyMap());
     }
 
     // =========================================================================
@@ -317,6 +345,16 @@ public class ConversationMemberService {
                 convId, targetUserId, oldRole, req.role(), actorId
         ));
 
+        // W7-D4: ROLE_PROMOTED / ROLE_DEMOTED system message
+        String roleEventType = (req.role() == MemberRole.ADMIN)
+                ? SystemEventType.ROLE_PROMOTED
+                : SystemEventType.ROLE_DEMOTED;
+        User targetUser2 = userRepository.findById(targetUserId).orElse(null);
+        Map<String, Object> roleMeta = new LinkedHashMap<>();
+        roleMeta.put("targetId", targetUserId.toString());
+        roleMeta.put("targetName", targetUser2 != null ? targetUser2.getFullName() : "Unknown");
+        systemMessageService.createAndPublish(convId, actorId, roleEventType, roleMeta);
+
         return new RoleChangeResponse(
                 targetUserId,
                 req.role(),
@@ -382,6 +420,14 @@ public class ConversationMemberService {
         // 7. Build response
         User actorUser = userRepository.findById(actorId).orElse(null);
         User targetUser = userRepository.findById(targetUserId).orElse(null);
+
+        // W7-D4: OWNER_TRANSFERRED system message (autoTransferred=false for explicit transfer)
+        Map<String, Object> ownerTransferMeta = new LinkedHashMap<>();
+        ownerTransferMeta.put("targetId", targetUserId.toString());
+        ownerTransferMeta.put("targetName", targetUser != null ? targetUser.getFullName() : "Unknown");
+        ownerTransferMeta.put("autoTransferred", false);
+        systemMessageService.createAndPublish(convId, actorId, SystemEventType.OWNER_TRANSFERRED, ownerTransferMeta);
+
         return new OwnerTransferResponse(
                 PreviousOwnerDto.fromAdmin(actorUser),
                 ActorSummaryDto.from(targetUser)

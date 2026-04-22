@@ -134,7 +134,7 @@ class ChatEditMessageHandlerTest {
                 messageId, convId, senderDto, MessageType.TEXT,
                 "Updated content", java.util.Collections.emptyList(),
                 null, OffsetDateTime.now(ZoneOffset.UTC),
-                mockMessage.getCreatedAt(), null, null
+                mockMessage.getCreatedAt(), null, null, null, null
         );
 
         // Default stubs

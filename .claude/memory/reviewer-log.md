@@ -7,6 +7,7 @@
 
 ## Recent activity
 
+- [Reviewer] review W7-D3 FE group UI: FAIL→PASS. Blocking: GROUP_DELETED payload drift (FE typedef vs BE event). Fix: read from cache. 5 warnings logged.
 - [W6-D5] Security audit 18/18 PASS. Memory consolidate reviewer-log 689→313. WARNINGS W6-1/2/4 resolved.
 
 ---

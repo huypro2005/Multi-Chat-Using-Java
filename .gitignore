@@ -12,6 +12,7 @@ backend/.mvn/
 *.class
 *.jar
 !*-sources.jar
+*/uploads/
 
 # Node / npm
 frontend/node_modules/

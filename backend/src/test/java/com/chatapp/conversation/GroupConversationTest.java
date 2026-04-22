@@ -8,6 +8,7 @@ import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
+import com.chatapp.message.repository.MessageRepository;
 import com.chatapp.user.repository.UserAuthProviderRepository;
 import com.chatapp.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -97,6 +98,7 @@ class GroupConversationTest {
     @Autowired private ConversationRepository conversationRepository;
     @Autowired private ConversationMemberRepository conversationMemberRepository;
     @Autowired private FileRecordRepository fileRecordRepository;
+    @Autowired private MessageRepository messageRepository;
     @Autowired private DataSource dataSource;
 
     @MockBean private StringRedisTemplate redisTemplate;
@@ -109,6 +111,7 @@ class GroupConversationTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
+        messageRepository.deleteAll();  // delete messages first (FK → conversations)
         conversationMemberRepository.deleteAll();
         conversationRepository.deleteAll();
         fileRecordRepository.deleteAll();

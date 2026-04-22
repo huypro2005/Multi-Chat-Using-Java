@@ -127,7 +127,7 @@ class MessageServiceStompTest {
                 savedMsgId, convId, senderDto, MessageType.TEXT,
                 "Hello", java.util.Collections.emptyList(),
                 null, null, OffsetDateTime.now(ZoneOffset.UTC),
-                null, null
+                null, null, null, null
         );
 
         // Default: valueOps is returned by redisTemplate.opsForValue()
