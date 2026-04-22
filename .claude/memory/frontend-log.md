@@ -5,6 +5,62 @@
 
 ---
 
+[2026-04-22 W8-D2] feat: pin message banner + bilateral block UI/actions
+- TẠO: `src/features/messages/hooks/usePin.ts`
+  - publish STOMP `/app/msg.{messageId}.pin` với action `PIN` / `UNPIN`
+- TẠO: `src/features/messages/components/PinnedMessagesBanner.tsx`
+  - banner ghim ở đầu danh sách tin nhắn, collapsed/expanded, click để scroll tới message
+- TẠO: `src/features/users/components/BlockedUsersList.tsx` (chưa wire route theo scope D2)
+- SỬA: `src/features/users/api.ts`, `src/features/users/hooks.ts`
+  - thêm block/unblock/list blocked APIs + React Query hooks
+- SỬA: `src/features/messages/components/MessageActions.tsx`
+  - thêm menu action `📌 Ghim/Bỏ ghim` qua props `canPin/onTogglePin`
+- SỬA: `src/features/messages/components/MessageItem.tsx`
+  - nối `usePin`, thêm pinned indicator trên bubble, truyền pin action vào `MessageActions`
+- SỬA: `src/features/messages/components/MessagesList.tsx`
+  - render `PinnedMessagesBanner`, thêm `messageRefs` + highlight ring 2s để scroll-to-message
+  - compute `canPin` theo role + type
+- SỬA: `src/features/messages/useConvSubscription.ts`
+  - handle `MESSAGE_PINNED` / `MESSAGE_UNPINNED`, patch cache + invalidate conversation detail
+- SỬA: `src/features/messages/useAckErrorSubscription.ts`
+  - map error codes mới cho pin/block/msg_deleted
+- SỬA: `src/features/conversations/components/ConversationHeader.tsx`
+  - thêm nút Chặn/Bỏ chặn ở direct header, có confirm trước khi block
+- SỬA: `src/features/conversations/utils.ts`, `src/types/conversation.ts`, `src/types/message.ts`, `src/types/auth.ts`, `stores/authStore.ts`
+  - mở rộng type cho pin/block và tương thích `DIRECT`
+- Commit: N/A (không commit theo yêu cầu)
+- Trạng thái: DONE (đã chạy build/lint ở cuối session)
+
+[2026-04-22 W8-D1] feat: message action bar reaction picker cạnh reply (popover click-to-open)
+- SỬA: `src/features/messages/components/MessageActions.tsx`
+  - thêm nút reaction (`😊`) cạnh nút reply trong action bar của từng message
+  - click mở popover quick reactions: 👍 ❤️ 😂 😮 😢 😡
+  - popover đóng khi chọn emoji hoặc click ra ngoài (outside click listener)
+  - disable reaction button cho message đã xóa, optimistic (`clientTempId`) hoặc `SYSTEM`
+  - giữ style đồng nhất với action buttons hiện tại (rounded, hover gray, compact)
+- SỬA: `src/features/messages/components/MessageItem.tsx`
+  - nối `useReact(message.id)` vào `MessageActions` qua prop `onReact`
+  - bỏ `ReactionBar` hover cũ để tránh duplicate UX, giữ `ReactionAggregate` như cũ
+- TÍCH HỢP API/socket: **có dùng luồng thật** qua STOMP `/app/msg.{messageId}.react` (hook `useReact`), không phải UI-only
+- Verify:
+  - `npm run lint`: pass
+  - `npm run build`: pass (bao gồm `tsc -b`)
+  - `npm run typecheck`: script không tồn tại trong `package.json`
+- Commit: N/A (chưa commit trong session này)
+- Trạng thái: DONE, không blocker
+
+[2026-04-22 W8-D1] feat: message reactions — @emoji-mart picker + ReactionBar hover + ReactionAggregate display + REACTION_CHANGED broadcast handler
+- types/message.ts: thêm ReactionAggregateDto interface; thêm reactions?: ReactionAggregateDto[] vào MessageDto; đổi ErrorEnvelope thành discriminated union (REACT có clientId: null)
+- features/reactions/hooks/useReact.ts: fire-and-forget STOMP publish /app/msg.{messageId}.react; toast khi not connected
+- features/reactions/components/EmojiPicker.tsx: lazy import @emoji-mart/react qua React.lazy + Suspense; dynamic split bundle
+- features/reactions/components/ReactionBar.tsx: 6 quick emojis + "+" mở picker; absolute positioned; hover trigger
+- features/reactions/components/ReactionAggregate.tsx: count badges, currentUserReacted highlight indigo; aria-pressed accessibility
+- MessageItem.tsx: thêm showReactBar state + useReact hook; isOwn bubble: onMouseEnter/Leave + ReactionAggregate (justify-end) + ReactionBar (conditional); other bubble: wrap flex-col, indent pl-9, ReactionAggregate + ReactionBar
+- useConvSubscription.ts: thêm ReactionChangedPayload interface + handleReactionChanged (setQueryData in-place); helper applyReactionChange + addReaction + removeReaction (pure functions, idempotent); sort count DESC, emoji ASC; import ReactionAggregateDto
+- useAckErrorSubscription.ts: thêm case 'REACT' trong ERROR switch (clientId: null safe — KHÔNG dùng registry); hàm handleReactError với 6 error codes; destructure clientId inside case (type-safe)
+- npm: cài @emoji-mart/react + @emoji-mart/data + emoji-mart (--legacy-peer-deps, React 19 compat)
+- npx tsc --noEmit: 0 errors; eslint: 0 warnings; vite build: success
+
 [2026-04-22 W7-D5] feat: read receipt — ReadTicks ✓/✓✓ + handleReadUpdated + useAutoMarkRead
 - types/conversation.ts: thêm lastReadMessageId: string | null vào MemberDto
 - ReadTicks.tsx: ✓ (gray) khi 0 readers, ✓✓ (blue) khi có reader; V1 approximation lastReadMessageId non-null = đã đọc; chỉ hiện cho own messages; ẩn khi sending/failed

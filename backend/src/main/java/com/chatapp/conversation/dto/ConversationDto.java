@@ -3,6 +3,7 @@ package com.chatapp.conversation.dto;
 import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.enums.ConversationType;
 import com.chatapp.file.constant.FileConstants;
+import com.chatapp.message.dto.MessageDto;
 import com.chatapp.user.entity.User;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
@@ -20,6 +21,8 @@ import java.util.function.Function;
  *  - `name`, `avatarUrl`: null cho ONE_ON_ONE.
  *  - `owner`: null cho ONE_ON_ONE hoặc khi OWNER đã bị xoá; có cho GROUP.
  *  - `members`: sort theo role DESC (OWNER đầu), rồi joinedAt ASC (cũ nhất trước).
+ *  - `pinnedMessages`: W8-D2. Non-null chỉ khi GET /api/conversations/{id}. Null cho list + create.
+ *    Sort: pinned_at DESC. Max 3. Filtered: không bao gồm deleted messages.
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record ConversationDto(
@@ -31,7 +34,8 @@ public record ConversationDto(
         CreatedByDto createdBy,
         List<MemberDto> members,
         Instant createdAt,
-        Instant lastMessageAt
+        Instant lastMessageAt,
+        List<MessageDto> pinnedMessages
 ) {
     /**
      * Build từ Conversation entity (phải đã JOIN FETCH members và members.user).
@@ -77,7 +81,22 @@ public record ConversationDto(
                 CreatedByDto.from(conv.getCreatedBy()),
                 memberDtos,
                 conv.getCreatedAt() != null ? conv.getCreatedAt().toInstant() : null,
-                conv.getLastMessageAt() != null ? conv.getLastMessageAt().toInstant() : null
+                conv.getLastMessageAt() != null ? conv.getLastMessageAt().toInstant() : null,
+                null  // pinnedMessages: null by default; set only in getConversation detail
+        );
+    }
+
+    /**
+     * Overload với pinnedMessages — dùng cho GET /api/conversations/{id} detail.
+     */
+    public static ConversationDto from(Conversation conv, Function<UUID, User> ownerResolver,
+                                       List<MessageDto> pinnedMessages) {
+        ConversationDto base = from(conv, ownerResolver);
+        return new ConversationDto(
+                base.id(), base.type(), base.name(), base.avatarUrl(),
+                base.owner(), base.createdBy(), base.members(),
+                base.createdAt(), base.lastMessageAt(),
+                pinnedMessages
         );
     }
 

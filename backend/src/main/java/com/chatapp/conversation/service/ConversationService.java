@@ -14,10 +14,14 @@ import com.chatapp.file.constant.FileConstants;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.message.constant.SystemEventType;
+import com.chatapp.message.dto.MessageDto;
+import com.chatapp.message.entity.Message;
 import com.chatapp.message.repository.MessageRepository;
+import com.chatapp.message.service.MessageMapper;
 import com.chatapp.message.service.SystemMessageService;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
+import com.chatapp.user.service.BlockService;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +54,8 @@ public class ConversationService {
     private final StringRedisTemplate redisTemplate;
     private final ApplicationEventPublisher eventPublisher;
     private final SystemMessageService systemMessageService;
+    private final MessageMapper messageMapper;
+    private final BlockService blockService;
 
     private static final Set<String> IMAGE_MIMES = Set.of(
             "image/jpeg", "image/png", "image/webp", "image/gif"
@@ -126,6 +132,12 @@ public class ConversationService {
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_MEMBER_NOT_FOUND",
                         "Người dùng không tồn tại",
                         Map.of("missingIds", List.of(finalTargetUserId))));
+
+        // W8-D2 (ADR-024): Block check — không tạo conv mới nếu bilateral block
+        if (blockService.isBilaterallyBlocked(currentUser.getId(), finalTargetUserId)) {
+            throw new AppException(HttpStatus.FORBIDDEN, "MSG_USER_BLOCKED",
+                    "Không thể tạo hội thoại: bạn hoặc người dùng đã chặn nhau");
+        }
 
         // Check existing ONE_ON_ONE (native query returns String to handle H2/PG UUID differences)
         Optional<String> existing = conversationRepository.findExistingOneOnOne(
@@ -451,7 +463,13 @@ public class ConversationService {
                 .orElseThrow(() -> new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
                         "Conversation không tồn tại"));
 
-        return ConversationDto.from(conversation, this::resolveUser);
+        // W8-D2: Load pinned messages (sort DESC pinnedAt, max 3, exclude deleted)
+        List<Message> pinnedEntities = messageRepository.findPinnedByConversation(conversationId);
+        List<MessageDto> pinnedMessages = pinnedEntities.stream()
+                .map(messageMapper::toDto)
+                .toList();
+
+        return ConversationDto.from(conversation, this::resolveUser, pinnedMessages);
     }
 
     // =========================================================================

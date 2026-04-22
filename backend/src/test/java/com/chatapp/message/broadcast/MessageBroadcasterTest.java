@@ -60,7 +60,10 @@ class MessageBroadcasterTest {
                 null,
                 null,
                 null,   // systemEventType (W7-D4)
-                null    // systemMetadata (W7-D4)
+                null,   // systemMetadata (W7-D4)
+                java.util.Collections.emptyList(),  // reactions (W8-D1)
+                null,   // pinnedAt (W8-D2)
+                null    // pinnedBy (W8-D2)
         );
     }
 

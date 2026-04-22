@@ -79,6 +79,8 @@ class MessageServiceStompTest {
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
     @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
+    @Mock private com.chatapp.reaction.repository.MessageReactionRepository messageReactionRepository;
+    @Mock private com.chatapp.user.service.BlockService blockService;
 
     private MessageService messageService;
 
@@ -94,7 +96,8 @@ class MessageServiceStompTest {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
                 userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
-                fileRecordRepository, messageAttachmentRepository
+                fileRecordRepository, messageAttachmentRepository, messageReactionRepository,
+                blockService
         );
 
         userId = UUID.randomUUID();
@@ -127,7 +130,9 @@ class MessageServiceStompTest {
                 savedMsgId, convId, senderDto, MessageType.TEXT,
                 "Hello", java.util.Collections.emptyList(),
                 null, null, OffsetDateTime.now(ZoneOffset.UTC),
-                null, null, null, null
+                null, null, null, null,
+                java.util.Collections.emptyList(), // reactions (W8-D1)
+                null, null // pinnedAt, pinnedBy (W8-D2)
         );
 
         // Default: valueOps is returned by redisTemplate.opsForValue()

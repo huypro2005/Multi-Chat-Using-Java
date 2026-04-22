@@ -80,6 +80,20 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @param lastReadId UUID string của last read message; null nếu chưa đánh dấu.
      * @return count capped at 99 (per contract v1.4.0-w7-read rule 5).
      */
+    /**
+     * Đếm số tin nhắn đang ghim trong conversation (không đếm deleted).
+     * Dùng để check giới hạn 3 pinned per conv.
+     */
+    @Query("SELECT COUNT(m) FROM Message m WHERE m.conversation.id = :convId AND m.pinnedAt IS NOT NULL AND m.deletedAt IS NULL")
+    long countPinnedInConversation(@Param("convId") UUID convId);
+
+    /**
+     * Lấy danh sách tin nhắn đang ghim trong conversation, sort DESC theo pinnedAt.
+     * Không bao gồm tin nhắn đã bị xóa.
+     */
+    @Query("SELECT m FROM Message m WHERE m.conversation.id = :convId AND m.pinnedAt IS NOT NULL AND m.deletedAt IS NULL ORDER BY m.pinnedAt DESC")
+    List<Message> findPinnedByConversation(@Param("convId") UUID convId);
+
     @Query(value = """
             SELECT LEAST(COUNT(*), 99) FROM messages
             WHERE conversation_id = CAST(:convId AS UUID)

@@ -77,6 +77,8 @@ class ChatEditMessageHandlerTest {
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
     @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
+    @Mock private com.chatapp.reaction.repository.MessageReactionRepository messageReactionRepository;
+    @Mock private com.chatapp.user.service.BlockService blockService;
 
     private MessageService messageService;
     private ChatEditMessageHandler handler;
@@ -96,7 +98,8 @@ class ChatEditMessageHandlerTest {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
                 userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
-                fileRecordRepository, messageAttachmentRepository
+                fileRecordRepository, messageAttachmentRepository, messageReactionRepository,
+                blockService
         );
         handler = new ChatEditMessageHandler(messageService, messagingTemplate);
 
@@ -134,7 +137,9 @@ class ChatEditMessageHandlerTest {
                 messageId, convId, senderDto, MessageType.TEXT,
                 "Updated content", java.util.Collections.emptyList(),
                 null, OffsetDateTime.now(ZoneOffset.UTC),
-                mockMessage.getCreatedAt(), null, null, null, null
+                mockMessage.getCreatedAt(), null, null, null, null,
+                java.util.Collections.emptyList(), // reactions (W8-D1)
+                null, null // pinnedAt, pinnedBy (W8-D2)
         );
 
         // Default stubs

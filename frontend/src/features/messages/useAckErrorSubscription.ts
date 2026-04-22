@@ -84,6 +84,38 @@ function markFailedByTempId(
 }
 
 // ---------------------------------------------------------------------------
+// REACT ERROR handler (W8-D1)
+// clientId === null cho REACT — không tra registry, chỉ show toast theo code.
+// Không rollback optimistic vì V1 không có optimistic react (fire-and-forget).
+// ---------------------------------------------------------------------------
+function handleReactError(code: string): void {
+  switch (code) {
+    case 'REACTION_INVALID_EMOJI':
+      toast.error('Biểu tượng không hợp lệ')
+      break
+    case 'REACTION_NOT_ALLOWED_FOR_SYSTEM':
+      toast.error('Không thể react tin nhắn hệ thống')
+      break
+    case 'REACTION_MSG_DELETED':
+      toast.error('Tin nhắn đã bị xóa')
+      break
+    case 'MSG_RATE_LIMITED':
+    case 'REACTION_RATE_LIMITED':
+      toast.error('React quá nhanh, vui lòng thử lại sau')
+      break
+    case 'NOT_MEMBER':
+      toast.error('Bạn không còn là thành viên cuộc trò chuyện này')
+      break
+    case 'MSG_NOT_FOUND':
+      // Tin nhắn không tồn tại — anti-enum (§3.15) — toast nhẹ
+      toast.error('Không thể react tin nhắn này')
+      break
+    default:
+      toast.error('Không thể react tin nhắn')
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 export function useAckErrorSubscription(): void {
@@ -187,10 +219,12 @@ export function useAckErrorSubscription(): void {
       errSub = client.subscribe('/user/queue/errors', (frame) => {
         try {
           const envelope = JSON.parse(frame.body) as ErrorEnvelope
-          const { operation, clientId, error, code } = envelope
+          const { operation, error, code } = envelope
 
           switch (operation) {
             case 'SEND': {
+              // clientId là string (non-null) cho SEND
+              const clientId = envelope.clientId as string
               // Mark message as failed in cache
               markFailedByTempId(queryClient, clientId, error, code)
 
@@ -217,6 +251,16 @@ export function useAckErrorSubscription(): void {
                 case 'MSG_NO_CONTENT':
                   toast.error('Tin nhắn phải có nội dung hoặc tệp đính kèm')
                   break
+                case 'MSG_USER_BLOCKED':
+                  toast.error('Không thể gửi tin nhắn: đã chặn')
+                  break
+                case 'MSG_DELETED':
+                case 'REACTION_MSG_DELETED':
+                  toast.error('Tin nhắn đã bị xóa')
+                  break
+                case 'FORBIDDEN':
+                  toast.error('Bạn không có quyền thực hiện')
+                  break
                 case 'AUTH_REQUIRED':
                 case 'AUTH_TOKEN_EXPIRED':
                   void import('@/services/authService').then(({ authService }) =>
@@ -233,6 +277,8 @@ export function useAckErrorSubscription(): void {
             }
 
             case 'EDIT': {
+              // clientId là string (non-null) cho EDIT
+              const clientId = envelope.clientId as string
               // Tab-awareness: không có entry → ACK của tab khác → ignore
               const entry = editTimerRegistry.get(clientId)
               if (!entry) return
@@ -282,6 +328,8 @@ export function useAckErrorSubscription(): void {
             }
 
             case 'DELETE': {
+              // clientId là string (non-null) cho DELETE
+              const clientId = envelope.clientId as string
               // Tab-awareness: không có entry → ERROR của tab khác → ignore
               const deleteEntry = deleteTimerRegistry.get(clientId)
               if (!deleteEntry) return
@@ -318,6 +366,40 @@ export function useAckErrorSubscription(): void {
                     window.location.href = '/login'
                   }),
                 )
+              }
+              break
+            }
+
+            case 'REACT': {
+              // CRITICAL (W8-D1): REACT ERROR frame có clientId: null — KHÔNG dùng registry.get(null).
+              // Route xử lý bằng switch(operation) — không tìm trong bất kỳ registry nào.
+              handleReactError(code)
+              break
+            }
+
+            case 'PIN': {
+              switch (code) {
+                case 'PIN_LIMIT_EXCEEDED':
+                  toast.error('Đã đạt giới hạn 3 tin ghim')
+                  break
+                case 'MESSAGE_NOT_PINNED':
+                  toast.error('Tin nhắn chưa được ghim')
+                  break
+                case 'MSG_DELETED':
+                  toast.error('Tin nhắn đã bị xóa')
+                  break
+                case 'FORBIDDEN':
+                  toast.error('Bạn không có quyền ghim hoặc bỏ ghim')
+                  break
+                case 'INVALID_ACTION':
+                  toast.error('Hành động ghim không hợp lệ')
+                  break
+                case 'MSG_RATE_LIMITED':
+                  toast.error('Bạn đang thao tác ghim quá nhanh')
+                  break
+                default:
+                  toast.error('Không thể ghim tin nhắn')
+                  break
               }
               break
             }

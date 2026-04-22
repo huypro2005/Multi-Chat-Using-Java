@@ -59,57 +59,24 @@
 
 ---
 
-## Auth Domain (W2)
+## Auth Domain (W2) — Summary
 
-### Auth Service
-- Package: `com.chatapp.auth.{controller,service,dto.request,dto.response}`. Dùng `AppException` có sẵn.
-- Error codes theo contract: `AUTH_EMAIL_TAKEN`, `AUTH_USERNAME_TAKEN`, `AUTH_INVALID_CREDENTIALS` (merge user-not-found + wrong-password — chống enumeration), `AUTH_ACCOUNT_LOCKED` (check SAU verify credentials).
-- Rate limit login: Redis GET key `rate:login:{ip}`, check >= 5 TRƯỚC verify password, INCR khi fail, DELETE khi success.
-- Rate limit register: INCR `rate:register:{ip}` mỗi request, check > 10, set TTL lần đầu.
-- Refresh token Redis: key `refresh:{userId}:{jti}`, value = SHA-256 hash của raw token (không lưu raw), TTL = refreshExpirationMs/1000.
-- IP extraction: `X-Forwarded-For` header [0].trim(), fallback `getRemoteAddr()`.
-- Pitfall: khi thêm bean inject `StringRedisTemplate`, test class có `exclude=RedisAutoConfiguration` fail context load → thêm `@MockBean StringRedisTemplate`.
+- Rate limit login: Redis `rate:login:{ip}` check >= 5 TRƯỚC verify. INCR khi fail, DELETE khi success.
+- Refresh token: Redis `refresh:{userId}:{jti}` = SHA-256 hash, TTL = 7d. DELETE old TRƯỚC save new. Hash mismatch → revoke all sessions.
+- Constant-time compare: `MessageDigest.isEqual()` (không String.equals() — timing attack).
+- Firebase: inject FirebaseAuth `@Autowired(required=false)`, `@MockBean` trong test. OAuthResponse = AuthResponse + isNewUser.
+- Blacklist JWT: `SET jwt:blacklist:{jti} '' EX ttl`. Fail-open khi Redis down.
+- Pitfall: `@MockBean StringRedisTemplate` khi test class exclude Redis.
+- AuthMethod enum: `com.chatapp.user.enums.AuthMethod` PASSWORD/OAUTH2_GOOGLE. JWT claim `auth_method` lowercase.
 
-### AuthMethod enum (ADR-010)
-- `com.chatapp.user.enums.AuthMethod`: PASSWORD("password"), OAUTH2_GOOGLE("oauth2_google"). `generateAccessToken(User, AuthMethod)`. JWT claim key `auth_method`, value lowercase `enum.getValue()`. Fallback PASSWORD khi unknown.
+## Conversation Domain (W3) — Summary
 
-### Refresh Token Rotation (ADR-006)
-- Sequence: validateToken → checkRateLimit → hashCompare → deleteOld → generateNew → saveNew. DELETE old TRƯỚC save new.
-- Token Reuse Detection: hash mismatch → `revokeAllUserSessions(userId)` dùng `redisTemplate.keys()` + `delete(Set)`. Log WARN (không log raw token).
-- Constant-time compare: `MessageDigest.isEqual(a.getBytes(), b.getBytes())` (không `String.equals()` — timing attack).
-- Rate limit per-userId: `rate:refresh:{userId}` TTL 60s, max 10. Error codes: `AUTH_REFRESH_TOKEN_INVALID`, `AUTH_REFRESH_TOKEN_EXPIRED`, `AUTH_ACCOUNT_LOCKED`.
-- Pitfall: DELETE crash → SAVE không xảy ra → user mất session. Acceptable V1; V2 Redis MULTI/EXEC.
-
-### Firebase OAuth + Logout
-- FirebaseConfig @PostConstruct init, log WARN nếu thiếu credentials. Expose `FirebaseAuth` `@Bean` (null nếu chưa init).
-- AuthService inject FirebaseAuth qua setter `@Autowired(required=false)` — null → throw 503 `AUTH_FIREBASE_UNAVAILABLE`. KHÔNG `FirebaseAuth.getInstance()` trực tiếp (không testable).
-- Auto-link order: provider_uid → email → create new. Check `user.isActive()` sau mỗi bước. Username: email prefix → sanitize → +4 digit random → fallback UUID 8 chars.
-- Logout: best-effort DELETE refresh token Redis. Blacklist access: `SET jwt:blacklist:{jti} '' EX {remaining_ttl}`. JwtAuthFilter check blacklist NGAY SAU validate VALID; fail-open khi Redis down (ADR-011).
-- `OAuthResponse` = `AuthResponse` + `isNewUser`. Endpoint `/logout` cần JWT (KHÔNG permitAll).
-- Test mock: `@MockBean FirebaseAuth` — inject qua setter, không cần mockStatic.
-
----
-
-## Conversation Domain (W3)
-
-### Schema + Entity (W3-D1)
 - Package `com.chatapp.conversation.{enums,entity,repository,service,controller,dto,event,broadcast}`.
-- `ConversationType`: ONE_ON_ONE/GROUP UPPERCASE (ADR-012). `MemberRole`: OWNER/ADMIN/MEMBER UPPERCASE. `@Enumerated(EnumType.STRING)` + CHECK constraint.
-- `Conversation`: `@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder`. `ConversationMember`: `@Builder.Default private MemberRole role = MemberRole.MEMBER`.
-- `@OneToMany(mappedBy="conversation", fetch=LAZY)` với `@Builder.Default private List<...> members = new ArrayList<>()`.
-- Repository: `findByIdWithMembers(UUID)` dùng `@Query("SELECT c FROM Conversation c LEFT JOIN FETCH c.members m LEFT JOIN FETCH m.user WHERE c.id = :id")`.
-- Index naming: `idx_{table}_{columns}`. DROP/CREATE DB reset: terminate sessions `pg_terminate_backend` trước DROP.
-
-### Service (W3-D2)
-- W3-BE-1 RESOLVED: `@PrePersist if (id==null) id = UUID.randomUUID()` + `@Column(updatable=false)`. Xóa `@GeneratedValue`.
-- Anti-enumeration: `getConversation` trả 404 cho cả not-exist lẫn not-member. Check membership trước load conversation.
-- findOrCreate 1-1: native SQL double-join `findExistingOneOnOne` JOIN m1+m2 theo userId1/userId2. Trả `Optional<String>` (không UUID) tránh H2/PG driver mismatch (H2 trả `byte[]`).
-- N+1 avoidance: 2-query (native SQL lấy IDs → batch `findByIdWithMembers`). V1 acceptable (≤ vài trăm).
-- Flush+clear EntityManager sau save trong `@Transactional` trước custom JPQL load → tránh stale 1st-level cache trả empty members.
-- Native query UUID: `CAST(:userId AS UUID)` + `:userId` là String; `CAST(c.id AS VARCHAR)` trong SELECT. H2 không nhận UUID type trong native queries.
-- `ConversationListResponse`: `content/page/size/totalElements/totalPages` theo contract.
-- `displayName`/`displayAvatarUrl` server-computed: DIRECT lấy từ other member, GROUP từ conv.name/avatarUrl.
-- Rate limit POST /conversations: `rate:conv_create:{userId}` TTL 60s, 10/min. `catch DataAccessException` → fail-open consistent với JWT blacklist.
+- `@PrePersist if (id==null) id = UUID.randomUUID()` (pattern W3-BE-1). UUID PK, NO @GeneratedValue.
+- Anti-enum: trả 404 cho cả not-exist + not-member. Native SQL UUID → `CAST AS VARCHAR` + `List<String>`.
+- findOrCreate 1-1: native SQL double-join. Trả `Optional<String>` tránh H2 `byte[]` mismatch.
+- N+1 avoidance: 2-query (native SQL IDs → batch findByIdWithMembers). Flush+clear EntityManager tránh stale cache.
+- displayName/displayAvatarUrl server-computed: DIRECT từ other member, GROUP từ conv.name/avatarUrl.
 
 ---
 
@@ -383,8 +350,75 @@ WHERE conversation_id = CAST(:convId AS UUID)
 
 ---
 
+### Message Reactions (W8-D1)
+
+**Package**: `com.chatapp.reaction.{entity,repository,dto,event,service,broadcast}`.
+
+**Toggle pattern (ReactionService.react)**:
+- No row → INSERT → broadcast ADDED (emoji=new, previousEmoji=null)
+- Row with same emoji → DELETE → broadcast REMOVED (emoji=null, previousEmoji=old)
+- Row with different emoji → UPDATE → broadcast CHANGED (emoji=new, previousEmoji=old)
+- UPDATE (không DELETE+INSERT) cho CHANGED — giữ id stable, tránh race condition.
+
+**Emoji validation (EmojiValidator)**:
+- Byte-length check TRƯỚC regex — tránh regex bypass với compound emoji dài.
+- VARCHAR(20) DB constraint → reject > 20 bytes UTF-8. Scotland flag = 28 bytes → REJECT.
+- Pattern covers: Miscellaneous Symbols (U+2600), Supplemental (U+1F000+), ZWJ (U+200D), skin-tone, variation selectors.
+
+**N+1 mitigation (batch load reactions)**:
+- Trong `MessageService.buildDtosWithReactions()`: 1 query `findAllByMessageIdIn(messageIds)`.
+- Group by messageId in Java memory → pass vào `messageMapper.toDto(m, currentUserId, reactions)`.
+- KHÔNG `@OneToMany(fetch=LAZY)` rồi access trong loop.
+
+**Aggregate helper (MessageMapper.aggregateReactions)**:
+- Group reactions by emoji → List<ReactionAggregateDto>.
+- Sort: count DESC, emoji ASC (codepoint — stable, deterministic).
+- currentUserReacted: in-memory check `userIds.contains(currentUserId)` (không query thêm).
+
+**STOMP handler (ChatReactHandler)**:
+- Destination: `/app/msg.{messageId}.react` — messageId từ path variable, KHÔNG conv.
+- HANDLER_CHECK policy: interceptor pass-through cho `/app/msg.*`, member check trong ReactionService.
+- clientId = null trong ERROR frame (REACT không có clientId — contract §3.15).
+- Không có ACK riêng — confirmation qua broadcast REACTION_CHANGED trên /topic/conv.{convId}.
+
+**Broadcaster (ReactionBroadcaster)**:
+- `@TransactionalEventListener(AFTER_COMMIT)` + `@Transactional(REQUIRES_NEW, readOnly)` — TX mới để DB access sau TX gốc close.
+- LinkedHashMap cho payload (Map.of() NPE khi emoji=null REMOVED case).
+
+**AuthChannelInterceptor update**:
+- Thêm `APP_MSG_PREFIX = "/app/msg."` → handleSend pass-through (return early) cho prefix này.
+- `.read` suffix là STRICT_MEMBER (W7-D5 đã chốt, test cũ viết sai → đã fix test).
+
+## Pin Message + User Block (W8-D2)
+
+**Pin Message (PinService + ChatPinHandler)**:
+- STOMP destination `/app/msg.{messageId}.pin`, action field `"PIN"|"UNPIN"` trong payload.
+- Permission: ONE_ON_ONE → any member; GROUP → `MemberRole.isAdminOrHigher()` (OWNER|ADMIN).
+- PIN_LIMIT = 3 per conversation. `countPinnedInConversation` query filter `deletedAt IS NULL`.
+- Idempotency: re-pin already-pinned → 200 no-op; re-unpin → 200 no-op.
+- Events `MessagePinnedEvent` / `MessageUnpinnedEvent` → `PinBroadcaster` `@TransactionalEventListener(AFTER_COMMIT)` + `@Transactional(REQUIRES_NEW, readOnly)`.
+- `pinnedAt Instant` + `pinnedByUserId UUID` trên Message entity (KHÔNG dùng OffsetDateTime cho pin).
+- `AuthChannelInterceptor` APP_MSG_PREFIX `/app/msg.` → pass-through đã bao gồm `.pin`.
+- `MessageDto` mở rộng: `pinnedAt Instant` + `pinnedBy Map<String,Object>` (null khi chưa pin/bị xóa).
+- `ConversationDto` mở rộng: `pinnedMessages List<MessageDto>` — nullable, chỉ populate trong `getConversation` detail endpoint (overloaded `from(conv, ownerResolver, pinnedMessages)`).
+- `MessageRepository` thêm: `countPinnedInConversation(convId)` + `findPinnedByConversation(convId)` cả hai filter `deletedAt IS NULL`.
+
+**User Block (BlockService + BlockController)**:
+- Bilateral check: `existsBilateral` query `(a→b) OR (b→a)`. Block là 1-chiều (người block → blocked), nhưng check 2 chiều để block messaging.
+- Self-block guard: `CANNOT_BLOCK_SELF`. Idempotency: block đã có → 200 no-op (KHÔNG exception).
+- `unblock`: dùng `@Modifying @Transactional @Query DELETE` thay vì `findBy` + `delete` để tránh extra SELECT.
+- `UserBlockRepository.findByBlocker_IdOrderByCreatedAtDesc` (dấu `_`) + `deleteByBlockerIdAndBlockedId` native JPQL.
+- Block check integration: `MessageService.sendViaStomp` (ONE_ON_ONE only), `ConversationService.createOneOnOne` — throw `MSG_USER_BLOCKED`.
+- REST: `POST /api/users/{id}/block`, `DELETE /api/users/{id}/block`, `GET /api/users/blocked` → `List<UserSearchDto>`.
+
+**Pitfall W8-D2**:
+- `@Column(name="system_metadata", columnDefinition="jsonb")` KHÔNG thêm columnDefinition nếu field có `@Convert(JsonMapConverter)` — H2 test mode nhận jsonb type → double-quote JSON string → `JsonMapConverter` throw. Giữ `@Column(name="system_metadata")` không có columnDefinition.
+- Record DTO mở rộng: khi thêm field vào record `MessageDto`, tất cả constructor calls trong test phải update. Grep `new MessageDto(` sau mỗi thay đổi.
+
 ## Changelog file này
 
+- 2026-04-22 W8D2: Pin Message + Bilateral Block — PinService, BlockService, STOMP /app/msg.*.pin, pinnedAt Instant (không OffsetDateTime), bilateral existsBilateral query, columnDefinition="jsonb" H2 pitfall.
+- 2026-04-22 W8D1: Reactions — toggle pattern, emoji byte-len check trước regex, batch N+1 mitigation, HANDLER_CHECK for /app/msg.*, clientId=null ERROR frame, LinkedHashMap null-safe.
 - 2026-04-22 (Consolidation W7): Compress W1-W5 domain patterns, preserve W6-W7 full, ADRs inline.
 - 2026-04-22 W7D5: Read Receipt Pattern — forward-only idempotent, countUnread NULL-safe native LEAST cap 99, ChatReadReceiptHandler fire-and-forget no ACK.
 - 2026-04-22 W7D4-fix: Hybrid File Visibility (ADR-021) — is_public flag, /public endpoint, FileConstants, @PostConstruct validate defaults, SecurityConfig order, Lombok isPublic, FileCleanupJob skip defaults, H2 V11 seed pitfall.

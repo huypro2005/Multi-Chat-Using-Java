@@ -16,8 +16,11 @@ import com.chatapp.message.event.MessageCreatedEvent;
 import com.chatapp.message.event.MessageDeletedEvent;
 import com.chatapp.message.event.MessageUpdatedEvent;
 import com.chatapp.message.repository.MessageRepository;
+import com.chatapp.reaction.entity.MessageReaction;
+import com.chatapp.reaction.repository.MessageReactionRepository;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
+import com.chatapp.user.service.BlockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -72,6 +75,8 @@ public class MessageService {
     private final SimpMessagingTemplate messagingTemplate;
     private final FileRecordRepository fileRecordRepository;
     private final MessageAttachmentRepository messageAttachmentRepository;
+    private final MessageReactionRepository messageReactionRepository;
+    private final BlockService blockService;
 
     // =========================================================================
     // sendMessage
@@ -169,6 +174,24 @@ public class MessageService {
             throw new AppException(HttpStatus.NOT_FOUND, "CONV_NOT_FOUND",
                     "Không tìm thấy cuộc trò chuyện",
                     Map.of("tempId", tempId));
+        }
+
+        // Step 2c: Bilateral block check (W8-D2 ADR-024) — DIRECT conv only
+        // GROUP: block không ảnh hưởng gửi message (đã check ở addMembers W7)
+        {
+            Conversation conv = conversationRepository.findById(convId).orElse(null);
+            if (conv != null && conv.getType() == com.chatapp.conversation.enums.ConversationType.ONE_ON_ONE) {
+                Set<UUID> memberIds = memberRepository.findUserIdsByConversationId(convId);
+                UUID other = memberIds.stream()
+                        .filter(id -> !id.equals(userId))
+                        .findFirst()
+                        .orElse(null);
+                if (other != null && blockService.isBilaterallyBlocked(userId, other)) {
+                    throw new AppException(HttpStatus.FORBIDDEN, "MSG_USER_BLOCKED",
+                            "Không thể gửi tin nhắn: bạn hoặc người dùng đã chặn nhau",
+                            Map.of("tempId", tempId));
+                }
+            }
         }
 
         // Step 2b: Validate replyToMessageId if present
@@ -341,7 +364,8 @@ public class MessageService {
                         .toString();
             }
 
-            List<MessageDto> dtos = pageItems.stream().map(messageMapper::toDto).toList();
+            // W8-D1: Batch load reactions — 1 query for all messages (N+1 mitigation BLOCKING)
+            List<MessageDto> dtos = buildDtosWithReactions(pageItems, currentUserId);
             return new MessageListResponse(dtos, hasMore, nextCursor);
         }
 
@@ -372,7 +396,8 @@ public class MessageService {
                     .toString();
         }
 
-        List<MessageDto> dtos = pageItems.stream().map(messageMapper::toDto).toList();
+        // W8-D1: Batch load reactions — 1 query for all messages (N+1 mitigation BLOCKING)
+        List<MessageDto> dtos = buildDtosWithReactions(pageItems, currentUserId);
 
         return new MessageListResponse(dtos, hasMore, nextCursor);
     }
@@ -596,6 +621,41 @@ public class MessageService {
     // =========================================================================
     // Private helpers
     // =========================================================================
+
+    /**
+     * Build MessageDto list với reactions batch-loaded (N+1 mitigation — W8-D1 BLOCKING).
+     *
+     * 1 query load tất cả reactions cho danh sách messages.
+     * Group in memory → pass vào mapper per-message.
+     *
+     * @param messages      list message đã paginate
+     * @param currentUserId caller UUID để compute currentUserReacted (null → all false)
+     * @return list MessageDto với reactions field populated
+     */
+    private List<MessageDto> buildDtosWithReactions(List<Message> messages, UUID currentUserId) {
+        if (messages.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Collect message IDs
+        List<UUID> messageIds = messages.stream().map(Message::getId).toList();
+
+        // 1 query batch load reactions (thay vì N queries trong loop)
+        List<MessageReaction> allReactions = messageReactionRepository.findAllByMessageIdIn(messageIds);
+
+        // Group by messageId for O(1) lookup per message
+        Map<UUID, List<MessageReaction>> reactionsByMessage = allReactions.stream()
+                .collect(Collectors.groupingBy(MessageReaction::getMessageId));
+
+        // Map each message to DTO with its reactions
+        return messages.stream()
+                .map(m -> messageMapper.toDto(
+                        m,
+                        currentUserId,
+                        reactionsByMessage.getOrDefault(m.getId(), Collections.emptyList())
+                ))
+                .toList();
+    }
 
     private void checkRateLimit(UUID userId) {
         String rateKey = "rate:msg:" + userId;

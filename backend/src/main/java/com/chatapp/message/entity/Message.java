@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
@@ -113,6 +114,19 @@ public class Message {
     @Convert(converter = JsonMapConverter.class)
     @Column(name = "system_metadata")
     private Map<String, Object> systemMetadata;
+
+    /**
+     * Timestamp khi tin nhắn được ghim. NULL = chưa ghim.
+     */
+    @Column(name = "pinned_at")
+    private Instant pinnedAt;
+
+    /**
+     * UUID của user đã ghim tin nhắn. NULL khi chưa ghim hoặc user bị xóa.
+     * ON DELETE SET NULL handled at DB level (V14 migration).
+     */
+    @Column(name = "pinned_by_user_id")
+    private UUID pinnedByUserId;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

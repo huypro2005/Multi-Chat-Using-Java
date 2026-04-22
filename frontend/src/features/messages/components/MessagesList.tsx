@@ -3,8 +3,10 @@ import { RefreshCw, MessageCircle } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import { useMessages } from '../hooks'
 import { useConversation } from '@/features/conversations/hooks'
+import { ConversationType } from '@/types/conversation'
 import MessageItem from './MessageItem'
 import { SystemMessage } from './SystemMessage'
+import { PinnedMessagesBanner } from './PinnedMessagesBanner'
 import { useAutoMarkRead } from '../hooks/useAutoMarkRead'
 import type { MessageDto } from '@/types/message'
 
@@ -112,6 +114,12 @@ export function MessagesList({ conversationId, onReply }: Props) {
   // Fetch conversation detail (cached — no extra network call if ConversationDetailPage already fetched)
   const { data: conversation } = useConversation(conversationId)
   const members = conversation?.members ?? []
+  const currentMember = members.find((m) => m.userId === user?.id)
+  const canPinInConversation = conversation
+    ? conversation.type === ConversationType.GROUP
+      ? currentMember?.role === 'OWNER' || currentMember?.role === 'ADMIN'
+      : true
+    : false
 
   // Infinite query cache stores pages as:
   // - pages[0]   = newest window
@@ -138,13 +146,25 @@ export function MessagesList({ conversationId, onReply }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
+  const messageRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const highlightTimeoutsRef = useRef<Record<string, number>>({})
   const [isAtBottom, setIsAtBottom] = useState(true)
   const didInitialScrollRef = useRef(false)
 
   // Mỗi khi đổi conversation, cho phép auto-scroll lần đầu về đáy.
   useEffect(() => {
     didInitialScrollRef.current = false
+    messageRefs.current = {}
   }, [conversationId])
+
+  useEffect(() => {
+    const highlightTimeouts = highlightTimeoutsRef.current
+    return () => {
+      for (const timeoutId of Object.values(highlightTimeouts)) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [])
 
   // Lần đầu vào chat: luôn nhảy xuống tin nhắn mới nhất.
   useEffect(() => {
@@ -166,6 +186,22 @@ export function MessagesList({ conversationId, onReply }: Props) {
     const el = e.currentTarget
     const threshold = 80 // px from bottom
     setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < threshold)
+  }, [])
+
+  const scrollToMessage = useCallback((messageId: string) => {
+    const el = messageRefs.current[messageId]
+    if (!el) return
+
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('ring-2', 'ring-amber-300', 'rounded-xl')
+
+    if (highlightTimeoutsRef.current[messageId]) {
+      window.clearTimeout(highlightTimeoutsRef.current[messageId])
+    }
+    highlightTimeoutsRef.current[messageId] = window.setTimeout(() => {
+      el.classList.remove('ring-2', 'ring-amber-300', 'rounded-xl')
+      delete highlightTimeoutsRef.current[messageId]
+    }, 2000)
   }, [])
 
   // Infinite scroll — load older messages khi scroll lên top
@@ -203,6 +239,11 @@ export function MessagesList({ conversationId, onReply }: Props) {
       {/* Sentinel top — kích hoạt infinite scroll khi user scroll lên đây */}
       <div ref={topSentinelRef} />
 
+      <PinnedMessagesBanner
+        pinnedMessages={conversation?.pinnedMessages ?? []}
+        onScrollTo={scrollToMessage}
+      />
+
       {/* Loading older messages */}
       {isFetchingNextPage && <SmallSpinner />}
 
@@ -226,15 +267,22 @@ export function MessagesList({ conversationId, onReply }: Props) {
 
         const isOwn = msg.sender?.id === user?.id
         return (
-          <MessageItem
+          <div
             key={msg.id}
-            message={msg}
-            isOwn={isOwn ?? false}
-            showAvatar={shouldShowAvatar(messages, idx)}
-            onReply={onReply}
-            members={members}
-            currentUserId={user?.id ?? ''}
-          />
+            ref={(el) => {
+              messageRefs.current[msg.id] = el
+            }}
+          >
+            <MessageItem
+              message={msg}
+              isOwn={isOwn ?? false}
+              showAvatar={shouldShowAvatar(messages, idx)}
+              onReply={onReply}
+              members={members}
+              currentUserId={user?.id ?? ''}
+              canPin={canPinInConversation}
+            />
+          </div>
         )
       })}
 

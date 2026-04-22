@@ -21,7 +21,7 @@ import { toast } from 'sonner'
 import { getStompClient, onConnectionStateChange } from '@/lib/stompClient'
 import { conversationKeys, messageKeys } from '@/features/conversations/queryKeys'
 import { useAuthStore } from '@/stores/authStore'
-import type { MessageDto, MessageListResponse } from '@/types/message'
+import type { MessageDto, MessageListResponse, ReactionAggregateDto } from '@/types/message'
 import type { ConversationDto, MemberDto } from '@/types/conversation'
 import { catchUpMissedMessages } from './catchUp'
 
@@ -92,6 +92,28 @@ interface ReadUpdatedPayload {
   userId: string
   lastReadMessageId: string
   readAt: string
+}
+
+// W8-D1 REACTION_CHANGED payload (§3.16 SOCKET_EVENTS.md)
+interface ReactionChangedPayload {
+  messageId: string
+  userId: string
+  userName: string
+  action: 'ADDED' | 'REMOVED' | 'CHANGED'
+  emoji: string | null       // non-null khi ADDED / CHANGED; null khi REMOVED
+  previousEmoji: string | null // null khi ADDED; non-null khi REMOVED / CHANGED
+}
+
+interface MessagePinnedPayload {
+  messageId: string
+  conversationId: string
+  pinnedAt: string
+  pinnedBy: { userId: string; userName: string } | null
+}
+
+interface MessageUnpinnedPayload {
+  messageId: string
+  conversationId: string
 }
 
 function isLikelyMatchOptimistic(tempMsg: MessageDto, incoming: MessageDto): boolean {
@@ -189,6 +211,25 @@ export function useConvSubscription(conversationId: string | undefined): void {
               conversationId!,
               event.payload as ReadUpdatedPayload,
             )
+          } else if (event.type === 'REACTION_CHANGED') {
+            handleReactionChanged(
+              queryClient,
+              conversationId!,
+              event.payload as ReactionChangedPayload,
+              currentUserId,
+            )
+          } else if (event.type === 'MESSAGE_PINNED') {
+            handleMessagePinned(
+              queryClient,
+              conversationId!,
+              event.payload as MessagePinnedPayload,
+            )
+          } else if (event.type === 'MESSAGE_UNPINNED') {
+            handleMessageUnpinned(
+              queryClient,
+              conversationId!,
+              event.payload as MessageUnpinnedPayload,
+            )
           }
         } catch (e) {
           console.error('[WS] Failed to parse message frame', e)
@@ -226,6 +267,53 @@ export function useConvSubscription(conversationId: string | undefined): void {
       unsubState()
     }
   }, [conversationId, currentUserId, queryClient, navigate])
+}
+
+function handleMessagePinned(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: MessagePinnedPayload,
+): void {
+  queryClient.setQueryData(
+    messageKeys.all(conversationId),
+    (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) =>
+      patchMessage(old, payload.messageId, {
+        pinnedAt: payload.pinnedAt,
+        pinnedBy: payload.pinnedBy ?? null,
+      }),
+  )
+  void queryClient.invalidateQueries({ queryKey: conversationKeys.detail(conversationId) })
+}
+
+function handleMessageUnpinned(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: MessageUnpinnedPayload,
+): void {
+  queryClient.setQueryData(
+    messageKeys.all(conversationId),
+    (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) =>
+      patchMessage(old, payload.messageId, {
+        pinnedAt: null,
+        pinnedBy: null,
+      }),
+  )
+  void queryClient.invalidateQueries({ queryKey: conversationKeys.detail(conversationId) })
+}
+
+function patchMessage(
+  old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined,
+  messageId: string,
+  patch: Partial<MessageDto>,
+): { pages: MessageListResponse[]; pageParams: unknown[] } | undefined {
+  if (!old) return old
+  return {
+    ...old,
+    pages: old.pages.map((page) => ({
+      ...page,
+      items: page.items.map((m) => (m.id === messageId ? { ...m, ...patch } : m)),
+    })),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +640,128 @@ function handleReadUpdated(
       newMembers[memberIdx] = { ...existing, lastReadMessageId: payload.lastReadMessageId }
       return { ...old, members: newMembers }
     },
+  )
+}
+
+// ---------------------------------------------------------------------------
+// W8-D1 Helper: REACTION_CHANGED — patch message.reactions in cache (§3.16)
+//
+// Branches: ADDED / REMOVED / CHANGED (toggle semantics).
+// Idempotent per contract — duplicate broadcast is no-op via userIds check.
+// Self-echo (caller also receives) — patch bình thường, idempotent handles no-op.
+// ---------------------------------------------------------------------------
+function handleReactionChanged(
+  queryClient: QueryClient,
+  conversationId: string,
+  payload: ReactionChangedPayload,
+  currentUserId: string | null,
+): void {
+  queryClient.setQueryData(
+    messageKeys.all(conversationId),
+    (old: { pages: MessageListResponse[]; pageParams: unknown[] } | undefined) => {
+      if (!old) return old
+
+      const pages = old.pages.map((page) => {
+        const idx = page.items.findIndex((m) => m.id === payload.messageId)
+        if (idx === -1) return page
+
+        const msg = page.items[idx]
+        const updatedReactions = applyReactionChange(
+          msg.reactions ?? [],
+          payload,
+          currentUserId,
+        )
+
+        const nextItems = [...page.items]
+        nextItems[idx] = { ...msg, reactions: updatedReactions }
+        return { ...page, items: nextItems }
+      })
+
+      return { ...old, pages }
+    },
+  )
+}
+
+/**
+ * Pure function: compute updated reactions array từ existing + ReactionChangedPayload.
+ * - ADDED: tăng count / thêm aggregate mới
+ * - REMOVED: giảm count / xoá aggregate khi count==0
+ * - CHANGED: combine REMOVED(previousEmoji) + ADDED(emoji)
+ * - Sort result: count DESC, emoji ASC (stable, per contract §3.16 step 4)
+ * - Idempotent: skip duplicate ADDED (userIds already includes) / REMOVED (userIds not includes)
+ */
+function applyReactionChange(
+  reactions: ReactionAggregateDto[],
+  payload: ReactionChangedPayload,
+  currentUserId: string | null,
+): ReactionAggregateDto[] {
+  let result = [...reactions]
+
+  if (payload.action === 'REMOVED' && payload.previousEmoji) {
+    result = removeReaction(result, payload.previousEmoji, payload.userId)
+  } else if (payload.action === 'ADDED' && payload.emoji) {
+    result = addReaction(result, payload.emoji, payload.userId)
+  } else if (payload.action === 'CHANGED' && payload.emoji && payload.previousEmoji) {
+    result = removeReaction(result, payload.previousEmoji, payload.userId)
+    result = addReaction(result, payload.emoji, payload.userId)
+  }
+
+  // Update currentUserReacted flags based on current user
+  result = result.map((r) => ({
+    ...r,
+    currentUserReacted: currentUserId ? r.userIds.includes(currentUserId) : false,
+  }))
+
+  // Sort: count DESC, emoji ASC (stable)
+  result.sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count
+    return a.emoji.localeCompare(b.emoji)
+  })
+
+  return result
+}
+
+function addReaction(
+  reactions: ReactionAggregateDto[],
+  emoji: string,
+  userId: string,
+): ReactionAggregateDto[] {
+  const existing = reactions.find((r) => r.emoji === emoji)
+  if (existing) {
+    // Idempotent: skip nếu userId đã có (duplicate broadcast)
+    if (existing.userIds.includes(userId)) return reactions
+    return reactions.map((r) =>
+      r.emoji === emoji
+        ? { ...r, count: r.count + 1, userIds: [...r.userIds, userId] }
+        : r,
+    )
+  }
+  // Thêm aggregate mới
+  return [
+    ...reactions,
+    { emoji, count: 1, userIds: [userId], currentUserReacted: false }, // currentUserReacted set ở caller
+  ]
+}
+
+function removeReaction(
+  reactions: ReactionAggregateDto[],
+  emoji: string,
+  userId: string,
+): ReactionAggregateDto[] {
+  const existing = reactions.find((r) => r.emoji === emoji)
+  if (!existing) return reactions
+  // Idempotent: skip nếu userId không có
+  if (!existing.userIds.includes(userId)) return reactions
+
+  const newCount = existing.count - 1
+  if (newCount <= 0) {
+    // Xoá aggregate hoàn toàn
+    return reactions.filter((r) => r.emoji !== emoji)
+  }
+  return reactions.map((r) =>
+    r.emoji === emoji
+      ? { ...r, count: newCount, userIds: r.userIds.filter((id) => id !== userId) }
+      : r,
   )
 }
 

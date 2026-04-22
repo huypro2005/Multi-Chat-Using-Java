@@ -71,6 +71,19 @@ export interface SystemMetadata {
   autoTransferred?: boolean
 }
 
+// ---------------------------------------------------------------------------
+// ReactionAggregateDto (v1.5.0-w8-reactions)
+// Aggregate shape trong MessageDto.reactions[]. BE compute server-side.
+// Sort: count DESC, emoji ASC (stable). Empty array [] nếu không có reaction.
+// NEVER null — FE không phải null-check.
+// ---------------------------------------------------------------------------
+export interface ReactionAggregateDto {
+  emoji: string
+  count: number
+  userIds: string[]
+  currentUserReacted: boolean
+}
+
 export interface MessageDto {
   id: string
   conversationId: string
@@ -88,6 +101,12 @@ export interface MessageDto {
   // SYSTEM message fields (v1.2.0-w7-system) — null cho mọi type != 'SYSTEM'
   systemEventType?: SystemEventType | null
   systemMetadata?: SystemMetadata | null
+  // Reactions (v1.5.0-w8-reactions) — aggregate reactions cho message.
+  // Luôn là array (không null). Empty [] nếu không có reaction, SYSTEM msg, hoặc deletedAt != null.
+  reactions?: ReactionAggregateDto[]
+  // W8-D2 pin metadata
+  pinnedAt?: string | null
+  pinnedBy?: { userId: string; userName: string } | null
   // Optimistic / Path B fields — chỉ set trên client, không có trong REST response
   clientTempId?: string
   status?: 'sending' | 'sent' | 'failed'
@@ -118,6 +137,9 @@ export interface OptimisticMessage extends Omit<MessageDto, 'status'> {
 // ---------------------------------------------------------------------------
 // Unified ACK/ERROR envelope (ADR-017) — breaking change từ {tempId, message}
 // operation discriminator dùng để route handler trong useAckErrorSubscription
+//
+// W8-D1: REACT operation — ERROR frame có clientId: null (no tempId).
+// ACK không dùng queue (confirmation qua broadcast REACTION_CHANGED).
 // ---------------------------------------------------------------------------
 export interface AckEnvelope {
   operation: 'SEND' | 'EDIT' | 'DELETE'
@@ -125,12 +147,26 @@ export interface AckEnvelope {
   message: MessageDto
 }
 
-export interface ErrorEnvelope {
-  operation: 'SEND' | 'EDIT' | 'DELETE'
-  clientId: string
-  error: string
-  code: string
-}
+// ErrorEnvelope với discriminated union cho REACT (clientId: null)
+export type ErrorEnvelope =
+  | {
+      operation: 'SEND' | 'EDIT' | 'DELETE'
+      clientId: string
+      error: string
+      code: string
+    }
+  | {
+      operation: 'REACT'
+      clientId: null
+      error: string
+      code: string
+    }
+  | {
+      operation: 'PIN'
+      clientId: null
+      error: string
+      code: string
+    }
 
 // DELETE ACK minimal payload — chỉ có id + conversationId + deletedAt + deletedBy (§3d.3)
 export interface DeleteAckMessage {

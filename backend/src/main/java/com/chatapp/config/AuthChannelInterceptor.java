@@ -48,6 +48,7 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
 
     private static final String TOPIC_CONV_PREFIX = "/topic/conv.";
     private static final String APP_CONV_PREFIX = "/app/conv.";
+    private static final String APP_MSG_PREFIX = "/app/msg.";
 
     /**
      * Policy xác định cách xử lý SEND frame từ non-member.
@@ -84,8 +85,7 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
             case SUBSCRIBE -> handleSubscribe(accessor);
             case SEND -> handleSend(accessor);
             default -> {
-                // SEND, DISCONNECT, UNSUBSCRIBE, ... — pass through cho W4.
-                // SEND authorization + rate limit sẽ được thêm ở Tuần 5 khi có /app/* inbound.
+                // DISCONNECT, UNSUBSCRIBE, ... — pass through.
             }
         }
         return message;
@@ -169,7 +169,19 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
         }
 
         String destination = accessor.getDestination();
-        if (destination == null || !destination.startsWith(APP_CONV_PREFIX)) {
+        if (destination == null) {
+            return;
+        }
+
+        // W8-D1: /app/msg.{messageId}.react — HANDLER_CHECK policy (SILENT_DROP at interceptor).
+        // Member check thực hiện trong ReactionService (piggyback message query → convId).
+        // Destination pattern khác /app/conv.* nên không thể extract convId ở đây.
+        if (destination.startsWith(APP_MSG_PREFIX)) {
+            // Pass through — auth đã verified at CONNECT. Handler tự validate member.
+            return;
+        }
+
+        if (!destination.startsWith(APP_CONV_PREFIX)) {
             return;
         }
 

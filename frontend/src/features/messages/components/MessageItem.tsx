@@ -17,6 +17,9 @@ import { ReplyQuote } from './ReplyQuote'
 import { ReadTicks } from './ReadTicks'
 import { AttachmentGallery } from '@/features/files/components/AttachmentGallery'
 import { FileCard } from '@/features/files/components/FileCard'
+import { ReactionAggregate } from '@/features/reactions/components/ReactionAggregate'
+import { useReact } from '@/features/reactions/hooks/useReact'
+import { usePin } from '../hooks/usePin'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -38,6 +41,7 @@ interface Props {
   members?: MemberDto[]
   /** Current user id để compute ReadTicks */
   currentUserId?: string
+  canPin?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +229,18 @@ function InlineEditArea({
 // MessageItemInner — the actual bubble render for TEXT/IMAGE/FILE messages
 // Separated so MessageItem can dispatch SYSTEM early without hook order issues.
 // ---------------------------------------------------------------------------
-function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], currentUserId = '' }: Props) {
+function MessageItemInner({
+  message,
+  isOwn,
+  showAvatar,
+  onReply,
+  members = [],
+  currentUserId = '',
+  canPin = false,
+}: Props) {
   const [isEditing, setIsEditing] = useState(false)
+  const react = useReact(message.id)
+  const { pin, unpin } = usePin(message.id)
 
   // Dùng clientTempId để detect optimistic; nếu không có → dùng heuristic id
   const isSending = message.status === 'sending'
@@ -275,6 +289,14 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], c
     }
   }, [message.content])
 
+  const handleTogglePin = useCallback(() => {
+    if (message.pinnedAt) {
+      unpin()
+      return
+    }
+    pin()
+  }, [message.pinnedAt, pin, unpin])
+
   // --- Bubble sent by current user ---
   if (isOwn) {
     const hasAttachments = !isDeleted && message.attachments && message.attachments.length > 0
@@ -303,6 +325,9 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], c
                 onDelete={handleDelete}
                 onReply={handleReply}
                 onCopy={handleCopy}
+                onReact={react}
+                canPin={canPin}
+                onTogglePin={handleTogglePin}
               />
             </div>
           )}
@@ -347,9 +372,14 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], c
                 {/* Text content (caption) with bubble background */}
                 {hasContent && (
                   <div
-                    className={`rounded-2xl rounded-br-sm px-4 py-2 text-sm whitespace-pre-wrap break-words
+                    className={`relative rounded-2xl rounded-br-sm px-4 py-2 text-sm whitespace-pre-wrap break-words
                       ${isFailed ? 'bg-red-100 text-red-800 border border-red-200' : 'bg-indigo-600 text-white'}`}
                   >
+                    {message.pinnedAt && (
+                      <span className="absolute -top-1 -left-1 text-xs" aria-label="Tin nhắn đã ghim">
+                        📌
+                      </span>
+                    )}
                     {message.content}
                     {/* "(đã chỉnh sửa)" badge — chỉ khi editedAt != null và chưa xoá */}
                     {message.editedAt && (
@@ -389,89 +419,115 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], c
         {isFailed && isTemp && (
           <RetryButton message={message} />
         )}
+
+        {/* ReactionAggregate — bên dưới bubble, justify-end (isOwn) */}
+        {message.reactions && message.reactions.length > 0 && (
+          <div className="flex justify-end">
+            <ReactionAggregate reactions={message.reactions} onToggle={react} />
+          </div>
+        )}
+
       </div>
     )
   }
 
   // --- Bubble from other user ---
   return (
-    <div className="flex justify-start items-end gap-1.5 group">
-      {/* Avatar — chỉ hiện khi showAvatar=true, giữ chỗ khi false */}
-      <div className="flex-shrink-0 self-end" style={{ width: 28, height: 28 }}>
-        {showAvatar && message.sender ? (
-          <UserAvatar user={message.sender} size={28} />
-        ) : null}
+    <div className="flex flex-col gap-0 group">
+      <div className="flex justify-start items-end gap-1.5">
+        {/* Avatar — chỉ hiện khi showAvatar=true, giữ chỗ khi false */}
+        <div className="flex-shrink-0 self-end" style={{ width: 28, height: 28 }}>
+          {showAvatar && message.sender ? (
+            <UserAvatar user={message.sender} size={28} />
+          ) : null}
+        </div>
+
+        <div className="max-w-xs sm:max-w-sm md:max-w-md">
+          {/* Sender name — chỉ hiện khi showAvatar=true */}
+          {showAvatar && message.sender && (
+            <p className="text-xs text-gray-500 mb-0.5 ml-1">{message.sender.fullName}</p>
+          )}
+
+          {/* Reply quote */}
+          {message.replyToMessage && !isDeleted && (
+            <ReplyQuote replyTo={message.replyToMessage} />
+          )}
+
+          {/* Deleted placeholder or normal bubble */}
+          {isDeleted ? (
+            <DeletedMessagePlaceholder />
+          ) : (
+            <>
+              {/* Attachments — Messenger-style: no bubble background */}
+              {message.attachments && message.attachments.length > 0 && !isDeleted && (
+                <div className="mb-1">
+                  {(message.attachments[0].iconType === 'IMAGE' ||
+                    (!message.attachments[0].iconType &&
+                      message.attachments[0].mime.startsWith('image/'))) ? (
+                    <AttachmentGallery attachments={message.attachments} />
+                  ) : (
+                    <FileCard attachment={message.attachments[0]} />
+                  )}
+                </div>
+              )}
+
+              {/* Text content with bubble — only render when content exists */}
+              {message.content && (
+                <div
+                  className="relative bg-white border border-gray-200 rounded-2xl rounded-bl-sm
+                    px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
+                >
+                  {message.pinnedAt && (
+                    <span className="absolute -top-1 -left-1 text-xs" aria-label="Tin nhắn đã ghim">
+                      📌
+                    </span>
+                  )}
+                  {message.content}
+                  {/* "(đã chỉnh sửa)" badge */}
+                  {message.editedAt && (
+                    <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* MessageActions — chỉ hiện khi không deleted */}
+        {!isDeleted && (
+          <div className="self-end mb-1">
+            <MessageActions
+              message={message}
+              isOwn={isOwn}
+              canEdit={false} // other user's message — không edit được
+              onEdit={handleOpenEdit}
+              onDelete={handleDelete}
+              onReply={handleReply}
+              onCopy={handleCopy}
+              onReact={react}
+              canPin={canPin}
+              onTogglePin={handleTogglePin}
+            />
+          </div>
+        )}
+
+        {/* Timestamp — hiện khi hover */}
+        <span
+          className="text-xs text-gray-400 opacity-0 group-hover:opacity-100
+            transition-opacity duration-150 self-end mb-1 select-none"
+          aria-hidden="true"
+        >
+          {timeLabel}
+        </span>
       </div>
 
-      <div className="max-w-xs sm:max-w-sm md:max-w-md">
-        {/* Sender name — chỉ hiện khi showAvatar=true */}
-        {showAvatar && message.sender && (
-          <p className="text-xs text-gray-500 mb-0.5 ml-1">{message.sender.fullName}</p>
-        )}
-
-        {/* Reply quote */}
-        {message.replyToMessage && !isDeleted && (
-          <ReplyQuote replyTo={message.replyToMessage} />
-        )}
-
-        {/* Deleted placeholder or normal bubble */}
-        {isDeleted ? (
-          <DeletedMessagePlaceholder />
-        ) : (
-          <>
-            {/* Attachments — Messenger-style: no bubble background */}
-            {message.attachments && message.attachments.length > 0 && !isDeleted && (
-              <div className="mb-1">
-                {(message.attachments[0].iconType === 'IMAGE' ||
-                  (!message.attachments[0].iconType &&
-                    message.attachments[0].mime.startsWith('image/'))) ? (
-                  <AttachmentGallery attachments={message.attachments} />
-                ) : (
-                  <FileCard attachment={message.attachments[0]} />
-                )}
-              </div>
-            )}
-
-            {/* Text content with bubble — only render when content exists */}
-            {message.content && (
-              <div
-                className="bg-white border border-gray-200 rounded-2xl rounded-bl-sm
-                  px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap break-words"
-              >
-                {message.content}
-                {/* "(đã chỉnh sửa)" badge */}
-                {message.editedAt && (
-                  <span className="text-gray-400 text-xs ml-1.5 opacity-75">(đã chỉnh sửa)</span>
-                )}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* MessageActions — chỉ hiện khi không deleted */}
-      {!isDeleted && (
-        <div className="self-end mb-1">
-          <MessageActions
-            message={message}
-            isOwn={isOwn}
-            canEdit={false} // other user's message — không edit được
-            onEdit={handleOpenEdit}
-            onDelete={handleDelete}
-            onReply={handleReply}
-            onCopy={handleCopy}
-          />
+      {/* ReactionAggregate bên dưới bubble (other user), indent theo avatar */}
+      {message.reactions && message.reactions.length > 0 && (
+        <div className="pl-9">
+          <ReactionAggregate reactions={message.reactions} onToggle={react} />
         </div>
       )}
 
-      {/* Timestamp — hiện khi hover */}
-      <span
-        className="text-xs text-gray-400 opacity-0 group-hover:opacity-100
-          transition-opacity duration-150 self-end mb-1 select-none"
-        aria-hidden="true"
-      >
-        {timeLabel}
-      </span>
     </div>
   )
 }
@@ -482,7 +538,15 @@ function MessageItemInner({ message, isOwn, showAvatar, onReply, members = [], c
 // Defense-in-depth: MessagesList already handles the split, but this guards
 // against standalone usage.
 // ---------------------------------------------------------------------------
-const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onReply, members, currentUserId: currentUserIdProp }: Props) {
+const MessageItem = memo(function MessageItem({
+  message,
+  isOwn,
+  showAvatar,
+  onReply,
+  members,
+  currentUserId: currentUserIdProp,
+  canPin,
+}: Props) {
   const currentUserIdFromStore = useAuthStore((s) => s.user?.id ?? '')
   const currentUserId = currentUserIdProp ?? currentUserIdFromStore
 
@@ -498,6 +562,7 @@ const MessageItem = memo(function MessageItem({ message, isOwn, showAvatar, onRe
       onReply={onReply}
       members={members}
       currentUserId={currentUserId}
+      canPin={canPin}
     />
   )
 })

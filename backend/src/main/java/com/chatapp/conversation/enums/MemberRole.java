@@ -65,4 +65,11 @@ public enum MemberRole {
     public boolean canTransferOwnership() {
         return this == OWNER;
     }
+
+    /**
+     * OWNER hoặc ADMIN — dùng cho pin authorization trong GROUP conv.
+     */
+    public boolean isAdminOrHigher() {
+        return this == OWNER || this == ADMIN;
+    }
 }

@@ -4,8 +4,11 @@
 // ---------------------------------------------------------------------------
 
 // Dùng const object thay vì enum vì TypeScript erasableSyntaxOnly mode.
+import type { MessageDto } from './message'
+
 export const ConversationType = {
   ONE_ON_ONE: 'ONE_ON_ONE',
+  DIRECT: 'DIRECT',
   GROUP: 'GROUP',
 } as const
 export type ConversationType = (typeof ConversationType)[keyof typeof ConversationType]
@@ -29,6 +32,7 @@ export interface MemberDto {
   username: string
   fullName: string
   avatarUrl: string | null
+  isBlockedByMe?: boolean
   role: MemberRole
   lastReadMessageId: string | null // W7-D5: read receipt pointer
   joinedAt: string // ISO8601
@@ -53,6 +57,7 @@ export interface ConversationDto {
   createdBy: CreatedByDto | null
   owner: OwnerDto | null // W7: chỉ có cho GROUP
   members: MemberDto[]
+  pinnedMessages?: MessageDto[]
   createdAt: string // ISO8601
   lastMessageAt: string | null // ISO8601
 }

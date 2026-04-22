@@ -1,6 +1,6 @@
 # WebSocket / STOMP Events Contract
-_Version: v1.9-w7_
-_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`; W7-D4 SYSTEM messages piggyback trên MESSAGE_CREATED với `type: "SYSTEM"` + `systemEventType` + `systemMetadata`; **W7-D5 Read receipts** — inbound `/app/conv.{convId}.read` (idempotent forward-only) + outbound `READ_UPDATED` broadcast trên `/topic/conv.{id}` + `ConversationDto.members[].lastReadMessageId` (FE tự compute readBy per message client-side)_
+_Version: v1.11-w8_
+_Status: Accepted — Path B (STOMP-send) chốt sau W4D4; Edit (W5-D2) + Delete (W5-D3) dùng unified ACK queue; W6-D1 thêm attachments cho SEND; W7-D1 thêm Group Chat events (MEMBER_ADDED/REMOVED, ROLE_CHANGED, CONVERSATION_UPDATED, GROUP_DELETED, OWNER_TRANSFERRED); W7-D2 finalize member-management broadcast shapes + thêm user-specific destinations `/user/{userId}/queue/conv-added|conv-removed`; W7-D4 SYSTEM messages piggyback trên MESSAGE_CREATED với `type: "SYSTEM"` + `systemEventType` + `systemMetadata`; W7-D5 Read receipts — inbound `/app/conv.{convId}.read` + outbound `READ_UPDATED` broadcast + `members[].lastReadMessageId`; W8-D1 Message Reactions — inbound `/app/msg.{messageId}.react` (fire-and-forget, no clientId) + outbound `REACTION_CHANGED` broadcast trên `/topic/conv.{convId}` (action ADDED/REMOVED/CHANGED) + MessageDto extend `reactions: ReactionAggregateDto[]`; **W8-D2 Pin Message** — inbound `/app/msg.{messageId}.pin` (fire-and-forget, no clientId) + outbound `MESSAGE_PINNED` / `MESSAGE_UNPINNED` broadcast trên `/topic/conv.{convId}` + MessageDto extend `pinnedAt` + `pinnedBy`_
 _Owner: code-reviewer (architect)_
 
 > File này là **source of truth** cho mọi WebSocket event giữa frontend và backend.
@@ -54,6 +54,8 @@ _Owner: code-reviewer (architect)_
 | `/app/conv.{convId}.delete` | Delete message | STRICT_MEMBER | 10/phút/user | Tuần 5 |
 | `/app/conv.{conversationId}.typing` | Typing indicator | SILENT_DROP | 1 event/2s/user/conv | Tuần 5 |
 | `/app/conv.{convId}.read` | Read receipt — đánh dấu đã đọc tới message | **STRICT_MEMBER** (check DB member + message thuộc conv) | 1 event/2s/user/conv | **W7-D5** |
+| `/app/msg.{messageId}.react` | Toggle reaction emoji trên message (ADDED/REMOVED/CHANGED) | **STRICT_MEMBER** (member của conv chứa message — check trong handler, không interceptor vì destination là messageId không phải convId) | 5 reactions/second/user | **W8-D1** |
+| `/app/msg.{messageId}.pin` | Pin/Unpin message (action PIN/UNPIN) | **HANDLER_CHECK** (cùng pattern `.react` — destination messageId-based, resolve convId trong handler; thêm role check GROUP OWNER/ADMIN) | 5/second/user | **W8-D2** |
 
 ### User queues (Server → Client, per-user targeted)
 
@@ -68,7 +70,7 @@ Spring STOMP user destination — BE gửi bằng `SimpMessagingTemplate.convert
 
 > **FE subscription**: Spring STOMP prefix `/user` auto-resolved per-session — FE subscribe literal `/user/queue/conv-added` (không cần userId trong path). BE gửi với `convertAndSendToUser(userIdString, "/queue/conv-added", payload)`.
 
-> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017) + `/user/queue/conv-added`, `/user/queue/conv-removed` (W7-D2) + `/app/conv.{id}.read` + `READ_UPDATED` broadcast (**W7-D5**). Presence giữ cho phase sau.
+> **Scope hiện tại**: `/topic/conv.{conversationId}` broadcast (W4D4 done) + `/app/conv.{conversationId}.message` (Path B Post-W4, ADR-016) + `/app/conv.{id}.edit` (W5-D2) + `/app/conv.{id}.delete` (W5-D3) + `/app/conv.{id}.typing` (W5-D1) + `/user/queue/acks`, `/user/queue/errors` unified (ADR-017) + `/user/queue/conv-added`, `/user/queue/conv-removed` (W7-D2) + `/app/conv.{id}.read` + `READ_UPDATED` broadcast (W7-D5) + `/app/msg.{messageId}.react` + `REACTION_CHANGED` broadcast (W8-D1) + `/app/msg.{messageId}.pin` + `MESSAGE_PINNED` / `MESSAGE_UNPINNED` broadcast (**W8-D2**). Presence giữ cho phase sau.
 
 ---
 
@@ -656,6 +658,232 @@ FE xử lý tuần tự: sau #1 cache có new OWNER ở vị trí đầu, sau #2
 - Khi caller ≠ `payload.userId`: `unreadCount` của caller KHÔNG đổi từ READ_UPDATED frame này (người khác đọc không ảnh hưởng badge của caller).
 
 ### 3.14 (reserved) — _Không có event mới ở v1.9-w7 ngoài READ_UPDATED_
+
+---
+
+### 3.15 — `/app/msg.{messageId}.react` _(Tuần 8 — W8-D1)_
+
+**Direction**: Client → Server
+**Destination**: `/app/msg.{messageId}.react`
+**Auth**: STOMP `Principal` đã set ở CONNECT. Nếu thiếu → `AUTH_REQUIRED` trên `/user/queue/errors`.
+
+**Payload**:
+
+```json
+{ "emoji": "👍" }
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `emoji` | `string` | **required** | Non-null, non-empty, không toàn whitespace. Must match unicode emoji regex server-side. Max 20 bytes UTF-8 (DB column limit). |
+
+**KHÔNG có `clientId` / `tempId`**: reaction là fire-and-forget — confirmation của user thông qua broadcast `REACTION_CHANGED` (§3.16). FE không cần optimistic rollback riêng vì toggle UX reversible (user click lại để undo). Lý do: (a) giảm payload, (b) không cần dedup Redis NX EX (UNIQUE constraint DB đã lock race — 2 click nhanh = 2 transaction serialize qua `(message_id, user_id)` row lock), (c) không mismatch với 3 operation khác (SEND/EDIT/DELETE) có clientId vì operation REACT có shape `action` discriminator trong broadcast, FE đủ để patch cache.
+
+**Semantics (toggle)** — BE service atomic trong 1 `@Transactional`:
+
+| Current state (query DB cho `(messageId, userId)`) | Incoming `emoji` | Action | Broadcast `action` field |
+|----------------------------------------------------|------------------|--------|--------------------------|
+| Không có row | Bất kỳ emoji hợp lệ | `INSERT INTO message_reactions (...)` | `"ADDED"` |
+| Có row với `emoji = incoming` | Same emoji | `DELETE FROM message_reactions WHERE ...` | `"REMOVED"` |
+| Có row với `emoji != incoming` | Different emoji | `UPDATE message_reactions SET emoji = ?, created_at = NOW() WHERE ...` | `"CHANGED"` |
+
+> **Chọn UPDATE, không DELETE+INSERT**: giữ row `id` stable (audit trail V2 dễ hơn), tránh race giữa DELETE commit và INSERT (concurrent toggle từ 2 tab cùng user). UPDATE đơn atomic statement qua UNIQUE lock.
+
+**Validation chain** (server-side, order BLOCKING — rẻ trước đắt):
+
+1. **Auth**: Principal non-null. Fail → ERROR `AUTH_REQUIRED`.
+2. **Emoji format**: non-null, non-empty, trim không rỗng, match unicode emoji regex, length ≤ 20 bytes UTF-8. Fail → ERROR `REACTION_INVALID_EMOJI`.
+3. **Rate limit**: `INCR rate:msg-react:{userId}` + `EX 1` (seconds); nếu > 5 → ERROR `MSG_RATE_LIMITED` (Redis pattern ADR-005).
+4. **Message exists**: `SELECT id, conversation_id, type, deleted_at FROM messages WHERE id = :messageId`. Fail null → ERROR `MSG_NOT_FOUND` (anti-enum).
+5. **Member of conv**: `EXISTS SELECT 1 FROM conversation_members WHERE conversation_id = :convId AND user_id = :userId`. Fail → ERROR `NOT_MEMBER`.
+6. **SYSTEM check**: `message.type != 'SYSTEM'`. Fail → ERROR `REACTION_NOT_ALLOWED_FOR_SYSTEM` (ngoại lệ anti-enum — documented trong API_CONTRACT.md v1.5.0-w8-reactions, giống SYSTEM_MESSAGE_NOT_EDITABLE pattern).
+7. **Soft-delete check**: `message.deleted_at IS NULL`. Fail → ERROR `REACTION_MSG_DELETED` (ngoại lệ anti-enum — FE cache có `deletedAt` field nên distinguish không leak).
+8. **Toggle DB**: theo bảng trên, atomic trong `@Transactional`. Load `previousEmoji` (null nếu INSERT, old emoji nếu UPDATE hoặc DELETE same) cho broadcast payload.
+9. **Commit** → `@TransactionalEventListener(AFTER_COMMIT)` fire `REACTION_CHANGED` broadcast (§3.16).
+
+**Response to caller**: KHÔNG có ACK queue riêng. Confirmation qua broadcast `REACTION_CHANGED` — caller nhận broadcast trên `/topic/conv.{convId}` cùng các member khác (SimpleBroker default behavior). FE handler patch cache theo `userId == caller.id` → set `currentUserReacted` accordingly.
+
+**ERROR frame**: qua `/user/queue/errors` với shape unified (ADR-017):
+
+```json
+{
+  "operation": "REACT",
+  "clientId": null,
+  "code": "REACTION_INVALID_EMOJI | REACTION_NOT_ALLOWED_FOR_SYSTEM | REACTION_MSG_DELETED | MSG_NOT_FOUND | NOT_MEMBER | MSG_RATE_LIMITED | AUTH_REQUIRED | INTERNAL",
+  "error": "string (human-readable)"
+}
+```
+
+> **`clientId = null`**: vì REACT không có clientId trong payload. FE handler ERROR cho REACT operation phải tolerate null `clientId` (không `registry.get(null)` crash). Pattern: `switch(operation) { case "REACT": handleReactError(code); break; }` — không rely on clientId lookup. Route error bằng `messageId` không có vì ERROR frame không include (fire-and-forget không echo target).
+
+**Rate limit details**: `INCR rate:msg-react:{userId}` → nếu `return value == 1` set `EX 1` (1 second TTL). Nếu value > 5 → throw `MSG_RATE_LIMITED`. Redis pattern ADR-005 — consistent với các rate limit khác. Lý do 5/s (vs 1/s cho send): user click nhanh nhiều emoji thăm dò UX hợp lệ; spam 5+/s là outlier.
+
+**FE handling policy**:
+- ERROR `REACTION_INVALID_EMOJI` → toast "Emoji không hợp lệ" (rare — FE picker guard trước). `AUTH_REQUIRED` → trigger refresh flow. Others (`REACTION_MSG_DELETED`, `REACTION_NOT_ALLOWED_FOR_SYSTEM`, `NOT_MEMBER`, `MSG_NOT_FOUND`) → silent log + rollback optimistic patch (user thấy react đã ADDED trong 1 tick rồi revert — FE cần revert cache).
+- Optimistic UI: FE patch `message.reactions` ngay khi user click (trước khi broadcast về), rồi reconcile khi `REACTION_CHANGED` đến. Nếu ERROR đến trước broadcast → rollback. Nếu broadcast đến trước (normal case) → idempotent patch (already matched → no-op).
+
+---
+
+### 3.16 — `REACTION_CHANGED` broadcast _(Tuần 8 — W8-D1)_
+
+**Trigger**: Sau khi handler `/app/msg.{messageId}.react` commit DB thành công + fire `AFTER_COMMIT` listener. KHÔNG fire nếu validation fail ở bước 1-7 (client chỉ nhận ERROR queue).
+
+**Destination**: `/topic/conv.{convId}` — broadcast tới toàn bộ members của conv chứa message (bao gồm chính user vừa react, để multi-tab đồng bộ + caller nhận confirmation).
+
+**Envelope**:
+
+```json
+{
+  "type": "REACTION_CHANGED",
+  "payload": {
+    "messageId": "uuid",
+    "userId": "uuid",
+    "userName": "string",
+    "action": "ADDED | REMOVED | CHANGED",
+    "emoji": "string | null",
+    "previousEmoji": "string | null"
+  }
+}
+```
+
+**Field rules**:
+
+| Field | Type | Ý nghĩa | Rule |
+|-------|------|---------|------|
+| `messageId` | `uuid` | Message target của reaction | Luôn non-null. |
+| `userId` | `uuid` | User performing reaction (actor) | Luôn non-null. |
+| `userName` | `string` | Snapshot `user.fullName` tại thời điểm event | Snapshot (không rely on user cache FE vì có thể outdated). Lý do: FE có thể không có user info nếu user là thành viên mới (chưa paginate member list). |
+| `action` | enum | Phân biệt 3 case toggle | `ADDED` / `REMOVED` / `CHANGED`. BLOCKING cho FE branching. |
+| `emoji` | `string \| null` | Emoji HIỆN TẠI sau toggle | Non-null cho `ADDED` và `CHANGED`. **`null` cho `REMOVED`** (user đã hủy react — không còn emoji). |
+| `previousEmoji` | `string \| null` | Emoji TRƯỚC toggle | **`null` cho `ADDED`** (chưa có reaction trước đó). Non-null cho `REMOVED` (emoji vừa hủy) và `CHANGED` (emoji cũ trước khi update). |
+
+**Matrix field values theo action**:
+
+| `action` | `emoji` | `previousEmoji` |
+|----------|---------|-----------------|
+| `ADDED` | new emoji (non-null) | `null` |
+| `REMOVED` | `null` | old emoji (non-null) |
+| `CHANGED` | new emoji (non-null) | old emoji (non-null, khác `emoji`) |
+
+**FE action**:
+
+1. Parse → `WsEvent<ReactionChangedPayload>`.
+2. Find message trong cache React Query: `['messages', convId]` list hoặc `['message', messageId]` single.
+3. Patch `message.reactions` theo `action`:
+   - **ADDED**: tìm aggregate với `emoji == payload.emoji`:
+     - Nếu có: `count++`, `userIds.push(payload.userId)`, re-check `currentUserReacted = userIds.includes(currentUser.id)`.
+     - Nếu không: thêm aggregate mới `{emoji, count: 1, userIds: [userId], currentUserReacted: userId == currentUser.id}`.
+   - **REMOVED**: tìm aggregate với `emoji == payload.previousEmoji`:
+     - `count--`, `userIds = userIds.filter(id => id !== payload.userId)`.
+     - Nếu `count == 0` sau decrement → xoá aggregate hoàn toàn khỏi array.
+     - Re-check `currentUserReacted`.
+   - **CHANGED**: combine REMOVED (cho `previousEmoji`) + ADDED (cho `emoji`) — 2 step patch trên cùng cache entry.
+4. Re-sort `reactions[]` theo `count DESC, emoji ASC` (stable) — giữ consistent với BE sort contract.
+5. **Idempotent**: nếu broadcast đến lặp lại (rare với SimpleBroker) → check `userIds.includes(payload.userId)` để skip duplicate ADDED; skip duplicate REMOVED nếu `!userIds.includes`. CHANGED idempotent nếu kiểm tra state đầu-cuối match.
+6. **Self-echo**: caller cũng nhận broadcast (multi-tab sync). FE handler không skip theo `userId === currentUser.id` — patch bình thường. Nếu đã optimistic patch trước đó → step 3 là no-op (idempotent check).
+
+**Ordering caveats**:
+- BE commit TRƯỚC broadcast (`AFTER_COMMIT` pattern). Guarantee: nếu FE nhận REACTION_CHANGED → DB đã persisted → next REST `GET /messages/{id}` trả `reactions` khớp.
+- 2 user cùng react gần-đồng-thời → 2 frame độc lập. UNIQUE(message_id, user_id) DB lock serialize (concurrent toggle từ 2 user khác nhau không conflict — khác row). Cùng user 2 tab toggle nhanh → cùng row lock, 2 transaction serialize, FE cả 2 tab nhận 2 broadcast đúng thứ tự commit.
+- **KHÔNG có ordering constraint** với các event khác (MESSAGE_CREATED, MESSAGE_UPDATED, READ_UPDATED) — reaction events độc lập.
+
+**Race edge cases**:
+- **Reactions trên message đang được edit**: user A edit message X ở tick t, user B react tại tick t+10ms → MESSAGE_UPDATED + REACTION_CHANGED fire độc lập, FE cả 2 handler patch cache không conflict (khác field).
+- **Reactions trên message soft-delete race**: user A delete message X commit tại t, user B react tại t-5ms (concurrent) → DB row lock qua messages row (shared read) → B transaction có thể đọc `deleted_at = null` trước A commit → INSERT reaction → sau đó A commit delete. Result: reaction row vẫn tồn tại với message đã soft-delete. **Không BLOCKING V1**: next serialize (REST GET) với filter "soft-deleted → reactions=[]" trong MessageMapper bỏ qua. V2 có thể cleanup qua scheduled job. Xem Limitations V1 §8.
+- **User kicked race với react**: user A bị kick tại t, A react tại t-5ms → transaction B đọc `conversation_members` thấy A còn là member → react thành công. Sau đó A bị kick. Reaction row vẫn existing — FE khác xem thấy `userId: A` nhưng A không còn trong members list. FE tolerate (ignore orphan userId) — same pattern §3f.4 READ_UPDATED kick race.
+
+**Reconnect catch-up**: FE reconnect → re-fetch `GET /messages?cursor=...` → payload trả `reactions[]` latest. Bỏ qua missed REACTION_CHANGED frames trong quãng offline. Acceptable V1.
+
+---
+
+### 3.17 — `MESSAGE_PINNED` broadcast _(Tuần 8 — W8-D2)_
+
+**Trigger**: Sau khi handler `/app/msg.{messageId}.pin` với `action=PIN` commit DB thành công + fire `AFTER_COMMIT` listener. KHÔNG fire nếu validation fail (client chỉ nhận ERROR queue) hoặc nếu message đã pinned (idempotent no-op).
+
+**Destination**: `/topic/conv.{convId}` — broadcast tới toàn bộ members của conv chứa message (bao gồm chính user vừa pin, để multi-tab đồng bộ).
+
+**Envelope**:
+
+```json
+{
+  "type": "MESSAGE_PINNED",
+  "payload": {
+    "messageId": "uuid",
+    "conversationId": "uuid",
+    "pinnedBy": {
+      "userId": "uuid",
+      "userName": "string"
+    },
+    "pinnedAt": "ISO8601"
+  }
+}
+```
+
+**Field rules**:
+
+| Field | Type | Ý nghĩa | Rule |
+|-------|------|---------|------|
+| `messageId` | `uuid` | Message vừa được pin | Luôn non-null. |
+| `conversationId` | `uuid` | Conversation chứa message | Luôn non-null. |
+| `pinnedBy.userId` | `uuid` | User thực hiện pin | Luôn non-null. |
+| `pinnedBy.userName` | `string` | Snapshot `user.fullName` tại thời điểm event | Snapshot (không auto-update). Fallback "Unknown" nếu user deleted race. |
+| `pinnedAt` | `string` | ISO8601 timestamp pin | Luôn non-null. Từ `message.pinnedAt` sau save. |
+
+**FE action**:
+
+1. Parse → `WsEvent<MessagePinnedPayload>`.
+2. Patch message trong cache React Query `['messages', conversationId]`: find message by `messageId` → set `pinnedAt` + `pinnedBy`.
+3. Invalidate `['conversations', conversationId, 'detail']` để refresh `pinnedMessages` list.
+4. **Toast** (optional): "📌 {pinnedBy.userName} đã ghim tin nhắn".
+5. **Self-echo**: caller cũng nhận — FE handler không skip, patch bình thường (idempotent).
+
+**Ordering caveats**:
+- BE commit TRƯỚC broadcast (`AFTER_COMMIT` pattern). Guarantee: FE nhận event → DB đã persisted.
+- 2 user pin khác message gần-đồng-thời → 2 frame độc lập. Count check trong service (không FOR UPDATE V1 single-instance) có race window — xem WARNINGS W8-pin-limit-race.
+
+---
+
+### 3.18 — `MESSAGE_UNPINNED` broadcast _(Tuần 8 — W8-D2)_
+
+**Trigger**: Sau khi handler `/app/msg.{messageId}.pin` với `action=UNPIN` commit DB thành công + fire `AFTER_COMMIT` listener. KHÔNG fire nếu validation fail.
+
+**Destination**: `/topic/conv.{convId}` — broadcast tới toàn bộ members.
+
+**Envelope**:
+
+```json
+{
+  "type": "MESSAGE_UNPINNED",
+  "payload": {
+    "messageId": "uuid",
+    "conversationId": "uuid",
+    "unpinnedBy": {
+      "userId": "uuid",
+      "userName": "string"
+    }
+  }
+}
+```
+
+**Field rules**:
+
+| Field | Type | Ý nghĩa | Rule |
+|-------|------|---------|------|
+| `messageId` | `uuid` | Message vừa bị unpin | Luôn non-null. |
+| `conversationId` | `uuid` | Conversation chứa message | Luôn non-null. |
+| `unpinnedBy.userId` | `uuid` | User thực hiện unpin | Luôn non-null. |
+| `unpinnedBy.userName` | `string` | Snapshot `user.fullName` | Snapshot, fallback "Unknown". |
+
+> **Không có `unpinnedAt`**: unpin = set `pinned_at = null` → không có timestamp unpin. Nếu FE cần log thời điểm unpin → dùng `receivedAt` client-side (approximation).
+
+**FE action**:
+
+1. Parse → `WsEvent<MessageUnpinnedPayload>`.
+2. Patch message trong cache: find by `messageId` → set `pinnedAt = null`, `pinnedBy = null`.
+3. Invalidate `['conversations', conversationId, 'detail']` để refresh `pinnedMessages` list.
+4. **Toast** (optional): "{unpinnedBy.userName} đã bỏ ghim tin nhắn".
+
+**Reconnect catch-up (Pin/Unpin)**: FE reconnect → re-fetch `GET /api/conversations/{id}` detail → `pinnedMessages[]` trả trạng thái latest. Bỏ qua missed MESSAGE_PINNED/UNPINNED frames trong quãng offline. Acceptable V1.
 
 ---
 
@@ -2052,6 +2280,8 @@ BE gửi STOMP ERROR frame với header `message` chứa error code. FE map theo
 | `/app/conv.{id}.delete` | SEND | `STRICT_MEMBER` | `MessageDeliveryException("FORBIDDEN")` → ERROR `{operation:"DELETE", code:"FORBIDDEN"}` |
 | `/app/conv.{id}.typing` | SEND | `SILENT_DROP` | Frame accepted by interceptor, `ChatTypingHandler` silent-drops non-member |
 | `/app/conv.{id}.read` | SEND | `STRICT_MEMBER` (W7-D5) | Non-member → ERROR `/user/queue/errors` `{operation: "READ", code: "NOT_MEMBER"}`. Lý do đổi từ `SILENT_DROP` (spec cũ W5) sang `STRICT_MEMBER`: read receipt persist vào DB (`conversation_members.last_read_message_id`) + broadcast `READ_UPDATED` cho toàn bộ members → non-member gửi vào có thể leak read state / spam DB write. Validation trong handler (messageId thuộc conv) vẫn cần — interceptor chỉ check membership. |
+| `/app/msg.{messageId}.react` | SEND | `HANDLER_CHECK` (W8-D1) | Interceptor **KHÔNG** check membership (destination là `messageId`, không phải `convId` — interceptor không có FK để resolve). Handler `ChatReactionHandler` MUST check chain: (1) load `message` → `MSG_NOT_FOUND`; (2) derive `convId` từ message; (3) check `EXISTS conversation_members` → `NOT_MEMBER`. ERROR `/user/queue/errors` `{operation: "REACT", clientId: null, code: NOT_MEMBER \| MSG_NOT_FOUND \| ...}`. Rationale: resolve messageId → convId cần 1 DB query — interceptor layer tránh N+1 trên mọi SEND (many messages, ít react); handler đã query message cho emoji validation pipeline → piggyback check member vào cùng transaction. Trade-off: FORBIDDEN không xuất hiện trên STOMP ERROR headers — user nhận ERROR frame qua user queue thay vì STOMP ERROR frame. Consistent với `.typing` SILENT_DROP pattern (handler-level policy). |
+| `/app/msg.{messageId}.pin` | SEND | `HANDLER_CHECK` (W8-D2) | Cùng pattern `.react` — interceptor pass-through, handler MUST check: (1) load message → `MSG_NOT_FOUND`; (2) derive `convId`; (3) member check → `NOT_MEMBER`; (4) **role check** GROUP OWNER/ADMIN → `FORBIDDEN` (thêm so với .react vì pin có authorization matrix). ERROR `/user/queue/errors` `{operation: "PIN", clientId: null, code: ...}`. Rationale: message-based destination cần 1 query để resolve conv — piggyback member + role check trong handler transaction. |
 | `/app/conv.{id}.<unknown>` | SEND | `STRICT_MEMBER` (default safe) | `MessageDeliveryException("FORBIDDEN")` |
 | `/topic/conv.{id}` | SUBSCRIBE | `STRICT_MEMBER` | `MessageDeliveryException("FORBIDDEN")` → STOMP ERROR frame |
 
@@ -2089,6 +2319,9 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 - **ADR-016**: Chuyển path gửi tin từ REST → STOMP (Path B). Client gửi qua `/app/conv.{id}.message` với tempId, server ACK qua `/user/queue/acks`, ERROR qua `/user/queue/errors`. Redis dedup `msg:dedup:{userId}:{tempId}` TTL 60s. REST giữ cho batch/bot/fallback.
 - **ADR-017**: **Unified ACK/ERROR queue với `operation` discriminator** thay vì tách queue per operation (`/user/queue/acks-edit`, `/user/queue/acks-delete`, ...). Payload shape: `{operation: "SEND"|"EDIT"|"DELETE"|"REACT", clientId: UUID, message|error, ...}`. Lý do: (1) tránh proliferation queues khi thêm operation (DELETE, REACT, REPLY), (2) FE routing đơn giản qua `switch(operation)` một chỗ thay vì mount N subscription, (3) giữ `/user/queue/acks` + `/user/queue/errors` làm 2 entry-point duy nhất cho mọi operation client-initiated. Trade-off: SEND ACK shape cũ `{tempId, message}` phải migrate breaking — BE + FE deploy đồng bộ. `tempId` rename thành `clientId` ở contract mới (generic hơn), nhưng giá trị vẫn là UUID v4 client sinh. Ngày: 2026-04-20 (W5-D2).
 - **ADR-018**: **Delete policy — no time window, soft delete, content strip tại mapper**. Khác EDIT (cửa sổ 5 phút chống gaslight), DELETE không có thời gian giới hạn — user có quyền xoá lịch sử của chính mình bất kỳ lúc nào. Soft delete bằng 2 cột `deleted_at` + `deleted_by` (giữ row để bảo toàn thứ tự, unread count, reply-to reference). BE `MessageMapper.toDto` strip `content=null` nhất quán khi `deletedAt != null` (áp dụng REST + WS broadcast + ACK). FE render placeholder "🚫 Tin nhắn đã bị xóa". ACK DELETE dùng metadata minimal `{id, conversationId, deletedAt, deletedBy}` (không có content/sender/createdAt) để giảm payload + tránh leak. Trade-off: V2 có thể add grace-period 5s client-side để user undo (tech debt đã note). Ngày: 2026-04-20 (W5-D3).
+- **ADR-022** (W8 canonical, xem ARCHITECTURE.md §12): **Message Reactions with Any Emoji**. Schema `message_reactions` với `UNIQUE(message_id, user_id)` — 1 user 1 emoji per message. Toggle 3 semantic: no-existing → INSERT (ADDED), same → DELETE (REMOVED), different → UPDATE (CHANGED). Aggregate `ReactionAggregateDto {emoji, count, userIds, currentUserReacted}` embed vào `MessageDto.reactions[]` sort count DESC. STOMP inbound `/app/msg.{messageId}.react` payload `{emoji}` (KHÔNG clientId — fire-and-forget, confirmation qua broadcast). Broadcast `REACTION_CHANGED` `/topic/conv.{convId}` với `action` discriminator. SYSTEM + soft-deleted reject. Emoji server-side regex validate. Rate limit 5/s/user (loose, quick-react UX). BE batch load N+1 mitigation. ADR-017 unified queue đã reserve `operation: "REACT"` từ W5-D2 — ERROR frame `{operation: "REACT", clientId: null, code: ...}`. FE `@emoji-mart/react` picker. Ngày: 2026-04-22 (W8-D1).
+- **ADR-023** (W8-D2, xem ARCHITECTURE.md §12): **Pin Message**. Max 3 pinned per conv. STOMP `/app/msg.{messageId}.pin` payload `{action}`, policy HANDLER_CHECK (cùng pattern .react). Role check GROUP OWNER/ADMIN, DIRECT any member. Broadcast `MESSAGE_PINNED` / `MESSAGE_UNPINNED` trên `/topic/conv.{convId}`. Fire-and-forget (no clientId). MessageDto extend `pinnedAt` + `pinnedBy`. ConversationDetailDto extend `pinnedMessages[]`. Pin limit race V1 acceptable (single instance). Ngày: 2026-04-22 (W8-D2).
+- **ADR-024** (W8-D2, xem ARCHITECTURE.md §12): **Bilateral User Block**. REST only (không STOMP destination). Block check integrate vào `sendViaStomp` (DIRECT only) + `createDirect`. GROUP send KHÔNG block. `existsBilateral` OR query. Privacy: `isBlockedByMe` only, không `hasBlockedMe`. Ngày: 2026-04-22 (W8-D2).
 
 ---
 
@@ -2158,6 +2391,8 @@ Các quyết định kiến trúc liên quan (chi tiết trong `.claude/memory/r
 
 | Ngày | Version | Thay đổi |
 |------|---------|---------|
+| 2026-04-22 | v1.11-w8 | **W8-D2 Pin Message**. (1) **§2 Destinations** — thêm row `/app/msg.{messageId}.pin` inbound, policy `HANDLER_CHECK` (cùng pattern `.react` W8-D1 — destination messageId-based, interceptor pass-through, handler resolve convId + member check + role check). Rate limit 5/second/user. (2) **§3.17 NEW — `MESSAGE_PINNED` broadcast**: outbound event trên `/topic/conv.{convId}`, payload `{messageId, conversationId, pinnedBy: {userId, userName}, pinnedAt}`. FE action: patch message cache `pinnedAt` + `pinnedBy`, invalidate conv detail query cho `pinnedMessages` refresh. (3) **§3.18 NEW — `MESSAGE_UNPINNED` broadcast**: outbound trên `/topic/conv.{convId}`, payload `{messageId, conversationId, unpinnedBy: {userId, userName}}`. FE action: patch cache `pinnedAt=null` + `pinnedBy=null`, invalidate conv detail. (4) **§7.1 Destination Policy Table** — thêm row `.pin` HANDLER_CHECK: cùng pattern `.react` + thêm role check cho GROUP conv (OWNER/ADMIN only). (5) **§9 ADR Reference** — thêm ADR-023 Pin Message + ADR-024 Bilateral User Block (REST only, không STOMP destination). (6) **ERROR frame**: unified shape `{operation: "PIN", clientId: null, code}` — FE MUST tolerate null clientId. Error codes: `PIN_LIMIT_EXCEEDED`, `MESSAGE_NOT_PINNED`, `FORBIDDEN`, `MSG_DELETED`, `INVALID_ACTION` + reuse `MSG_NOT_FOUND`, `NOT_MEMBER`, `MSG_RATE_LIMITED`. (7) **Block User**: KHÔNG có STOMP destination — REST only. Block check integrate trong existing STOMP send handler (`sendViaStomp` DIRECT conv → `MSG_USER_BLOCKED`). Xem API_CONTRACT.md v1.6.0-w8-pin-block. (8) **Reconnect catch-up**: re-fetch conv detail → `pinnedMessages[]` latest. KHÔNG breaking existing — additive events + fields. Depends on: Migration V14 + V15 (xem API_CONTRACT.md). |
+| 2026-04-22 | v1.10-w8 | **W8-D1 Message Reactions**. (1) **§2 Destinations** — thêm row `/app/msg.{messageId}.react` inbound, policy `HANDLER_CHECK` (không STRICT_MEMBER qua interceptor vì destination dùng messageId không có FK convId — resolve membership trong handler). Rate limit 5 reactions/second/user (Redis `rate:msg-react:{userId}` INCR EX 1 — looser hơn send 30/phút, edit/delete 10/phút; rationale: quick-react batch UX hợp lệ). (2) **§3.15 NEW — `/app/msg.{messageId}.react` spec**: payload `{emoji}` (KHÔNG clientId — fire-and-forget, confirmation qua broadcast). Validation chain rẻ→đắt: auth → emoji regex → rate limit → message exists → member → NOT SYSTEM → NOT deleted → toggle DB. Toggle semantics 3 case: no-existing → INSERT (ADDED), same emoji → DELETE (REMOVED), different → UPDATE (CHANGED — chọn UPDATE thay DELETE+INSERT để stable `id` + tránh race). `@Transactional` atomic qua UNIQUE(message_id, user_id) lock. ERROR frame shape unified (ADR-017) `{operation: "REACT", clientId: null, code, error}` — `clientId: null` vì REACT không optimistic ID → FE handler ERROR phải tolerate null clientId. Rate limit 5/s consistent pattern ADR-005. (3) **§3.16 NEW — `REACTION_CHANGED` broadcast**: outbound event trên `/topic/conv.{convId}`, payload `{messageId, userId, userName (snapshot), action, emoji, previousEmoji}`. Matrix field: ADDED → emoji non-null + previousEmoji null; REMOVED → emoji null + previousEmoji non-null; CHANGED → cả 2 non-null khác nhau. FE action: patch `message.reactions` theo action (ADDED push userId + count++ / REMOVED filter + count-- + remove aggregate nếu count=0 / CHANGED combine REMOVED+ADDED), re-sort count DESC stable, idempotent check `userIds.includes`, self-echo không skip (multi-tab sync). Race edge cases documented (reaction trên message soft-delete race acceptable V1; user kicked race orphan userId tolerate). (4) **§7.1 Destination Policy Table** — thêm row `.react` với policy `HANDLER_CHECK` note rationale (interceptor tránh N+1 DB query resolve messageId→convId trên mọi SEND; handler đã query message để validate emoji → piggyback member check cùng transaction). Trade-off: FORBIDDEN đi qua user queue ERROR thay vì STOMP ERROR frame — consistent với `.typing` SILENT_DROP handler-level pattern. (5) **§9 ADR Reference** — thêm ADR-022 (W8 canonical, ARCHITECTURE.md §12). ADR-017 unified queue đã reserve `operation: "REACT"` từ W5-D2 — giờ activate. (6) **Reconnect catch-up**: FE re-fetch `GET /messages?cursor` — payload trả `reactions[]` latest; bỏ qua missed REACTION_CHANGED trong quãng offline. (7) **BLOCKING cho BE W8-D1**: UNIQUE constraint enforce + toggle atomic, emoji regex validate server-side defense-in-depth (KHÔNG tin FE picker), batch load `WHERE message_id IN (?)` chống N+1 trong list messages pagination, supersede error code `SYSTEM_MESSAGE_NO_REACTIONS` → `REACTION_NOT_ALLOWED_FOR_SYSTEM`. **BLOCKING cho FE W8-D1**: ERROR handler tolerate `clientId: null` (REACT không có optimistic ID để lookup), optimistic patch + broadcast reconcile idempotent, `@emoji-mart/react` lazy-load nếu bundle budget strict, ReactionBar render sort count DESC stable. Depends on: Migration V13 (`V13__add_message_reactions.sql`) — xem API_CONTRACT.md v1.5.0-w8-reactions. KHÔNG thay đổi existing destinations/events — additive only. Skip v1.10-partial: jump thẳng v1.9 → v1.10 cùng nhịp API_CONTRACT.md v1.4 → v1.5 (W7-D5 → W8-D1). |
 | 2026-04-22 | v1.9-w7 | **W7-D5 Read receipts**. (1) **§2 Destinations** — row `/app/conv.{convId}.read` đổi policy từ `SILENT_DROP` (spec cũ W5 placeholder) sang **`STRICT_MEMBER`** (lý do: read receipt persist DB + broadcast → non-member gửi có thể leak state / spam DB write). Rate limit đổi `1 event/5s` → `1 event/2s/user/conv` (scroll event cần fire nhanh hơn). (2) **§3.13 READ_UPDATED NEW** — outbound event trên `/topic/conv.{convId}`, payload `{conversationId, userId, lastReadMessageId, readAt}`. FE action: patch `ConversationDto.members[].lastReadMessageId`; self-echo → reset `unreadCount = 0` optimistic; ignore silently nếu member không có trong cache (race). **readBy per-message compute CLIENT-SIDE** — BE không compute + không broadcast per-message readers list; FE filter `members[]` theo `lastReadMessageAt >= message.createdAt`. Rationale: giảm payload (1 pointer/member vs N*M matrix). (3) **§3f NEW — Read Receipt via STOMP spec**: inbound `/app/conv.{convId}.read` payload `{messageId}` (KHÔNG có clientId — không optimistic UI, không cần dedup ID). Validation: auth → member → rate-limit → UUID format → message exists → message thuộc conv (anti-enum merged vào `MSG_NOT_FOUND` V1; `MSG_NOT_IN_CONV` reserved không emit) → **idempotent forward-only** (compare `createdAt`; incoming <= current → silent no-op KHÔNG broadcast). Error codes: `AUTH_REQUIRED`, `NOT_MEMBER`, `VALIDATION_FAILED`, `MSG_NOT_FOUND`, `MSG_NOT_IN_CONV` (reserved), `MSG_RATE_LIMITED`, `INTERNAL`. **FE handling policy**: ERROR frame KHÔNG toast/alert user (read không phải user-initiated explicit action) — silent console log + retry chỉ với `INTERNAL` (1 lần, 5s delay). (4) **§7.1 Destination Policy Table** update — row `.read` đổi `SILENT_DROP` → `STRICT_MEMBER` với ERROR `{operation: "READ", code: "NOT_MEMBER"}`. (5) **Relationship với unreadCount** (§3.13 + §3f.5): `unreadCount` trong ConversationSummaryDto server-compute per-caller (xem API_CONTRACT.md v1.4.0-w7-read). Self-echo READ_UPDATED → FE set `unreadCount = 0` optimistic. Other-user READ_UPDATED → KHÔNG đụng `unreadCount` của caller. (6) Race cases documented (§3f.4): kick race, hard-delete message (FK ON DELETE SET NULL), multi-tab, member-removed race với READ_UPDATED frame ordering, reconnect catch-up qua REST. BE impl hint + FE hook pseudo-code (non-normative). **Depends on**: Migration V12 (`V12__add_last_read_message_id.sql`) add column `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index (conversation_id, last_read_message_id). Xem API_CONTRACT.md v1.4.0-w7-read mục "Schema V12 migration (W7-D5)" + "MemberDto extended shape" + "unreadCount compute rule". **Skip v1.8**: không có v1.8-w7 intermediate — jump 1.7 → 1.9 để sync version tag với API_CONTRACT.md bump (v1.2 → v1.4 cùng nhịp W7-D5). |
 | 2026-04-22 | v1.7-w7 | **W7-D4 SYSTEM messages finalized** (từ placeholder của v1.5/v1.6-w7). SYSTEM piggyback trên `MESSAGE_CREATED` §3.1 với `type: "SYSTEM"` — KHÔNG STOMP event type mới. (1) **§3.1 MESSAGE_CREATED payload extended**: thêm 2 field `systemEventType` (enum 8 values: GROUP_CREATED, MEMBER_ADDED, MEMBER_REMOVED, MEMBER_LEFT, ROLE_PROMOTED, ROLE_DEMOTED, OWNER_TRANSFERRED, GROUP_RENAMED) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). Khi `type=SYSTEM`: `sender=null`, `content=""` (empty string, KHÔNG null), `attachments=[]`, `replyToMessage=null`, `editedAt/deletedAt/deletedBy=null`. FE branch render `<SystemMessageItem>` vs `<MessageItem>` theo `type`. Dedupe theo `id` (áp dụng cho cả SYSTEM). (2) **§3.12 SYSTEM_MESSAGE** placeholder → finalized với mapping table trigger → event type. (3) **§3e.1 NEW — SYSTEM Render contract**: full-width centered italic gray bubble, copy mapping template 8 enum (vi-VN V1 hardcode), fallback unknown enum → "(sự kiện hệ thống)", FE truncate tên 40 chars CSS-level, edit/delete menu disabled (defense in depth), BE reject `SYSTEM_MESSAGE_NOT_EDITABLE` / `SYSTEM_MESSAGE_NOT_DELETABLE`. (4) **Ordering**: OWNER leave auto-transfer → OWNER_TRANSFERRED SYSTEM TRƯỚC MEMBER_LEFT SYSTEM (createdAt ASC). Group mgmt event (§3.6-3.11) và SYSTEM MESSAGE_CREATED fire song song — FE 2 handler riêng, không rely on frame order giữa 2 loại. (5) BE reuse existing `MessageCreatedEvent` + `@TransactionalEventListener(AFTER_COMMIT)` pipe — 0 infra change. Schema Migration V10 (xem API_CONTRACT.md): ADD COLUMN system_event_type + system_metadata JSONB; DROP NOT NULL sender_id (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency`. KHÔNG ảnh hưởng TEXT flow — `systemEventType`/`systemMetadata=null` với mọi TEXT/IMAGE/FILE message. |
 | 2026-04-19 | v0.1 | Initial skeleton (không dùng, đã overwrite bởi v1.0-draft-w4). |

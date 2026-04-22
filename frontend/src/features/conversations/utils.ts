@@ -5,7 +5,12 @@ export function getOtherMember(
   conversation: ConversationDto,
   currentUserId: string,
 ): MemberDto | null {
-  if (conversation.type !== ConversationType.ONE_ON_ONE) return null
+  if (
+    conversation.type !== ConversationType.ONE_ON_ONE &&
+    conversation.type !== ConversationType.DIRECT
+  ) {
+    return null
+  }
   return conversation.members.find((m) => m.userId !== currentUserId) ?? null
 }
 

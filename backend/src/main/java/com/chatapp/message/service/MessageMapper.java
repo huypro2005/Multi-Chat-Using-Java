@@ -9,14 +9,23 @@ import com.chatapp.message.dto.MessageDto;
 import com.chatapp.message.dto.ReplyPreviewDto;
 import com.chatapp.message.dto.SenderDto;
 import com.chatapp.message.entity.Message;
+import com.chatapp.message.enums.MessageType;
+import com.chatapp.reaction.dto.ReactionAggregateDto;
+import com.chatapp.reaction.entity.MessageReaction;
 import com.chatapp.user.entity.User;
+import com.chatapp.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Tách DTO mapping khỏi MessageService để cả broadcaster và service có thể reuse.
@@ -49,8 +58,24 @@ public class MessageMapper {
 
     private final MessageAttachmentRepository messageAttachmentRepository;
     private final FileRecordRepository fileRecordRepository;
+    private final UserRepository userRepository;
 
+    /**
+     * Map Message → MessageDto (no reactions — dùng cho single-message contexts như ACK/edit).
+     * Reactions = empty list (caller đảm bảo reactions đã được load riêng nếu cần).
+     */
     public MessageDto toDto(Message message) {
+        return toDto(message, null, Collections.emptyList());
+    }
+
+    /**
+     * Map Message → MessageDto với reactions batch-loaded (N+1 mitigation — W8-D1).
+     *
+     * @param message        message entity
+     * @param currentUserId  caller UUID để compute currentUserReacted (null → all false)
+     * @param reactions      reactions cho message này (pre-loaded batch bởi caller)
+     */
+    public MessageDto toDto(Message message, UUID currentUserId, List<MessageReaction> reactions) {
         SenderDto senderDto = null;
         if (message.getSender() != null) {
             User sender = message.getSender();
@@ -77,6 +102,29 @@ public class MessageMapper {
                 ? Collections.emptyList()
                 : loadAttachmentDtos(message);
 
+        // Reactions (W8-D1):
+        // - Strip khi soft-deleted hoặc SYSTEM message (UX "hồn ma" + SYSTEM không cho react V1).
+        // - Luôn non-null (empty list nếu không có reactions).
+        boolean isSystem = MessageType.SYSTEM == message.getType();
+        List<ReactionAggregateDto> reactionAggregates = (isDeleted || isSystem)
+                ? Collections.emptyList()
+                : aggregateReactions(reactions, currentUserId);
+
+        // Pin info (W8-D2): null khi deleted (ghim không hiển thị trên message đã xóa)
+        java.time.Instant pinnedAt = null;
+        Map<String, Object> pinnedBy = null;
+        if (!isDeleted && message.getPinnedAt() != null) {
+            pinnedAt = message.getPinnedAt();
+            if (message.getPinnedByUserId() != null) {
+                User pinner = userRepository.findById(message.getPinnedByUserId()).orElse(null);
+                String pinnerName = pinner != null ? pinner.getFullName() : "Unknown";
+                Map<String, Object> pinnedByMap = new HashMap<>();
+                pinnedByMap.put("userId", message.getPinnedByUserId().toString());
+                pinnedByMap.put("userName", pinnerName);
+                pinnedBy = pinnedByMap;
+            }
+        }
+
         return new MessageDto(
                 message.getId(),
                 message.getConversation().getId(),
@@ -90,7 +138,10 @@ public class MessageMapper {
                 message.getDeletedAt(),
                 deletedBy,
                 message.getSystemEventType(),
-                message.getSystemMetadata()
+                message.getSystemMetadata(),
+                reactionAggregates,
+                pinnedAt,
+                pinnedBy
         );
     }
 
@@ -120,6 +171,49 @@ public class MessageMapper {
             preview = preview.substring(0, CONTENT_PREVIEW_MAX_LENGTH) + "...";
         }
         return new ReplyPreviewDto(source.getId(), senderName, preview, null);
+    }
+
+    // =========================================================================
+    // Private helpers — reaction aggregation (W8-D1)
+    // =========================================================================
+
+    /**
+     * Aggregate reactions theo emoji — group by emoji, compute count/userIds/currentUserReacted.
+     *
+     * Sort: count DESC, emoji ASC (codepoint compare — deterministic stable sort per contract).
+     * FE renders ReactionBar theo order này — sort đảm bảo UI không flicker.
+     *
+     * currentUserReacted: in-memory check userIds.contains(currentUserId) — KHÔNG query riêng.
+     * Emoji với count 0 KHÔNG xuất hiện (filtered khi không có reactions).
+     *
+     * @param reactions   list reactions đã batch-load cho message này
+     * @param currentUserId caller UUID (null → currentUserReacted luôn false)
+     * @return sorted aggregate list (count DESC, emoji ASC), empty list nếu reactions rỗng
+     */
+    public List<ReactionAggregateDto> aggregateReactions(List<MessageReaction> reactions, UUID currentUserId) {
+        if (reactions == null || reactions.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<String, List<MessageReaction>> grouped = reactions.stream()
+                .collect(Collectors.groupingBy(MessageReaction::getEmoji));
+
+        List<ReactionAggregateDto> aggregates = grouped.entrySet().stream()
+                .map(entry -> {
+                    String emoji = entry.getKey();
+                    List<MessageReaction> reactionList = entry.getValue();
+                    List<UUID> userIds = reactionList.stream()
+                            .map(MessageReaction::getUserId)
+                            .toList();
+                    boolean currentUserReacted = currentUserId != null
+                            && userIds.contains(currentUserId);
+                    return new ReactionAggregateDto(emoji, userIds.size(), userIds, currentUserReacted);
+                })
+                .sorted(Comparator.comparingInt(ReactionAggregateDto::count).reversed()
+                        .thenComparing(ReactionAggregateDto::emoji))
+                .toList();
+
+        return aggregates;
     }
 
     // =========================================================================

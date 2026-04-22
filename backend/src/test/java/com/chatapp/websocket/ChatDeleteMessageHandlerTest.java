@@ -77,6 +77,8 @@ class ChatDeleteMessageHandlerTest {
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private com.chatapp.file.repository.FileRecordRepository fileRecordRepository;
     @Mock private com.chatapp.file.repository.MessageAttachmentRepository messageAttachmentRepository;
+    @Mock private com.chatapp.reaction.repository.MessageReactionRepository messageReactionRepository;
+    @Mock private com.chatapp.user.service.BlockService blockService;
 
     private MessageService messageService;
     private ChatDeleteMessageHandler handler;
@@ -95,7 +97,8 @@ class ChatDeleteMessageHandlerTest {
         messageService = new MessageService(
                 messageRepository, memberRepository, conversationRepository,
                 userRepository, redisTemplate, messageMapper, eventPublisher, messagingTemplate,
-                fileRecordRepository, messageAttachmentRepository
+                fileRecordRepository, messageAttachmentRepository, messageReactionRepository,
+                blockService
         );
         handler = new ChatDeleteMessageHandler(messageService, messagingTemplate);
 
@@ -365,7 +368,7 @@ class ChatDeleteMessageHandlerTest {
         // Use a REAL MessageMapper (not a mock) to test the strip logic.
         // W6-D1: MessageMapper now depends on MessageAttachmentRepository + FileRecordRepository,
         // but deleted messages strip attachments to empty list without querying — safe to pass nulls.
-        MessageMapper realMapper = new MessageMapper(null, null);
+        MessageMapper realMapper = new MessageMapper(null, null, null);
 
         // Build a deleted message
         Message deletedMsg = Message.builder()

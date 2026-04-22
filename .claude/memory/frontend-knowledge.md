@@ -397,6 +397,84 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 
 ---
 
+---
+
+## Message Reactions (W8-D1)
+
+### EmojiPicker lazy load pattern
+```tsx
+const Picker = lazy(() => import('@emoji-mart/react'))
+// Wrap trong <Suspense fallback={...}> — split bundle ~76KB gzip
+```
+- Phải cài thêm peer dep `emoji-mart` (không chỉ `@emoji-mart/react + @emoji-mart/data`).
+- React 19 + legacy-peer-deps: `@emoji-mart/react` khai báo peer React ^16.8||^17||^18 nhưng chạy OK với 19.
+
+### ReactionBar hover pattern
+- `onMouseEnter/Leave` trên bubble container (không dùng CSS group-hover để tránh conflict).
+- ReactionBar render `position: relative` → picker trong `absolute bottom-full mb-1`.
+- 6 quick emojis (hardcoded) + "+" mở full picker.
+
+### ReactionAggregate display
+- `aria-pressed={r.currentUserReacted}` cho a11y.
+- Highlight: `bg-indigo-100 border-indigo-400 text-indigo-700` khi react; gray khi chưa.
+- `onToggle(emoji)` → gọi useReact — fire-and-forget (BE toggle: ADDED→REMOVED nếu đã react).
+
+### updateMessageReactionsInCache pattern (applyReactionChange)
+```ts
+function applyReactionChange(reactions, payload, currentUserId): ReactionAggregateDto[]
+// ADDED: addReaction (idempotent check userIds.includes)
+// REMOVED: removeReaction (xoá aggregate khi count==0)
+// CHANGED: removeReaction(previousEmoji) + addReaction(emoji)
+// Sort: count DESC, emoji ASC
+// currentUserReacted: recalculate sau mỗi branch
+```
+
+### ERROR handler tolerate clientId: null (REACT operation)
+```ts
+// CRITICAL: REACT ERROR frame có clientId: null — KHÔNG dùng registry.get(null)
+case 'REACT': {
+  handleReactError(code) // chỉ toast, không tra registry
+  break
+}
+// Destructure clientId bên trong case cụ thể, không ở top level switch:
+// const { operation, error, code } = envelope (không destructure clientId chung)
+// case 'SEND': { const clientId = envelope.clientId as string; ... }
+```
+
+### ErrorEnvelope discriminated union
+```ts
+type ErrorEnvelope =
+  | { operation: 'SEND'|'EDIT'|'DELETE'; clientId: string; error: string; code: string }
+  | { operation: 'REACT'; clientId: null; error: string; code: string }
+```
+
+---
+
+## Pin + Block UI (W8-D2)
+
+### Pin message integration
+- `PinnedMessagesBanner` đặt ở đầu `MessagesList`: mặc định show 1 item, có toggle expand/collapse cho phần còn lại.
+- Scroll-to-message dùng `messageRefs` (`Record<messageId, HTMLDivElement | null>`) + `scrollIntoView({ block: 'center' })` + highlight ring 2s.
+- Pin action reuse `MessageActions` dropdown (không tạo menu riêng): props `canPin`, `onTogglePin`, hiển thị `📌 Ghim/Bỏ ghim`.
+- `MessageItem` hiển thị pinned indicator nhỏ trên bubble khi `message.pinnedAt` có giá trị.
+
+### Pin permissions + conversation type compatibility
+- `canPin` tính ở `MessagesList` từ `conversation.type` + role hiện tại:
+  - `GROUP` -> chỉ `OWNER` hoặc `ADMIN`
+  - direct (`ONE_ON_ONE`/`DIRECT`) -> mọi thành viên
+- FE giữ tương thích cả `ONE_ON_ONE` (legacy) và `DIRECT` (contract mới) để tránh break khi BE chuyển enum.
+
+### Realtime + error handling
+- `useConvSubscription` thêm handlers `MESSAGE_PINNED`/`MESSAGE_UNPINNED`: patch message cache tại chỗ, rồi invalidate `conversationKeys.detail(id)` để refresh `pinnedMessages`.
+- `useAckErrorSubscription` map thêm codes mới cho pin/block (`PIN_LIMIT_EXCEEDED`, `MESSAGE_NOT_PINNED`, `MSG_USER_BLOCKED`, `CANNOT_BLOCK_SELF`, `BLOCK_NOT_FOUND`, `MSG_DELETED`, `FORBIDDEN`).
+
+### Block user UI
+- Block/unblock ở direct chat header (không wire settings route ở D2): dùng confirm trước khi block.
+- Hooks block dùng React Query mutation/query: `useBlockUser`, `useUnblockUser`, `useBlockedUsers`.
+- Chỉ dùng `isBlockedByMe` ở FE (không có `hasBlockedMe`) để giữ privacy boundary.
+
+---
+
 ## Thư viện đã chọn
 
 | Library | Ghi chú |
@@ -413,3 +491,4 @@ Controlled `open` prop, Esc via `useEffect`, `autoFocus` input, `handleClose()` 
 | firebase | Google OAuth |
 | tailwindcss v4 + @tailwindcss/vite | CSS |
 | sonner | Toast singleton (W5-D5+) |
+| @emoji-mart/react + @emoji-mart/data + emoji-mart | Emoji picker (W8-D1). Legacy-peer-deps cần. React 19 compat OK. |

@@ -392,8 +392,15 @@ Validation rules:
 
 ---
 
-## Conversations API (v1.4.0-w7-read — Read Receipts + unreadCount real compute)
+## Conversations API (v1.5.0-w8-reactions — Message Reactions)
 
+> **Version bump W8-D1 (2026-04-22)**: v1.4.0-w7-read → **v1.5.0-w8-reactions** (minor).
+> Lý do: thêm Message Reactions — MessageDto extend với `reactions: ReactionAggregateDto[]`,
+> ReactionAggregateDto shape mới, STOMP §3.15 `/app/msg.{messageId}.react` inbound + broadcast §3.16 `REACTION_CHANGED`,
+> ADR-022 (ARCHITECTURE.md §12), Migration V13 (`V13__add_message_reactions.sql`).
+> Additive only — không breaking existing clients (reactions field mới, FE cũ tolerant empty array fallback).
+> Xem changelog W8-D1 cuối file.
+>
 > **Version bump W7-D5 (2026-04-22)**: v1.3.0-w7 → **v1.4.0-w7-read** (minor). Lý do: thêm Read Receipts + enable `unreadCount` real compute (bỏ placeholder 0). Changes vs v1.3.0-w7: (1) **Schema V12 migration** (`V12__add_last_read_message_id.sql`) — thêm column `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index `(conversation_id, last_read_message_id)` cho query readBy computation. (2) **MemberDto extended** — thêm field `lastReadMessageId: uuid | null` vào member object trả về từ `GET /api/conversations/{id}` (members[]), `POST /api/conversations` response (created members), `MEMBER_ADDED` STOMP broadcast (new member có `lastReadMessageId = null`). FE compute "readBy per message" client-side từ field này (không cần BE compute). (3) **`unreadCount` compute rule** — placeholder 0 → real compute `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM')`. Edge: `lastReadMessageId = null` → count all non-SYSTEM messages. **SYSTEM KHÔNG count** (đổi từ v1.2.0-w7-system rule — xem "unreadCount compute rule" mục bên dưới cho rationale). (4) **STOMP `/app/conv.{convId}.read`** (xem SOCKET_EVENTS.md §3f v1.9-w7) — inbound idempotent forward-only, broadcast `READ_UPDATED` §3.13 lên `/topic/conv.{id}`. (5) Không đụng Auth / Users / Messages / Files sections — read feature isolated trong Conversations domain. KHÔNG breaking cho existing shape (additive field `lastReadMessageId` + same-shape `unreadCount: number` nhưng giờ > 0). Xem changelog W7-D5 cuối file.
 >
 > **Version bump W7-D4 (2026-04-22)**: v1.2.0-w7-system (SYSTEM messages — MessageDto extend, migration V10) — see Changelog. Giữ chung Conversations API umbrella vì SYSTEM msg trigger từ group management endpoints. v1.3.0-w7 được reserve/skip — next bump đi trực tiếp lên v1.4.0-w7-read để sync nhịp bump version với SOCKET_EVENTS.md (v1.7 → v1.9).
@@ -1823,9 +1830,12 @@ Field rules:
   "deletedBy": "uuid | null",
   "systemEventType": "GROUP_CREATED | MEMBER_ADDED | MEMBER_REMOVED | MEMBER_LEFT | ROLE_PROMOTED | ROLE_DEMOTED | OWNER_TRANSFERRED | GROUP_RENAMED | null",
   "systemMetadata": { ... } | null,
+  "reactions": [ ReactionAggregateDto, ... ],
   "createdAt": "ISO8601 UTC"
 }
 ```
+
+**Field `reactions` (v1.5.0-w8-reactions)**: `Array<ReactionAggregateDto>` — aggregate reactions cho message này. Empty array `[]` nếu không có reaction, nếu message bị soft-delete (`deletedAt != null`), hoặc nếu `type == 'SYSTEM'`. **Luôn là array, không bao giờ `null`** — FE không phải null-check. Sort: `count DESC, emoji ASC` (stable fallback). Xem shape `ReactionAggregateDto` bên dưới.
 
 **Rule về `type`**:
 - `type == 'TEXT' | 'IMAGE' | 'FILE'` → user-generated message. `systemEventType` và `systemMetadata` PHẢI `null`. `sender` non-null.
@@ -1926,7 +1936,7 @@ SYSTEM messages có ràng buộc đặc biệt khác TEXT:
 
 3. **SYSTEM KHÔNG count towards unread** — **Superseded v1.4.0-w7-read (W7-D5)**. Rule cũ v1.2.0-w7-system: SYSTEM count (rationale "user cần biết"). Rule mới v1.4.0-w7-read: `unreadCount` = `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM')` — SYSTEM **bị loại** khỏi count. Lý do đổi: (a) SYSTEM message fire khắp mọi group action (add/kick/rename) — group sôi động sẽ có `unreadCount` phình to vì system msg, làm badge UX kém; (b) mọi chat app (Messenger, Telegram) đều KHÔNG count system notice vào unread; (c) user không cần "đánh dấu đọc" system msg một cách chủ động — chúng là passive info. Typing indicator cũng không count (transient, không vào bảng messages V1). **Impact migration**: existing conv có SYSTEM msg pre-W7-D5 → next GET /api/conversations sẽ thấy `unreadCount` thấp hơn (đã loại SYSTEM) — UX improvement, không breaking FE.
 
-4. **SYSTEM không có reactions V1** — endpoint reactions (nếu triển khai ở phase sau) phải reject SYSTEM với `SYSTEM_MESSAGE_NO_REACTIONS` (scope sau — không trong v1.2.0-w7-system). Hiện tại V1 không có reactions endpoint.
+4. **SYSTEM không có reactions V1** — **Updated v1.5.0-w8-reactions (W8-D1)**: reactions đã triển khai qua STOMP `/app/msg.{messageId}.react` (xem SOCKET_EVENTS.md §3.15). Khi user attempt react vào SYSTEM message → BE reject với `REACTION_NOT_ALLOWED_FOR_SYSTEM` (renamed từ placeholder cũ `SYSTEM_MESSAGE_NO_REACTIONS` — consistent prefix `REACTION_*`). Rule cũ chưa từng emit code placeholder → không breaking.
 
 5. **SYSTEM không thể quote/reply** — STOMP SEND với `replyToMessageId` trỏ tới SYSTEM message → anti-enum fallback `VALIDATION_FAILED` (không leak "đây là system msg"). Rationale: user không nên reply vào "X đã được thêm vào nhóm".
 
@@ -1972,6 +1982,330 @@ ALTER TABLE messages
 - `sender_id` chuyển từ NOT NULL → nullable. Existing data không affect (all sender_id hiện non-null). BE code paths load `sender` phải handle null: `MessageMapper.toDto` check `message.sender == null ? null : UserSummaryDto.from(message.sender)`.
 - CHECK constraint catch dirty write: nếu BE vô tình INSERT với `type='TEXT'` + `system_event_type='X'`, DB reject → handler trả 500 INTERNAL (bug cần fix, không phải user-facing error).
 - `systemMetadata` JSONB (không TEXT) → query field bên trong sau này (V2) bằng `->>` operator. V1 BE serialize Java `Map<String, Object>` → PostgreSQL JSONB qua Hibernate UserType hoặc `@JdbcTypeCode(SqlTypes.JSON)` (Hibernate 6+).
+
+---
+
+### ReactionAggregateDto (v1.5.0-w8-reactions)
+
+Aggregate shape trong `MessageDto.reactions[]`. BE group by emoji, compute count/userIds/currentUserReacted server-side trong cùng query load message (batch load pattern chống N+1 — xem "Migration V13" phần "BE load pattern").
+
+```json
+{
+  "emoji": "string",
+  "count": 0,
+  "userIds": ["uuid", "..."],
+  "currentUserReacted": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `emoji` | `string` | Unicode emoji character(s). Có thể compound (ZWJ sequence, flag tag sequence, skin-tone modifier) — max 20 bytes UTF-8 (xem Migration V13 column spec). |
+| `count` | `number` | Total reactions với emoji này trên message. Luôn `>= 1` (emoji với count 0 KHÔNG xuất hiện trong array — BE filter trước khi serialize). |
+| `userIds` | `string[]` | UUIDs của users đã react với emoji này. Length == `count`. Order: không guarantee (BE có thể ORDER BY `created_at` ASC nhưng FE không rely on). |
+| `currentUserReacted` | `boolean` | `true` nếu caller (authenticated user từ JWT) nằm trong `userIds`. Computed server-side mỗi response — không cache. Edge: caller gọi REST không auth (public endpoint nếu có) → luôn `false`. |
+
+**Ví dụ** (message với 3 reactions: 2 user thumbs-up + 1 user heart, caller là thumbs-up user):
+
+```json
+"reactions": [
+  {
+    "emoji": "👍",
+    "count": 2,
+    "userIds": ["a1...", "b2..."],
+    "currentUserReacted": true
+  },
+  {
+    "emoji": "❤️",
+    "count": 1,
+    "userIds": ["c3..."],
+    "currentUserReacted": false
+  }
+]
+```
+
+**Sort guarantee**: BE MUST sort `reactions[]` theo `count DESC, emoji ASC` (emoji ASC là codepoint compare, deterministic). Rationale: FE render ReactionBar theo order — popular emoji ở trước. Stable sort → UI không flicker khi thêm reaction cùng count.
+
+**Soft-delete + SYSTEM exclusion**: khi serialize message với `deletedAt != null` HOẶC `type == 'SYSTEM'` → `reactions = []` (empty array, không load từ DB). Rationale: soft-deleted message không cho react mới + không hiển thị reactions cũ (UX "hồn ma"); SYSTEM message không allow react V1.
+
+---
+
+### Migration V13 — message_reactions (W8-D1)
+
+**Flyway migration**: `V13__add_message_reactions.sql`
+
+```sql
+-- V13: Message Reactions (W8-D1)
+-- 1 row per (user, message) — UNIQUE enforces invariant "1 user 1 emoji per message".
+-- Toggle semantics (BE service): INSERT (ADDED) / DELETE (REMOVED same) / UPDATE (CHANGED different).
+
+CREATE TABLE message_reactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji VARCHAR(20) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_message_reactions_msg_user UNIQUE (message_id, user_id)
+);
+
+CREATE INDEX idx_reactions_message ON message_reactions(message_id);
+CREATE INDEX idx_reactions_user ON message_reactions(user_id);
+```
+
+**Migration notes**:
+- `UNIQUE(message_id, user_id)` là **hợp đồng bất di bất dịch**: 1 user chỉ có 1 emoji cho 1 message tại mọi thời điểm. Toggle different-emoji case = UPDATE row (KHÔNG DELETE+INSERT — tránh race + giữ `id` stable).
+- `ON DELETE CASCADE` cho cả 2 FK:
+  - `message_id → messages.id CASCADE`: khi hard-delete message (V2 audit cleanup) → cleanup reactions. V1 soft-delete không trigger CASCADE (row messages vẫn còn).
+  - `user_id → users.id CASCADE`: khi xoá user account → cleanup reactions. Không cần keep reactions của user đã xoá.
+- `emoji VARCHAR(20)`: đủ cho compound emoji dài nhất Unicode 15.1 (family ZWJ ~11 bytes, flag tag sequence ~28 bytes — BE MUST truncate hoặc reject nếu input >20 bytes). **BLOCKING**: nếu regex allow `🏴󠁧󠁢󠁳󠁣󠁴󠁿` (28 bytes UTF-8) thì DB constraint reject → cần hoặc expand VARCHAR(32) hoặc reject emoji dài hơn 20 bytes ở validation layer. Reviewer chọn **expand VARCHAR(32)** cho safe (20 → 32) **TRƯỚC W8-D1 implement** — xem BLOCKING INCONSISTENCY dưới. Chốt V1: `VARCHAR(20)` cover 95% emoji phổ biến; rare flag-tag sequences reject với `REACTION_INVALID_EMOJI`.
+- Indexes:
+  - `idx_reactions_message`: batch load aggregate `WHERE message_id IN (?, ?, ?, ...)` cho pagination list messages (N+1 mitigation — BLOCKING).
+  - `idx_reactions_user`: audit query "all reactions by user" (V2 feature); V1 không query pattern này nhưng index rẻ + support user-delete CASCADE nhanh hơn.
+  - UNIQUE constraint tự động tạo composite index `(message_id, user_id)` — reuse cho "check existing reaction của user X trên message Y" (toggle service).
+
+**BE load pattern (BLOCKING N+1 mitigation)**:
+- Khi list messages (50/page): 1 query `SELECT * FROM message_reactions WHERE message_id IN (:messageIds) ORDER BY message_id, emoji`. Group in memory bằng Java stream → `Map<UUID, List<ReactionAggregateDto>>`. Merge vào MessageMapper output.
+- Khi load single message (REST GET /messages/{id} hoặc ACK): 1 query `WHERE message_id = ?` — acceptable 1 extra round-trip.
+- **KHÔNG** dùng `@OneToMany(fetch = LAZY)` rồi access trong loop → classic N+1.
+
+**`currentUserReacted` compute**: BE biết `caller.userId` từ SecurityContext (REST) hoặc STOMP Principal. Sau khi group reactions by emoji, mỗi aggregate check `userIds.contains(caller.userId)` → set boolean. KHÔNG query riêng — dùng in-memory check trên list `userIds` đã load.
+
+---
+
+### Error codes mới (v1.5.0-w8-reactions)
+
+| Code | HTTP (REST — N/A V1) / STOMP ERROR | Điều kiện |
+|------|------------------------------------|-----------|
+| `REACTION_INVALID_EMOJI` | STOMP | `emoji` null/rỗng/whitespace-only/không match emoji regex (plain text "abc", emoji > 20 bytes sau truncate). |
+| `REACTION_NOT_ALLOWED_FOR_SYSTEM` | STOMP | Target message có `type = 'SYSTEM'`. Supersedes placeholder `SYSTEM_MESSAGE_NO_REACTIONS` từ W7-D4 "Validation rules cho SYSTEM messages" rule 4 (xem rule 4 updated note dưới). |
+| `REACTION_MSG_DELETED` | STOMP | Target message có `deleted_at IS NOT NULL`. |
+| `MSG_NOT_FOUND` | STOMP | Message không tồn tại (anti-enum). Reuse existing code. |
+| `NOT_MEMBER` | STOMP | Caller không phải member của conv chứa message. Reuse existing. |
+| `MSG_RATE_LIMITED` | STOMP | >5 reactions/second/user. Reuse existing code (consistent với send/edit rate-limit code). |
+
+> **Ngoại lệ anti-enum** (documented, giống W7-D4 `SYSTEM_MESSAGE_NOT_EDITABLE`): `REACTION_NOT_ALLOWED_FOR_SYSTEM` và `REACTION_MSG_DELETED` KHÔNG merge vào `MSG_NOT_FOUND` dù tương đồng với quy tắc "non-eligible → NOT_FOUND". Lý do: SYSTEM + deleted messages đều visible cho members (không hidden) — FE cache đã có `type` + `deletedAt` → distinguish không leak gì. Error code riêng giúp FE toast chính xác ("không thể react tin hệ thống" / "tin này đã bị xóa").
+
+> **Supersede W7-D4 rule 4**: "Validation rules cho SYSTEM messages" rule 4 ("SYSTEM không có reactions V1") trước đây ghi placeholder code `SYSTEM_MESSAGE_NO_REACTIONS`. V1.5.0-w8-reactions rename thành `REACTION_NOT_ALLOWED_FOR_SYSTEM` (consistent prefix `REACTION_*` cho mọi error thuộc feature). BE W8-D1 MUST emit tên mới. `SYSTEM_MESSAGE_NO_REACTIONS` chưa từng được emit (chưa implement) → không có legacy concern.
+
+---
+
+### Pin Message (W8-D2)
+
+**STOMP inbound**: `/app/msg.{messageId}.pin`
+
+**Payload**:
+```json
+{ "action": "PIN | UNPIN" }
+```
+
+**Auth**: STOMP `Principal` (JWT). Policy `HANDLER_CHECK` (cùng pattern reactions W8-D1 — destination messageId-based, resolve convId trong handler).
+
+**Validation chain** (rẻ → đắt):
+1. Auth (Principal non-null).
+2. Rate limit 5/s/user (`rate:pin:{userId}` INCR EX 1).
+3. `action` = "PIN" hoặc "UNPIN" (string match) → `INVALID_ACTION` nếu khác.
+4. Message exists → `MSG_NOT_FOUND` (anti-enum).
+5. Derive `convId` từ message.
+6. User là member của conv → `NOT_MEMBER`.
+7. **Role check** (conv type-aware):
+   - `GROUP` → user phải `OWNER` hoặc `ADMIN` (`MemberRole.isAdminOrHigher()`) → `FORBIDDEN`.
+   - `DIRECT` → mọi member OK (skip check).
+8. `action = "PIN"`:
+   - `message.deletedAt != null` → `MSG_DELETED`.
+   - Idempotent: `message.pinnedAt != null` → **no-op** (không broadcast, không throw).
+   - Count pinned trong conv (`WHERE pinned_at IS NOT NULL AND deleted_at IS NULL`): ≥ 3 → `PIN_LIMIT_EXCEEDED` (details `{currentCount, limit: 3}`).
+   - Set `pinned_at = NOW()`, `pinned_by_user_id = userId`. Save + publishEvent `MessagePinnedEvent`.
+9. `action = "UNPIN"`:
+   - `message.pinnedAt == null` → `MESSAGE_NOT_PINNED`.
+   - Set `pinned_at = null`, `pinned_by_user_id = null`. Save + publishEvent `MessageUnpinnedEvent`.
+10. `@TransactionalEventListener(AFTER_COMMIT)` fire broadcast `MESSAGE_PINNED` hoặc `MESSAGE_UNPINNED` (xem SOCKET_EVENTS.md §3.17/§3.18).
+
+**Response to caller**: KHÔNG có ACK queue riêng cho pin. Confirmation qua broadcast `MESSAGE_PINNED`/`MESSAGE_UNPINNED` trên `/topic/conv.{convId}` — same pattern reactions fire-and-forget.
+
+**ERROR frame**: qua `/user/queue/errors` với shape unified (ADR-017):
+```json
+{
+  "operation": "PIN",
+  "clientId": null,
+  "error": "human readable message",
+  "code": "PIN_LIMIT_EXCEEDED | MESSAGE_NOT_PINNED | FORBIDDEN | MSG_DELETED | MSG_NOT_FOUND | NOT_MEMBER | INVALID_ACTION | MSG_RATE_LIMITED"
+}
+```
+> `clientId: null` — pin là fire-and-forget (no optimistic ID), cùng pattern REACT. FE handler ERROR MUST tolerate null clientId.
+
+**MessageDto extended** (v1.6.0-w8-pin-block):
+```typescript
+interface MessageDto {
+  // ... existing fields (id, conversationId, sender, type, content, ...)
+  // ... reactions (W8-D1)
+  pinnedAt: string | null;    // ISO8601, null nếu chưa pin
+  pinnedBy: {                 // null nếu chưa pin
+    userId: string;
+    userName: string;
+  } | null;
+}
+```
+
+> `pinnedBy` là snapshot tại thời điểm pin — không auto-update nếu user đổi tên (consistent với `userName` snapshot pattern trong REACTION_CHANGED broadcast).
+
+**ConversationDetailDto extended** (v1.6.0-w8-pin-block):
+```typescript
+interface ConversationDetailDto extends ConversationDto {
+  // ... existing fields
+  pinnedMessages: MessageDto[];  // sort by pinned_at DESC, max 3, filter deleted_at IS NULL
+}
+```
+
+> `pinnedMessages` luôn là array (empty `[]` nếu không pin). BE query `WHERE pinned_at IS NOT NULL AND deleted_at IS NULL ORDER BY pinned_at DESC`. FE render banner top conv từ field này.
+
+**Error codes mới (v1.6.0-w8-pin-block, Pin feature)**:
+
+| Code | HTTP equivalent / STOMP ERROR | Điều kiện |
+|------|-------------------------------|-----------|
+| `PIN_LIMIT_EXCEEDED` | 400 / STOMP | Conv đã có 3 pinned messages (count `WHERE pinned_at IS NOT NULL AND deleted_at IS NULL`). `details: {currentCount: number, limit: 3}`. |
+| `MESSAGE_NOT_PINNED` | 400 / STOMP | `action=UNPIN` nhưng message chưa pin (`pinned_at IS NULL`). |
+| `FORBIDDEN` | 403 / STOMP | User không đủ role pin/unpin trong GROUP conv (MEMBER thay vì OWNER/ADMIN). Reuse existing code. |
+| `MSG_DELETED` | 400 / STOMP | `action=PIN` trên message soft-deleted (`deleted_at IS NOT NULL`). Ngoại lệ anti-enum: KHÔNG merge vào `MSG_NOT_FOUND` — message visible cho members (FE biết `deletedAt` từ cache), distinguish rõ "tin đã xóa" vs "tin không tồn tại". Cùng pattern `REACTION_MSG_DELETED`. |
+| `INVALID_ACTION` | 400 / STOMP | `action` khác "PIN" và "UNPIN". |
+| `MSG_NOT_FOUND` | 404 / STOMP | Message không tồn tại. Reuse existing. |
+| `NOT_MEMBER` | 403 / STOMP | Caller không phải member. Reuse existing. |
+| `MSG_RATE_LIMITED` | 429 / STOMP | >5 pin/s/user. Reuse existing. |
+
+> **Ngoại lệ anti-enum** cho `MSG_DELETED`: Cùng rationale với `REACTION_MSG_DELETED` (W8-D1) — message đã xóa visible cho member (FE cache có `deletedAt`), error code riêng giúp FE toast "Tin nhắn đã bị xóa — không thể ghim" chính xác hơn "Không tìm thấy tin nhắn".
+
+---
+
+### Migration V14 — add_message_pin (W8-D2)
+
+**Flyway migration**: `V14__add_message_pin.sql`
+
+```sql
+-- V14: Add pin message support to messages table
+
+ALTER TABLE messages
+  ADD COLUMN pinned_at TIMESTAMPTZ,
+  ADD COLUMN pinned_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+
+-- Partial index: chỉ index rows có pinned_at IS NOT NULL (nhanh query pinned list)
+CREATE INDEX idx_messages_pinned ON messages(conversation_id, pinned_at)
+WHERE pinned_at IS NOT NULL;
+```
+
+> **Rationale `ON DELETE SET NULL`**: Nếu user pin rồi bị xóa account → message vẫn pinned nhưng `pinned_by_user_id = NULL`. FE render "Ghim bởi (không rõ)" fallback. Cùng pattern `sender_id ON DELETE SET NULL` (W7-D4 SYSTEM messages).
+
+---
+
+### Block User Endpoints (W8-D2)
+
+**REST endpoints**:
+
+#### `POST /api/users/{id}/block`
+
+Block user. Bilateral: A block B → cả 2 không gửi direct message nhau.
+
+**Request**: Không body. Path param `{id}` = target user UUID.
+
+**Response**:
+- **201 Created**: block thành công (new row).
+- **200 OK**: idempotent — đã block rồi → no-op (không duplicate).
+
+**Validation** (rẻ → đắt):
+1. `id == currentUser.id` → `CANNOT_BLOCK_SELF` (400).
+2. Target user exists → `USER_NOT_FOUND` (404).
+3. `existsByBlockerIdAndBlockedId(currentUser.id, id)` → đã block → **200 no-op**.
+4. Insert `user_blocks` row.
+
+#### `DELETE /api/users/{id}/block`
+
+Unblock user. Chỉ unblock chiều caller → target.
+
+**Response**: **204 No Content**.
+
+**Validation**:
+1. `existsByBlockerIdAndBlockedId(currentUser.id, id)` → chưa block → `BLOCK_NOT_FOUND` (404).
+2. Delete row.
+
+#### `GET /api/users/blocked`
+
+List users caller đã block.
+
+**Response 200**:
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "username": "string",
+      "fullName": "string",
+      "avatarUrl": "string | null",
+      "isBlockedByMe": true
+    }
+  ]
+}
+```
+
+> `items` sort by `created_at DESC` (blocked gần nhất trước). Dùng `UserDto` shape. `isBlockedByMe` luôn `true` trong list này.
+
+**Bilateral block check integration**:
+
+Hai flow cần check bilateral block:
+1. **STOMP `/app/conv.{convId}.message` (sendViaStomp)**: sau khi validate member, nếu `conv.type == DIRECT` → `existsBilateral(senderId, otherUserId)` → `MSG_USER_BLOCKED`.
+2. **`POST /api/conversations` (createDirect)**: trước khi tạo conv → `existsBilateral(creatorId, targetUserId)` → `MSG_USER_BLOCKED`.
+
+GROUP send: **KHÔNG** check bilateral block (group là shared context, admin quản lý membership).
+`addMembers`: reuse W7 `USER_BLOCKED` skip pattern (đã có).
+
+**`existsBilateral` query** (1 query, cả 2 chiều):
+```sql
+SELECT COUNT(*) > 0 FROM user_blocks
+WHERE (blocker_id = :a AND blocked_id = :b)
+   OR (blocker_id = :b AND blocked_id = :a)
+```
+
+**UserDto extended** (v1.6.0-w8-pin-block):
+```typescript
+interface UserDto {
+  // ... existing fields (id, username, fullName, avatarUrl)
+  isBlockedByMe?: boolean;  // current user đã block target? default undefined/false
+}
+```
+
+> **Privacy**: KHÔNG expose `hasBlockedMe`. User B không nên biết A đã block B — chống harassment escalation. `isBlockedByMe` chỉ set khi viewer context available (`toDtoForViewer(user, viewerId)`). Internal mapper `toDto(user)` trả `isBlockedByMe = undefined`.
+
+**Error codes mới (v1.6.0-w8-pin-block, Block feature)**:
+
+| Code | HTTP | Điều kiện |
+|------|------|-----------|
+| `CANNOT_BLOCK_SELF` | 400 | `POST /api/users/{id}/block` với `{id} == currentUser.id`. |
+| `BLOCK_NOT_FOUND` | 404 | `DELETE /api/users/{id}/block` nhưng chưa block user này. Anti-enum: không phân biệt "user không tồn tại" vs "chưa block" — merge 404 an toàn (unblock user không tồn tại cũng 404). |
+| `MSG_USER_BLOCKED` | 403 | Send direct message hoặc createDirect conv khi bilateral block. Message: "Không thể gửi tin nhắn: bạn hoặc người dùng đã chặn nhau". Bilateral → **không tiết lộ ai block ai**. |
+| `USER_NOT_FOUND` | 404 | Target user không tồn tại. Reuse existing. |
+
+---
+
+### Migration V15 — add_user_blocks (W8-D2)
+
+**Flyway migration**: `V15__add_user_blocks.sql`
+
+```sql
+-- V15: Add bilateral user block support
+
+CREATE TABLE user_blocks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    blocker_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    blocked_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(blocker_id, blocked_id),
+    CHECK (blocker_id != blocked_id)
+);
+
+CREATE INDEX idx_blocks_blocker ON user_blocks(blocker_id);
+CREATE INDEX idx_blocks_blocked ON user_blocks(blocked_id);
+```
+
+> **`ON DELETE CASCADE`**: user bị xóa account → block rows tự cleanup. Không cần cleanup job.
+> **`CHECK (blocker_id != blocked_id)`**: DB-level guard self-block (defense-in-depth, service cũng check).
+> **2 indexes**: `idx_blocks_blocker` cho `GET /api/users/blocked` (list blocked BY user) + `idx_blocks_blocked` cho reverse lookup (V2 nếu cần "who blocked me" admin view). `existsBilateral` query dùng OR 2 chiều — PG optimizer chọn index scan phù hợp.
 
 ---
 
@@ -2043,6 +2377,8 @@ ALTER TABLE messages
 
 | Ngày | Version | Nội dung |
 |------|---------|---------|
+| 2026-04-22 | v1.6.0-w8-pin-block | **W8-D2 Pin Message + Bilateral User Block**. (1) **Migration V14** (`V14__add_message_pin.sql`): ADD COLUMN `messages.pinned_at TIMESTAMPTZ` + `messages.pinned_by_user_id UUID FK users ON DELETE SET NULL`. Partial index `idx_messages_pinned (conversation_id, pinned_at) WHERE pinned_at IS NOT NULL`. (2) **Migration V15** (`V15__add_user_blocks.sql`): CREATE TABLE `user_blocks` (id UUID PK, blocker_id FK, blocked_id FK, created_at, UNIQUE(blocker_id, blocked_id), CHECK blocker != blocked). Indexes `idx_blocks_blocker` + `idx_blocks_blocked`. ON DELETE CASCADE. (3) **Pin Message STOMP** — `/app/msg.{messageId}.pin` payload `{action: "PIN"\|"UNPIN"}`, policy HANDLER_CHECK (cùng pattern reactions W8-D1). Validation: auth → rate 5/s → action enum → message exists → member → role check (GROUP OWNER/ADMIN, DIRECT any) → deleted check → idempotent no-op → limit 3 → save + broadcast. Broadcast `MESSAGE_PINNED` / `MESSAGE_UNPINNED` trên `/topic/conv.{convId}` (xem SOCKET_EVENTS.md v1.11-w8 §3.17/§3.18). (4) **MessageDto extended** — `pinnedAt: string\|null` + `pinnedBy: {userId, userName}\|null` (snapshot). (5) **ConversationDetailDto extended** — `pinnedMessages: MessageDto[]` sort `pinned_at DESC` max 3, filter `deleted_at IS NULL`. (6) **Block User REST** — 3 endpoints: `POST /api/users/{id}/block` (201/200 idempotent), `DELETE /api/users/{id}/block` (204), `GET /api/users/blocked` (200 `{items: UserDto[]}`). (7) **Bilateral block integration** — `existsBilateral(a, b)` OR query cả 2 chiều. Check trong `sendViaStomp` (DIRECT only) + `createDirect`. GROUP send KHÔNG check. `addMembers` reuse W7 `USER_BLOCKED` skip. (8) **UserDto extended** — `isBlockedByMe?: boolean` (viewer-aware). KHÔNG expose `hasBlockedMe` (privacy). (9) **Error codes mới (Pin)**: `PIN_LIMIT_EXCEEDED` (details currentCount+limit), `MESSAGE_NOT_PINNED`, `MSG_DELETED` (ngoại lệ anti-enum, cùng pattern REACTION_MSG_DELETED), `INVALID_ACTION`. Reuse `FORBIDDEN`, `MSG_NOT_FOUND`, `NOT_MEMBER`, `MSG_RATE_LIMITED`. (10) **Error codes mới (Block)**: `CANNOT_BLOCK_SELF`, `BLOCK_NOT_FOUND`, `MSG_USER_BLOCKED` (bilateral, không tiết lộ ai block ai). Reuse `USER_NOT_FOUND`. (11) **ADR-023** Pin Message + **ADR-024** Bilateral User Block thêm vào ARCHITECTURE.md §12. KHÔNG breaking existing — additive fields + nullable. BLOCKING cho BE W8-D2: role check GROUP vs DIRECT, pin limit count filter deleted_at, bilateral query OR, block integration sendViaStomp DIRECT-only + createDirect. BLOCKING cho FE W8-D2: PinnedMessagesBanner collapsed/expanded + scrollToMessage, canPin() role check, block confirm dialog, error toast 8 codes mới, isBlockedByMe flag. |
+| 2026-04-22 | v1.5.0-w8-reactions | **W8-D1 Message Reactions**. (1) **Migration V13** (`V13__add_message_reactions.sql`): CREATE TABLE `message_reactions` với `UNIQUE(message_id, user_id)` — 1 user 1 emoji per message. Columns `id UUID PK`, `message_id UUID FK messages ON DELETE CASCADE`, `user_id UUID FK users ON DELETE CASCADE`, `emoji VARCHAR(20) NOT NULL`, `created_at TIMESTAMPTZ`. Indexes `idx_reactions_message` (N+1 mitigation batch load) + `idx_reactions_user` (audit/cascade). CASCADE 2 chiều cleanup: user-delete + hard-delete-message V2. (2) **MessageDto extended** — thêm field `reactions: ReactionAggregateDto[]` (luôn array, không null; empty `[]` khi không reaction / soft-deleted / SYSTEM). Sort guarantee `count DESC, emoji ASC` stable. (3) **ReactionAggregateDto shape** (new): `{emoji, count, userIds[], currentUserReacted}`. `currentUserReacted` compute per-caller server-side; `userIds.length == count`. Emoji aggregate chỉ xuất hiện khi count >= 1 (BE filter trước serialize). (4) **Toggle semantics** (BE service): no existing → INSERT (ADDED); same emoji → DELETE (REMOVED); different emoji → UPDATE (CHANGED). Bảo đảm atomic trong 1 transaction. (5) **STOMP inbound `/app/msg.{messageId}.react`** — xem SOCKET_EVENTS.md v1.10-w8 §3.15: payload `{emoji}` (KHÔNG clientId — fire-and-forget, confirmation qua broadcast). Validation chain: auth → member → rate limit → emoji regex → message exists → message.type != SYSTEM → message.deleted_at IS NULL → toggle DB + broadcast. (6) **STOMP broadcast `REACTION_CHANGED`** — xem SOCKET_EVENTS.md §3.16: payload `{messageId, userId, userName, action: ADDED|REMOVED|CHANGED, emoji, previousEmoji}`. `emoji` null khi REMOVED; `previousEmoji` null khi ADDED. (7) **Error codes mới**: `REACTION_INVALID_EMOJI`, `REACTION_NOT_ALLOWED_FOR_SYSTEM` (supersedes placeholder `SYSTEM_MESSAGE_NO_REACTIONS` từ W7-D4 rule 4), `REACTION_MSG_DELETED`. Reuse `MSG_NOT_FOUND`, `NOT_MEMBER`, `MSG_RATE_LIMITED`. Ngoại lệ anti-enum: 2 error REACTION_* không merge vào MSG_NOT_FOUND (visible type không leak, giống SYSTEM_MESSAGE_NOT_EDITABLE). (8) **Rate limit**: 5 reactions/second/user — Redis `rate:msg-react:{userId}` INCR EX 1. Looser hơn send/edit/delete (30/phút, 10/phút, 10/phút) vì quick-react batch UX hợp lệ. (9) **BE load pattern BLOCKING N+1**: batch query `WHERE message_id IN (?)` trong pagination list → group in-memory; KHÔNG @OneToMany LAZY fetch trong loop. (10) **ADR-022** thêm vào ARCHITECTURE.md §12 canonical (ghi chú legacy "ADR-022 Soft-deleted strip" + "ADR-021 Content XOR / Hybrid Visibility" trong reviewer-knowledge.md là memory notes — sẽ consolidate sau W8, không block D1). (11) Additive-only: không breaking existing clients — FE cũ không biết `reactions` field tolerate missing (JSON optional); FE mới đọc `reactions` default empty array. KHÔNG đụng Auth / Users / Files / SYSTEM messages (beyond rule 4 supersede). BLOCKING cho BE W8-D1: UNIQUE constraint + toggle atomic, emoji regex validate server-side (defense vs client), batch load N+1 mitigation, supersede error code name. BLOCKING cho FE W8-D1: `@emoji-mart/react` lazy-load nếu bundle budget strict; ReactionBar render sort count DESC stable; optimistic toggle + broadcast reconcile idempotent. |
 | 2026-04-22 | v1.4.0-w7-read | **W7-D5 Read Receipts + unreadCount real compute**. (1) **Migration V12** (`V12__add_last_read_message_id.sql`): ADD COLUMN `conversation_members.last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + index `(conversation_id, last_read_message_id)`. Additive, nullable, non-breaking. Rows cũ NULL. FK `ON DELETE SET NULL` (không CASCADE/RESTRICT — rationale: giữ member khi hard-delete message, auto-reset pointer thay vì block). BE MUST validate composite `message.conversation_id == member.conversation_id` ở application level (DB không enforce compound FK). (2) **MemberDto extended shape**: thêm field `lastReadMessageId: uuid | null` vào member object trả về từ `GET /api/conversations/{id}` members[], `POST /api/conversations` response, STOMP `MEMBER_ADDED` `member` (new member luôn null). BE MUST NOT compute readBy list per message — FE tự filter `members[]` theo `lastReadMessageAt >= message.createdAt` (exclude sender). Pattern code snippet documented. (3) **`unreadCount` compute rule**: placeholder 0 → real compute `COUNT(messages WHERE conv_id = X AND created_at > lastRead.created_at AND type != 'SYSTEM' AND deleted_at IS NULL)`. `lastReadMessageId = null` → count all non-SYSTEM non-deleted. Cap `LEAST(count, 99)` (UX "99+"). Per-caller (mỗi user `GET /api/conversations` thấy unreadCount của chính mình). **SYSTEM KHÔNG count** (đổi từ rule v1.2.0-w7-system — xem "Validation rules cho SYSTEM messages" rule 3 superseded note: rationale: system msg fire rất nhiều trong group active, count vào unread làm badge phình to vô nghĩa; nhất quán với mọi chat app lớn). (4) **STOMP `/app/conv.{convId}.read`** — xem SOCKET_EVENTS.md v1.9-w7 §3f: payload `{messageId}` (KHÔNG có clientId), idempotent forward-only (compare `createdAt`, incoming <= current → silent no-op không broadcast), broadcast `READ_UPDATED` §3.13 lên `/topic/conv.{id}` sau commit. Error codes: `AUTH_REQUIRED`, `NOT_MEMBER`, `VALIDATION_FAILED`, `MSG_NOT_FOUND` (anti-enum merge cả "not in conv"), `MSG_NOT_IN_CONV` (reserved, không emit V1), `MSG_RATE_LIMITED` (1 event/2s/user/conv), `INTERNAL`. (5) **Conversations API header** bump v1.1.0-w7 → v1.4.0-w7-read (skip v1.3.0-w7 — sync version number với SOCKET_EVENTS.md v1.7 → v1.9 nhịp bump cùng W7-D5; v1.2.0-w7-system giữ tag cho SYSTEM messages trước đó). (6) KHÔNG đụng Auth / Users / Messages POST/GET / Files sections. KHÔNG breaking shape cho existing — additive field + same-type `unreadCount: number`. (7) Contract test guidance: 7 test cases documented (empty conv, caller null-read, SYSTEM loại, newest-read, soft-deleted loại, cap 99, multi-tab self-echo). BLOCKING cho BE W7-D5: idempotent forward-only logic (compare createdAt, KHÔNG compare UUID), SYSTEM + soft-deleted filter trong `unreadCount` COUNT, FK `ON DELETE SET NULL` (không CASCADE), validate cross-conv composite trong application layer. BLOCKING cho FE W7-D5: readBy client-side compute, optimistic `unreadCount = 0` khi self-echo READ_UPDATED, debounce 500ms trước khi fire STOMP `.read` + server rate limit 2s defense-in-depth. |
 | 2026-04-22 | v1.2.0-w7-system | **W7-D4 SYSTEM messages**. Extend `MessageDto` (additive, non-breaking cho TEXT path) với 2 optional field: `systemEventType` (enum 8 values: `GROUP_CREATED`, `MEMBER_ADDED`, `MEMBER_REMOVED`, `MEMBER_LEFT`, `ROLE_PROMOTED`, `ROLE_DEMOTED`, `OWNER_TRANSFERRED`, `GROUP_RENAMED`) + `systemMetadata` (JSONB `{actorId, actorName, targetId?, targetName?, oldValue?, newValue?, autoTransferred?}`). `sender` = `null` cho SYSTEM (rationale: tránh maintain "system user" row). `content` = `""` (empty string, không null — FE render từ metadata). `type='SYSTEM'` bổ sung vào type enum cho type field của message (trước đây đã declare trong enum nhưng chưa có usage). **BE publish policy**: sau khi service method commit xong → save SYSTEM row + publish `MessageCreatedEvent` → reuse broadcast pipe (`/topic/conv.{id}` MESSAGE_CREATED) — KHÔNG tạo STOMP event type mới. Mapping service → SYSTEM: `createGroup` → 1× GROUP_CREATED; `addMembers` → N× MEMBER_ADDED (per user added, KHÔNG tạo cho skipped); `removeMember` → MEMBER_REMOVED; `leaveGroup` non-OWNER → MEMBER_LEFT; `leaveGroup` OWNER auto-transfer → OWNER_TRANSFERRED (autoTransferred=true) **TRƯỚC** MEMBER_LEFT (ordering BLOCKING); `changeRole` → ROLE_PROMOTED hoặc ROLE_DEMOTED (no-op silent không fire); `transferOwner` explicit → OWNER_TRANSFERRED (autoTransferred=false); `updateGroupInfo` rename → GROUP_RENAMED (chỉ nếu `oldName != newName` trim-compare); `updateGroupInfo` avatar-only → **KHÔNG** fire SYSTEM msg V1 (CONVERSATION_UPDATED đã notify UI; V2 xem xét). **Validation**: SYSTEM NOT editable → `SYSTEM_MESSAGE_NOT_EDITABLE` (403 REST / STOMP); NOT deletable → `SYSTEM_MESSAGE_NOT_DELETABLE` (403 REST / STOMP); count towards unread; không reactions V1; không quote/reply (`VALIDATION_FAILED`); pagination GET /messages trả inline với TEXT. **Migration V10** (`V10__add_system_message_fields.sql`): ADD COLUMN `system_event_type VARCHAR(50)` + `system_metadata JSONB`; ALTER `sender_id` DROP NOT NULL (SYSTEM không có user sender); CHECK constraint `chk_message_system_consistency` (type='SYSTEM' ↔ system_event_type non-null AND sender_id null; type!=SYSTEM ↔ cả 2 system field null). 2 error codes mới (ngoại lệ anti-enum documented). KHÔNG đổi shape REST POST /messages (endpoint deprecated, không ảnh hưởng). KHÔNG đổi STOMP SEND payload — client vẫn không gửi SYSTEM (server-only). BLOCKING cho BE W7-D4: order OWNER_TRANSFERRED trước MEMBER_LEFT trong leaveGroup OWNER path; insert SYSTEM msg TRƯỚC delete member row trong removeMember; CHECK constraint catch dirty INSERT. |
 | 2026-04-21 | v1.1.0-w7 | **W7-D2 contract finalize** cho 5 member management endpoints trước BE/FE implement. Changes vs v1.0.0-w7: (1) **POST /{id}/members** response đổi từ single-shape `{added[]}` → partial-success `{added[], skipped[{userId, reason: ALREADY_MEMBER|USER_NOT_FOUND|BLOCKED}]}` — 201 Created thay vì 200; status 201 khi có ít nhất 1 added hoặc khi tất cả skipped (vẫn success). `GROUP_FULL` → `MEMBER_LIMIT_EXCEEDED` (409, details `{currentCount, attemptedCount, limit: 50}`, all-or-nothing). `GROUP_MEMBER_NOT_FOUND` + `GROUP_MEMBER_ALREADY_IN` deprecated — chuyển sang per-user `skipped[].reason`. (2) **DELETE /{id}/members/{uid}**: `CANNOT_REMOVE_SELF` → `CANNOT_KICK_SELF`; `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`; `CANNOT_REMOVE_OWNER` removed (merged vào INSUFFICIENT_PERMISSION). Thêm user-specific broadcast `/user/{kickedUserId}/queue/conv-removed` với `{conversationId, reason: "KICKED"}`. (3) **POST /{id}/leave**: thêm `CANNOT_LEAVE_EMPTY_GROUP` (400) khi OWNER là member duy nhất — V1 không auto-delete. OWNER leave auto-transfer nay fire `OWNER_TRANSFERRED` (với `autoTransferred: true`) thay vì `ROLE_CHANGED` — consistent với `/transfer-owner`. Thứ tự broadcast: OWNER_TRANSFERRED TRƯỚC MEMBER_REMOVED. `MEMBER_REMOVED` với `reason: "LEFT"` có `removedBy: null` (khác KICKED: non-null). `SELECT FOR UPDATE` trên caller row chống race W7-1. (4) **PATCH /role**: response bỏ `oldRole`, thêm `changedBy: {userId, username}`. No-op (newRole == currentRole) → 200 OK idempotent KHÔNG broadcast. `INVALID_ROLE_CHANGE` tách thành 3 codes: `INVALID_ROLE` (400, body `role=OWNER`), `CANNOT_CHANGE_OWNER_ROLE` (403, target=OWNER), silent-idempotent cho no-op. `GROUP_MEMBER_NOT_FOUND` → `MEMBER_NOT_FOUND`. (5) **POST /transfer-owner**: body field `newOwnerId` → `targetUserId` (rename for consistency path `/members/{userId}`). Response `oldOwner` → `previousOwner` + thêm `username`. `INVALID_ROLE_CHANGE` → `CANNOT_TRANSFER_TO_SELF`. Broadcast OWNER_TRANSFERRED với `autoTransferred: false`. (6) **Authorization matrix appendix** finalize + thêm "error code → HTTP status cheat sheet". (7) **Add user-specific STOMP destinations** `/user/{userId}/queue/conv-added` (ConversationSummaryDto) + `/user/{userId}/queue/conv-removed` (`{conversationId, reason}`) — xem SOCKET_EVENTS.md §2 + §3.7/3.8. KHÔNG đụng schema, không migration mới. BLOCKING cho BE W7-D2 implementation: tên code mới, response shape mới, broadcast ordering mới. |

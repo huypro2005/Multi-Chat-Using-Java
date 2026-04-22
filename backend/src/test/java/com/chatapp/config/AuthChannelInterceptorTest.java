@@ -26,7 +26,7 @@ import static org.mockito.Mockito.*;
  * <ul>
  *   <li>T-AUTH-SEND-01: Non-member SEND .message → FORBIDDEN</li>
  *   <li>T-AUTH-SEND-02: Non-member SEND .typing  → pass (SILENT_DROP)</li>
- *   <li>T-AUTH-SEND-03: Non-member SEND .read    → pass (SILENT_DROP)</li>
+ *   <li>T-AUTH-SEND-03: Non-member SEND .read    → FORBIDDEN (STRICT_MEMBER — W7-D5)</li>
  *   <li>T-AUTH-SEND-04: Member SEND .message     → pass (STRICT_MEMBER authorized)</li>
  *   <li>T-AUTH-SEND-05: No principal SEND        → AUTH_REQUIRED</li>
  *   <li>T-AUTH-SUB-01:  Non-member SUBSCRIBE /topic/conv.{id} → FORBIDDEN (unchanged)</li>
@@ -126,18 +126,24 @@ class AuthChannelInterceptorTest {
     }
 
     // =========================================================================
-    // T-AUTH-SEND-03: Non-member SEND .read → pass (SILENT_DROP)
+    // T-AUTH-SEND-03: Non-member SEND .read → FORBIDDEN (STRICT_MEMBER — W7-D5)
+    // NOTE: W7-D5 chốt .read là STRICT_MEMBER (persists DB + broadcast).
+    //       Non-member read receipt → FORBIDDEN ERROR frame (không silent drop).
     // =========================================================================
 
     @Test
-    void send_read_nonMember_passesThrough() {
+    void send_read_nonMember_throwsForbidden() {
+        when(conversationMemberRepository.existsByConversation_IdAndUser_Id(convId, userId))
+                .thenReturn(false);
+
         String destination = "/app/conv." + convId + ".read";
         Message<?> msg = buildSendMessage(destination, principal);
 
-        Message<?> result = assertDoesNotThrow(() -> interceptor.preSend(msg, null));
-        assertNotNull(result);
-
-        verifyNoInteractions(conversationMemberRepository);
+        MessageDeliveryException ex = assertThrows(
+                MessageDeliveryException.class,
+                () -> interceptor.preSend(msg, null)
+        );
+        assertEquals("FORBIDDEN", ex.getMessage());
     }
 
     // =========================================================================
@@ -216,10 +222,12 @@ class AuthChannelInterceptorTest {
     }
 
     @Test
-    void resolveSendPolicy_readSuffix_returnsSilentDrop() {
+    void resolveSendPolicy_readSuffix_returnsStrictMember() {
+        // W7-D5: .read is STRICT_MEMBER (persists DB + broadcasts READ_UPDATED).
+        // Non-member read receipt → FORBIDDEN, not silent drop.
         String dest = "/app/conv." + convId + ".read";
         assertEquals(
-                AuthChannelInterceptor.DestinationPolicy.SILENT_DROP,
+                AuthChannelInterceptor.DestinationPolicy.STRICT_MEMBER,
                 interceptor.resolveSendPolicy(dest)
         );
     }

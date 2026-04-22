@@ -14,6 +14,7 @@ export interface User {
   email: string
   fullName: string
   avatarUrl: string | null
+  isBlockedByMe?: boolean
 }
 
 export interface AuthResponse {

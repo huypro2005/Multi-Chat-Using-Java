@@ -16,6 +16,26 @@
 
 ---
 
+## [W8-D2] feat: Pin Message + Bilateral User Block — V14+V15 migrations, PinService+BlockService, STOMP /app/msg.*.pin, 355 tests pass (22+ new)
+- Files tạo: V14__add_message_pin.sql, V15__add_user_blocks.sql, MessagePinnedEvent, MessageUnpinnedEvent, PinService, PinBroadcaster, ChatPinHandler, BlockService, BlockController, PinServiceTest (10 tests), BlockServiceTest (12 tests)
+- Files sửa: Message (+pinnedAt Instant +pinnedByUserId), MemberRole (+isAdminOrHigher), MessageRepository (+countPinnedInConversation +findPinnedByConversation), MessageDto (+pinnedAt +pinnedBy), MessageMapper (+userRepository dep), ConversationDto (+pinnedMessages overloaded from()), ConversationService (+getConversation pinnedMessages, +createOneOnOne block check), MessageService (+sendViaStomp ONE_ON_ONE block check), UserBlockRepository (+existsBilateral +deleteByBlockerIdAndBlockedId +findByBlocker_IdOrderByCreatedAtDesc)
+- Tests sửa: MessageServiceStompTest, MessageBroadcasterTest, MessageMapperReactionTest, ChatDeleteMessageHandlerTest, ChatEditMessageHandlerTest (add blockService mock + UserRepository mock + MessageDto null pinnedAt/pinnedBy params)
+- Decision: pinnedAt dùng Instant (không OffsetDateTime) — field pin không cần OffsetDateTime semantics
+- Decision: pinnedMessages chỉ populate trong getConversation detail, null trong list endpoint — tránh N+1
+- Decision: UserBlock entity đã tồn tại từ trước → chỉ extend repository methods, KHÔNG tạo lại entity
+- Pitfall: @Column columnDefinition="jsonb" trên field có @Convert(JsonMapConverter) → H2 double-quote JSON → converter throw. Fix: bỏ columnDefinition. Gây 100 integration test fail → fix 1 dòng → pass tất cả.
+- Blocker: Không có. 355 tests PASS.
+- Còn thiếu: UserDto.isBlockedByMe viewer-aware (scope W8-D2 optional, không có trong test suite hiện tại)
+
+## [W8-D1] feat: message_reactions table (V13) + ReactionService toggle + STOMP handler + batch aggregate in MessageDto — 98 unit tests pass (40 new reaction tests)
+- Files tạo: V13 migration, MessageReaction entity, MessageReactionRepository, ReactionAggregateDto, ReactionChangedEvent, EmojiValidator, ReactionService, ReactionBroadcaster, ChatReactHandler
+- Files sửa: MessageDto (+reactions field), MessageMapper (+overloaded toDto + aggregateReactions), MessageService (+messageReactionRepository + buildDtosWithReactions), AuthChannelInterceptor (+APP_MSG_PREFIX pass-through)
+- Tests sửa: MessageServiceStompTest, ChatEditMessageHandlerTest, ChatDeleteMessageHandlerTest, MessageBroadcasterTest (add reactions param), AuthChannelInterceptorTest (.read STRICT_MEMBER fix)
+- Decision: HANDLER_CHECK policy cho .react — interceptor pass-through /app/msg.*, handler validate member
+- Decision: emoji byte-length check TRƯỚC regex — tránh regex bypass với compound emoji dài
+- Decision: UPDATE row (không DELETE+INSERT) cho CHANGED case — giữ id stable, tránh race
+- Blocker còn: 100 integration test errors là pre-existing (SystemMessageTest, GroupConversationTest) — không liên quan W8-D1. Single test run pass, bulk run có H2/JPA shared-state issue.
+
 ## [W7-D5] feat: read receipt (markRead, unreadCount, READ_UPDATED broadcast) — 293 tests pass (11 new)
 
 **Scope**: Read receipt — STOMP handler, ReadReceiptService, MessageBroadcaster (READ_UPDATED), MemberDto.lastReadMessageId, unreadCount real compute in ConversationService.

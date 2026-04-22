@@ -2381,3 +2381,103 @@ src/main/java/com/yourapp/chat/
   - Join requests + approval.
   - Multi-OWNER / delegated admins với audit log.
 - **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-020.
+
+### ADR-022: Message Reactions with Any Emoji (W8)
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-22 (Tuần 8, W8-D1)
+- **Context**: W8 scope — reactions support. Choice between fixed 6 emoji (Zalo/Messenger style) vs any emoji picker (Slack/Discord style). SE330 demo favors richer UX.
+  > **Numbering note**: Số ADR-022 ở đây là canonical cho W8 Message Reactions. Trùng số với 2 ghi chú lịch sử trong `.claude/memory/reviewer-knowledge.md` (ADR-022 "Soft-deleted strip content + attachments" + ADR-021 conflict với "Content XOR Attachments" / "Hybrid File Visibility"): những mục đó là ghi chú memory legacy, không có entry trong ARCHITECTURE.md §12. ADR-022 canonical (mục này) là nguồn duy nhất cho W8 Reactions. Reviewer sẽ rename / consolidate các ghi chú memory trong đợt next consolidation — không block W8-D1 implementation.
+- **Decision**:
+  - **Schema**: `message_reactions` table — 1 row per (user, message) với `UNIQUE(message_id, user_id)` constraint. Migration V13 (xem API_CONTRACT.md mục "Migration V13 — message_reactions (W8-D1)").
+  - **Emoji field**: `VARCHAR(20)` — supports compound emoji (flags, ZWJ sequences như 👨‍👩‍👧‍👦, 🏴󠁧󠁢󠁳󠁣󠁴󠁿). Max safe Unicode emoji byte length sau UTF-8 encoding. Không `TEXT` (index efficiency) + không `CHAR(N)` (pad vấn đề).
+  - **Toggle semantics** (3 cases, BE service handle atomic):
+    - No existing reaction cho (message, user) → INSERT → broadcast `action: "ADDED"`.
+    - Same emoji exists → DELETE → broadcast `action: "REMOVED"`.
+    - Different emoji exists → UPDATE emoji → broadcast `action: "CHANGED"` với cả `emoji` (new) và `previousEmoji` (old).
+  - **Aggregate display**: BE serialize `MessageDto.reactions: ReactionAggregateDto[]` — group by emoji, count, userIds list, currentUserReacted boolean. Sort: `count DESC, emoji ASC` (stable fallback). Empty array nếu không reaction (không `null` — FE không phải null-check).
+  - **Emoji validation**: server-side regex (Java Unicode emoji pattern, ví dụ `[\p{So}\p{Emoji}\p{Emoji_Modifier}\p{Emoji_Component}]+` hoặc library `emoji-java` check). Reject plain text, ASCII control, leading/trailing whitespace. FE `@emoji-mart/react` picker trả về emoji character — BE vẫn MUST validate (defense-in-depth, không tin client).
+  - **SYSTEM messages không allow react**: `type = 'SYSTEM'` → reject với error code `REACTION_NOT_ALLOWED_FOR_SYSTEM` (rename từ placeholder cũ `SYSTEM_MESSAGE_NO_REACTIONS` ghi ở W7-D4 API_CONTRACT.md — xem "Validation rules cho SYSTEM messages" rule 4 supersede).
+  - **Soft-deleted messages không allow react**: `deleted_at IS NOT NULL` → reject với `REACTION_MSG_DELETED`. Anti-enum note: không merge vào `MSG_NOT_FOUND` — FE cache đã có message với `deletedAt != null` nên distinguish KHÔNG leak existence (giống SYSTEM_MESSAGE_NOT_EDITABLE ngoại lệ).
+  - **Rate limit**: 5 reactions/second/user (Redis `rate:msg-react:{userId}` INCR + EX 1). Looser hơn message send (30/phút), edit (10/phút), delete (10/phút) vì quick-react batch UX hợp lệ (user click nhanh nhiều emoji thăm dò). Spam-prevention loose enough.
+  - **Broadcast**: `REACTION_CHANGED` event trên `/topic/conv.{convId}` với payload `{messageId, userId, userName, action, emoji, previousEmoji}`. Xem SOCKET_EVENTS.md §3.16. Field rules: `emoji` là new (ADDED/CHANGED) hoặc `null` (REMOVED); `previousEmoji` là old (REMOVED/CHANGED) hoặc `null` (ADDED).
+  - **STOMP inbound**: `/app/msg.{messageId}.react` payload `{emoji}` — KHÔNG có clientId (fire-and-forget, confirmation qua broadcast). Xem SOCKET_EVENTS.md §3.15.
+  - **Authorization**: user phải là member của conversation chứa message. Non-member → reject `NOT_MEMBER` (STRICT_MEMBER policy).
+- **Consequences**:
+  - (+) Flexible UX: bất kỳ emoji nào → expressive hơn fixed 6.
+  - (+) Simple schema: 1 row = 1 state, UNIQUE enforces invariant (không cần WHERE NOT EXISTS race-prone check).
+  - (+) Reuse MESSAGE_CREATED handler pattern: AFTER_COMMIT broadcast, same Redis rate limit infra.
+  - (-) FE bundle size: `@emoji-mart/react` ~300KB gzipped (W8 acceptable — đánh đổi cho richer UX; V2 xem xét lazy-load picker).
+  - (-) Emoji validation edge case: compound emoji (family, skin-tone modifiers, flag sequences) — regex phải cover Unicode 15.1 spec đầy đủ. Test bằng emoji set representative: 👍 (basic), 👍🏽 (skin-tone), 👨‍👩‍👧 (ZWJ family), 🏴󠁧󠁢󠁳󠁣󠁴󠁿 (tag sequence flag).
+  - (-) N+1 risk khi list messages: 50 messages × reactions query → 50 round-trips DB. **BLOCKING mitigation**: batch load reactions cho tất cả `messageIds` của page trong 1 query (`WHERE message_id IN (?)`), group in memory. BE MessageMapper phải support batch load entry point.
+  - (-) Broadcast volume: group active với 50 members × nhiều reactions → traffic STOMP tăng. Rate limit 5/s per user + SimpleBroker in-memory V1 đủ cho <1000 concurrent. V2 monitor RabbitMQ if needed.
+- **Alternatives rejected**:
+  - **Fixed 6 emoji** (Messenger/Zalo style): rejected by user decision, less expressive. Schema đơn giản hơn (enum emoji) nhưng UX không phù hợp demo scope.
+  - **Multi-emoji per user per message** (Slack-stack — 1 user react nhiều emoji lên 1 message): rejected V1 — UX complexity (render nhiều emoji cùng user phức tạp trên mobile), schema cần bỏ UNIQUE. V2 xem xét.
+  - **Reaction như child message** (mỗi reaction là 1 MessageDto type=REACTION): rejected — pollute messages table, không natural cho aggregate display, unread count logic phức tạp.
+- **Migration path V2**:
+  - Custom reactions (image upload as reaction emoji): thêm column `custom_emoji_file_id UUID NULL` → FK files; serializer chọn emoji char hoặc CDN URL. Cần upload permission check + moderation queue.
+  - Multi-emoji per user per message: DROP UNIQUE(message_id, user_id), thêm composite PK (message_id, user_id, emoji). Data migrate: không lossy (existing rows vẫn hợp lệ).
+  - Reaction on thread replies (W9+ threads): reuse same schema, message_id reference thread reply.
+- **Chi tiết đầy đủ**: xem `.claude/memory/reviewer-knowledge.md` → ADR-022 (W8 canonical) sau W8-D1 review.
+
+### ADR-023: Pin Message (W8-D2)
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-22 (Tuần 8, W8-D2)
+- **Context**: Users cần highlight tin nhắn quan trọng trong conversation (thông báo, rules, link tài liệu). Zalo/Telegram đều có feature này. Cần chốt: giới hạn số pin, authorization model theo conv type, xử lý edge case pin message đã bị soft-delete.
+- **Decision**:
+  - **Max 3 pinned messages per conversation** (Zalo-style). Lý do: đủ cho thông báo quan trọng, tránh abuse biến pinned thành bookmark list. Discord cho 50 — overwhelming cho V1 mobile-first UX.
+  - **Authorization**:
+    - `GROUP` → chỉ `OWNER` và `ADMIN` pin/unpin (reuse `MemberRole.isAdminOrHigher()` pattern W7-D1).
+    - `DIRECT` → bất kỳ member nào cũng pin được (conv 2 người, cả 2 ngang quyền).
+  - **Schema**: 2 cột mới trên `messages` — `pinned_at TIMESTAMPTZ NULL` + `pinned_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL`. Partial index `WHERE pinned_at IS NOT NULL` cho query pinned list nhanh. Migration V14.
+  - **STOMP inbound**: `/app/msg.{messageId}.pin` payload `{action: "PIN"|"UNPIN"}`. Policy `HANDLER_CHECK` (cùng pattern ADR-022 reactions — destination messageId-based, resolve convId trong handler).
+  - **Broadcast**: `MESSAGE_PINNED` / `MESSAGE_UNPINNED` trên `/topic/conv.{convId}` với payload `{messageId, conversationId, pinnedBy/unpinnedBy: {userId, userName}, pinnedAt}`.
+  - **Idempotent pin**: đã pinned → no-op, không broadcast. Giữ consistent với block idempotent pattern.
+  - **Pin deleted message**: reject `MSG_DELETED`. Soft-deleted pinned message auto-filter trong query `WHERE deleted_at IS NULL` (count + findPinned) — không hiện trong banner nhưng DB row giữ `pinned_at` cho audit.
+  - **ConversationDetailDto**: thêm `pinnedMessages: MessageDto[]` sort `pinned_at DESC`, max 3.
+  - **MessageDto**: thêm `pinnedAt: string|null` + `pinnedBy: {userId, userName}|null`.
+  - **Rate limit**: 5/s/user cho pin STOMP handler (pattern ADR-005).
+- **Consequences**:
+  - (+) UX clear cho thông tin quan trọng; banner top conv + click scroll-to-message.
+  - (+) Max 3 ngăn abuse, đủ cho use case V1.
+  - (+) Reuse HANDLER_CHECK policy pattern từ W8-D1 reactions.
+  - (-) Thêm role check logic per conv type (nhưng đã có pattern `isAdminOrHigher()` từ W7).
+  - (-) Pin limit race V1 single-instance acceptable (count check không FOR UPDATE lock — 2 concurrent pin trong conv 2 pinned có thể tạo 4 pinned). V2 multi-instance cần distributed lock hoặc DB trigger check count.
+  - (-) Soft-deleted pinned message: query filter `deleted_at IS NULL` trong count + list — không auto-unpin (tránh thêm trigger phức tạp). V2 DB trigger auto-unpin khi soft delete.
+- **Alternatives rejected**:
+  - Không limit: rejected (abuse risk, banner overflow).
+  - 10 pinned (Discord-style): rejected (UI overwhelming cho mobile, V1 scope).
+  - DB trigger auto-unpin khi delete: rejected V1 (complexity — query filter đủ, trigger phải handle CASCADE edge case).
+  - Separate `pinned_messages` table: rejected (only 2 columns, không cần normalize — partial index đủ).
+
+### ADR-024: Bilateral User Block (W8-D2)
+
+- **Status**: Accepted
+- **Ngày**: 2026-04-22 (Tuần 8, W8-D2)
+- **Context**: User cần block harassing/spam users. Cần chốt: unilateral vs bilateral, scope (direct only vs group), impact on existing conv, privacy (B biết A block không).
+- **Decision**:
+  - **Bilateral**: A block B → cả 2 không gửi direct message cho nhau. Lý do: symmetric permission model đơn giản hơn unilateral (không cần track "who blocked who" cho mỗi direction riêng trong send flow). Idempotent: A block B, B block A → 2 rows DB, cả 2 unblock mới restore.
+  - **Schema**: bảng `user_blocks` — `id UUID PK`, `blocker_id UUID FK`, `blocked_id UUID FK`, `created_at TIMESTAMPTZ`, `UNIQUE(blocker_id, blocked_id)`, `CHECK(blocker_id != blocked_id)`. Migration V15.
+  - **Scope**:
+    - **DIRECT**: send message + createDirect conv bị block bilateral (`existsBilateral(a, b)` check cả 2 chiều trong 1 query OR).
+    - **GROUP**: blocked user vẫn ở group đã join. Add blocked user vào group mới → `USER_BLOCKED` (reuse W7 `addMembers` skip pattern). Send message trong group KHÔNG bị block (group là shared context, admin quản lý).
+  - **REST endpoints**: `POST /api/users/{id}/block` (201 / 200 idempotent), `DELETE /api/users/{id}/block` (204), `GET /api/users/blocked` (200 `{items: UserDto[]}`).
+  - **Block idempotent**: đã block → no-op 200 (không throw, không duplicate row).
+  - **Unblock**: chỉ unblock chiều mình. A unblock B → A gửi được, B vẫn block A → B vẫn không gửi được. Bilateral check ngăn cả hai hướng chừng nào CÒN BẤT KỲ row nào tồn tại.
+  - **Privacy**: `UserDto.isBlockedByMe: boolean` (current user đã block target). **KHÔNG** expose `hasBlockedMe` (user B không nên biết A đã block B — chống harassment escalation).
+  - **Historical messages preserved**: block không xóa/mask messages cũ trong conv đã tồn tại.
+  - **Error codes**: `CANNOT_BLOCK_SELF`, `BLOCK_NOT_FOUND` (unblock chưa block), `MSG_USER_BLOCKED` (send direct / createDirect khi bilateral blocked), `USER_NOT_FOUND` (target không tồn tại).
+- **Consequences**:
+  - (+) Simpler symmetric permission model — 1 query bilateral thay 2 query unilateral.
+  - (+) Idempotent: A block B, B block A → không conflict (2 rows riêng biệt).
+  - (+) Reuse W7 `USER_BLOCKED` trong `addMembers` skip pattern.
+  - (-) Messages cũ vẫn visible (không mask) — acceptable V1, user đã consent khi trong conv.
+  - (-) Conv 1-1 vẫn tồn tại sau block — chỉ không gửi message mới. UX: FE có thể show banner "Bạn đã chặn người này" nhưng V1 chỉ disable input.
+  - (-) Bilateral = strict — A block B rồi unblock, nhưng B vẫn block A → A vẫn không gửi được. Acceptable — consistent model.
+- **Alternatives rejected**:
+  - **Unilateral block** (A block B → chỉ A không nhận tin B, B vẫn gửi được): rejected — không đủ an toàn, harasser vẫn gửi được.
+  - **3 levels (Mute/Restrict/Block)**: rejected — quá phức tạp V1. V2 xem xét Mute (hide notification) tách riêng.
+  - **Block + delete conv**: rejected — phá historical data, privacy concern.
+  - **Separate BlockService check trong interceptor STOMP**: rejected — block chỉ check DIRECT conv, interceptor không có context conv type. Service-level check đúng chỗ.

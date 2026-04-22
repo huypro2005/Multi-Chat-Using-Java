@@ -2,6 +2,7 @@ import { ArrowLeft, Info, MoreHorizontal } from 'lucide-react'
 import UserAvatar from '@/components/UserAvatar'
 import { useAuthStore } from '@/stores/authStore'
 import { getOtherMember } from '@/features/conversations/utils'
+import { useBlockedUsers, useBlockUser, useUnblockUser } from '@/features/users/hooks'
 import {
   getConversationDisplayName,
   ConversationType,
@@ -18,12 +19,19 @@ export default function ConversationHeader({ conversation, onToggleInfo, onBack 
   const currentUserId = useAuthStore((s) => s.user?.id ?? '')
 
   const displayName = getConversationDisplayName(conversation, currentUserId)
+  const otherMember =
+    conversation.type === ConversationType.ONE_ON_ONE || conversation.type === ConversationType.DIRECT
+      ? getOtherMember(conversation, currentUserId)
+      : null
+  const blockUser = useBlockUser(otherMember?.userId ?? '')
+  const unblockUser = useUnblockUser(otherMember?.userId ?? '')
+  const { data: blockedUsers = [] } = useBlockedUsers()
 
   // Avatar data
   const avatarUser =
-    conversation.type === ConversationType.ONE_ON_ONE
+    conversation.type === ConversationType.ONE_ON_ONE || conversation.type === ConversationType.DIRECT
       ? (() => {
-          const other = getOtherMember(conversation, currentUserId)
+          const other = otherMember
           return {
             fullName: other?.fullName ?? displayName,
             avatarUrl: other?.avatarUrl ?? null,
@@ -36,12 +44,30 @@ export default function ConversationHeader({ conversation, onToggleInfo, onBack 
 
   // Sub-text
   const subText =
-    conversation.type === ConversationType.ONE_ON_ONE
+    conversation.type === ConversationType.ONE_ON_ONE || conversation.type === ConversationType.DIRECT
       ? (() => {
-          const other = getOtherMember(conversation, currentUserId)
+          const other = otherMember
           return other ? `@${other.username}` : ''
         })()
       : `${conversation.members.length} thành viên`
+
+  const isDirect =
+    conversation.type === ConversationType.ONE_ON_ONE || conversation.type === ConversationType.DIRECT
+  const isBlockedByMe = !!otherMember && blockedUsers.some((u) => u.id === otherMember.userId)
+
+  const handleToggleBlock = () => {
+    if (!otherMember) return
+    if (isBlockedByMe) {
+      unblockUser.mutate()
+      return
+    }
+    const ok = window.confirm(
+      `Chặn ${otherMember.fullName}?\nBạn và người này sẽ không gửi tin nhắn trực tiếp được cho nhau.`,
+    )
+    if (ok) {
+      blockUser.mutate()
+    }
+  }
 
   return (
     <div className="h-16 px-4 border-b bg-white flex items-center gap-3 flex-shrink-0">
@@ -78,6 +104,20 @@ export default function ConversationHeader({ conversation, onToggleInfo, onBack 
         >
           <Info size={20} />
         </button>
+        {isDirect && otherMember && (
+          <button
+            type="button"
+            onClick={handleToggleBlock}
+            disabled={blockUser.isPending || unblockUser.isPending}
+            className={`px-2 py-1 text-xs font-medium rounded-md border transition-colors ${
+              isBlockedByMe
+                ? 'border-indigo-200 text-indigo-700 hover:bg-indigo-50'
+                : 'border-red-200 text-red-600 hover:bg-red-50'
+            } disabled:opacity-50`}
+          >
+            {isBlockedByMe ? 'Bỏ chặn' : 'Chặn'}
+          </button>
+        )}
         <button
           disabled
           aria-label="Thêm tùy chọn"

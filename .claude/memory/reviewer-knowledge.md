@@ -148,17 +148,61 @@
 - Cache headers: private `Cache-Control: private, max-age=7d`; public `Cache-Control: public, max-age=1d` (browser+CDN).
 - **Reviewer rules**: (a) permitAll path mới → verify TRƯỚC authenticated; (b) public endpoint không dùng error code phân biệt "not found" vs "private" (leak enum); (c) FE upload cho public resource KHÔNG `?public=true` → BLOCKING.
 
-### ADR-022: Soft-deleted strip content + attachments (W5-D3 + W6-D1)
+### ADR-022: Soft-deleted strip content + attachments (W5-D3 + W6-D1) [LEGACY memory note — không có entry ARCHITECTURE.md §12]
 - `MessageMapper.toDto` khi `deletedAt != null` → content=null + attachments=[]. Applied nhất quán REST list/get, STOMP broadcast, ACK (bất kỳ path nào serialize MessageDto).
 - Defense-in-depth: strip ở mapper = strip ở TẤT CẢ output path (không sót).
 - Browser Cache-Control 7d thumb binary có thể còn cache — acceptable trade-off.
+- **Naming conflict**: Số ADR-022 canonical thuộc về "Message Reactions with Any Emoji" (W8-D1, ARCHITECTURE.md §12) — mục bên dưới. Note này giữ lại cho lookup lịch sử, sẽ rename/consolidate sang ADR-023+ trong đợt next consolidation.
+
+## ADR-022: Message Reactions (W8-D1, 2026-04-22) [CANONICAL — ARCHITECTURE.md §12]
+- **Schema**: `message_reactions` — `UNIQUE(message_id, user_id)` — 1 user 1 emoji per message. Columns: id UUID PK, message_id FK CASCADE, user_id FK CASCADE, emoji VARCHAR(20), created_at. Migration V13.
+- **Toggle semantics**: no-existing → INSERT (ADDED); same emoji → DELETE (REMOVED); different → UPDATE (CHANGED). Atomic `@Transactional` — UPDATE (không DELETE+INSERT) để id stable + tránh race.
+- **Aggregate**: `ReactionAggregateDto {emoji, count, userIds[], currentUserReacted}` embed `MessageDto.reactions[]`. Sort `count DESC, emoji ASC` stable. Empty `[]` cho SYSTEM + soft-deleted (không null).
+- **STOMP**: `/app/msg.{messageId}.react` payload `{emoji}` KHÔNG clientId (fire-and-forget, confirmation qua broadcast `REACTION_CHANGED` `/topic/conv.{convId}`).
+- **Broadcast payload**: `{messageId, userId, userName (snapshot), action: ADDED|REMOVED|CHANGED, emoji, previousEmoji}`. Matrix: ADDED → emoji non-null/previousEmoji null; REMOVED → emoji null/previousEmoji non-null; CHANGED → cả 2 non-null.
+- **Validation chain (rẻ→đắt)**: auth → emoji regex (≤20 bytes UTF-8) → rate limit 5/s → message exists → member of conv → type != SYSTEM → deleted_at IS NULL → toggle DB.
+- **Policy `.react`**: HANDLER_CHECK (không STRICT_MEMBER interceptor) — destination messageId không có FK convId để resolve trong interceptor; handler query message cho validation → piggyback member check cùng transaction. Trade-off: FORBIDDEN qua user queue ERROR thay STOMP ERROR frame (consistent với `.typing` SILENT_DROP pattern).
+- **N+1 BLOCKING mitigation**: list messages (50/page) → batch query `WHERE message_id IN (:ids)` 1 round-trip → group in-memory Map<UUID, List<Aggregate>>. KHÔNG @OneToMany LAZY trong loop.
+- **Emoji validation**: server-side regex Unicode (library `emoji-java` hoặc regex `\p{So}\p{Emoji}*`). Defense-in-depth: KHÔNG tin FE picker. Edge: compound emoji (family ZWJ, flag tag sequence, skin-tone modifier) — test set representative 👍/👍🏽/👨‍👩‍👧/🏴󠁧󠁢󠁳󠁣󠁴󠁿. Flag tag sequence 28 bytes reject vì VARCHAR(20).
+- **Rate limit 5/s/user**: Redis `rate:msg-react:{userId}` INCR EX 1. Looser hơn send (30/phút) vì quick-react batch UX hợp lệ. Pattern ADR-005.
+- **ADR-017 reuse**: unified ACK queue đã reserve `operation: "REACT"` từ W5-D2. ERROR frame `{operation:"REACT", clientId:null, code}` — FE MUST tolerate null clientId (không registry.get(null) crash).
+- **FE**: `@emoji-mart/react` ~300KB gzipped — V2 lazy-load nếu bundle budget; ReactionBar hover preview + click aggregate toggle. Optimistic patch → broadcast reconcile idempotent (check `userIds.includes` trước push/remove).
+- **Error codes**: `REACTION_INVALID_EMOJI`, `REACTION_NOT_ALLOWED_FOR_SYSTEM` (supersede placeholder `SYSTEM_MESSAGE_NO_REACTIONS` từ W7-D4 rule 4), `REACTION_MSG_DELETED`. Ngoại lệ anti-enum documented (visible type không leak, giống SYSTEM_MESSAGE_NOT_EDITABLE pattern).
+- **Race edge cases**: reaction trên message soft-delete race acceptable V1 (orphan row, MessageMapper filter `deletedAt != null → reactions=[]` bỏ qua); user kick race orphan userId FE tolerate (giống §3f.4 READ_UPDATED kick race).
+- **V2 path**: custom reactions (image upload as emoji) với `custom_emoji_file_id` FK files + moderation queue; multi-emoji per user per message (drop UNIQUE, composite PK); reaction trên thread replies (W9+ threads, reuse schema).
+- **Review BLOCKING BE W8-D1**: UNIQUE constraint toggle atomic, emoji regex server-side, batch load N+1, error code rename supersede, VARCHAR(20) vs compound emoji edge case.
+- **Review BLOCKING FE W8-D1**: ERROR handler tolerate `clientId:null`, optimistic + idempotent reconcile, sort count DESC stable re-apply sau patch, emoji-mart lazy-load option.
+
+### ADR-023: Pin Message (W8-D2, 2026-04-22)
+- **Schema**: V14 migration — `messages.pinned_at TIMESTAMPTZ` + `pinned_by_user_id UUID FK ON DELETE SET NULL`. Partial index `WHERE pinned_at IS NOT NULL`.
+- **Max 3 per conv**: count query `WHERE pinned_at IS NOT NULL AND deleted_at IS NULL`. V1 single-instance count check acceptable (no FOR UPDATE — race window nhỏ). V2 distributed lock.
+- **Authorization**: GROUP → `MemberRole.isAdminOrHigher()` (OWNER/ADMIN). DIRECT → any member. Reuse W7-D1 role enum pattern.
+- **STOMP**: `/app/msg.{messageId}.pin` payload `{action: "PIN"|"UNPIN"}`, policy HANDLER_CHECK (cùng pattern .react W8-D1). Rate 5/s/user.
+- **Broadcast**: `MESSAGE_PINNED` / `MESSAGE_UNPINNED` trên `/topic/conv.{convId}`. Fire-and-forget (no clientId). AFTER_COMMIT pattern.
+- **Idempotent**: already pinned → no-op (không broadcast). Pin deleted → reject `MSG_DELETED` (ngoại lệ anti-enum, cùng pattern REACTION_MSG_DELETED).
+- **Soft-deleted pinned**: query filter `deleted_at IS NULL` trong count + findPinned → ghost row không hiện banner. KHÔNG auto-unpin (V2 DB trigger).
+- **DTO extend**: MessageDto `pinnedAt` + `pinnedBy: {userId, userName}`. ConversationDetailDto `pinnedMessages: MessageDto[]` sort `pinned_at DESC`.
+- **Error codes**: `PIN_LIMIT_EXCEEDED` (details currentCount+limit), `MESSAGE_NOT_PINNED`, `MSG_DELETED`, `INVALID_ACTION`. Reuse FORBIDDEN, MSG_NOT_FOUND, NOT_MEMBER, MSG_RATE_LIMITED.
+- **BLOCKING checks BE W8-D2**: role check GROUP vs DIRECT (isAdminOrHigher), pin limit count filter deleted_at, AFTER_COMMIT broadcast, idempotent no-op. 
+- **BLOCKING checks FE W8-D2**: PinnedMessagesBanner collapsed/expanded + scrollToMessage, canPin() role check, error toast.
+
+### ADR-024: Bilateral User Block (W8-D2, 2026-04-22)
+- **Schema**: V15 migration — `user_blocks` table UNIQUE(blocker_id, blocked_id), CHECK(blocker != blocked), ON DELETE CASCADE.
+- **Bilateral**: `existsBilateral(a, b)` query OR cả 2 chiều trong 1 query. A block B → cả 2 không direct msg. A unblock B → chỉ bỏ chiều A→B, B→A vẫn block (nếu có).
+- **REST**: `POST /api/users/{id}/block` (201/200 idempotent), `DELETE /api/users/{id}/block` (204), `GET /api/users/blocked` (200 `{items: UserDto[]}`).
+- **Integration**: sendViaStomp DIRECT → check bilateral before insert msg. createDirect → check bilateral before create conv. GROUP send KHÔNG check. addMembers reuse W7 USER_BLOCKED skip.
+- **Privacy**: `UserDto.isBlockedByMe` (viewer-aware). KHÔNG expose `hasBlockedMe`.
+- **Error codes**: `CANNOT_BLOCK_SELF`, `BLOCK_NOT_FOUND`, `MSG_USER_BLOCKED` (bilateral, không tiết lộ ai block ai).
+- **BLOCKING checks BE W8-D2**: bilateral query OR, idempotent block (no-op), integration sendViaStomp DIRECT-only + createDirect, ON DELETE CASCADE cleanup.
+- **BLOCKING checks FE W8-D2**: block confirm dialog, error toast, isBlockedByMe flag UI.
 
 ---
 
 ## Contract version hiện tại
 
-- **API_CONTRACT.md**: **v1.4.0-w7-read** (W7-D5: read receipt — V12 migration last_read_message_id FK ON DELETE SET NULL, MemberDto extend lastReadMessageId, unreadCount real compute `LEAST(COUNT(*), 99)` filter SYSTEM+deleted_at, readBy CLIENT-SIDE compute).
-- **SOCKET_EVENTS.md**: **v1.9-w7** (W7-D5: §3.13 READ_UPDATED outbound `/topic/conv.{id}`, §3f inbound `/app/conv.{convId}.read` không có clientId, idempotent forward-only compare createdAt, .read destination policy STRICT_MEMBER persist DB+broadcast).
+- **API_CONTRACT.md**: **v1.6.0-w8-pin-block** (W8-D2: Pin Message + Bilateral User Block — V14 `messages.pinned_at` + `pinned_by_user_id`, V15 `user_blocks` UNIQUE(blocker_id, blocked_id). Pin: STOMP `/app/msg.{messageId}.pin` payload `{action}` HANDLER_CHECK, role GROUP OWNER/ADMIN DIRECT any, limit 3, broadcast MESSAGE_PINNED/UNPINNED, MessageDto extend `pinnedAt` + `pinnedBy`, ConversationDetailDto extend `pinnedMessages[]`. Block: REST 3 endpoints, `existsBilateral` OR, integrate sendViaStomp DIRECT + createDirect, UserDto extend `isBlockedByMe`. Error codes: PIN_LIMIT_EXCEEDED, MESSAGE_NOT_PINNED, MSG_DELETED, INVALID_ACTION, CANNOT_BLOCK_SELF, BLOCK_NOT_FOUND, MSG_USER_BLOCKED).
+- **SOCKET_EVENTS.md**: **v1.11-w8** (W8-D2: §3.17 `MESSAGE_PINNED` broadcast + §3.18 `MESSAGE_UNPINNED` broadcast trên `/topic/conv.{convId}`. §2 thêm `/app/msg.{messageId}.pin` inbound HANDLER_CHECK. §7.1 thêm .pin policy. ERROR `{operation:"PIN", clientId:null, code}` tolerate null. ADR-023 + ADR-024 references §9).
+- _Previous_: API v1.5.0-w8-reactions + SOCKET v1.10-w8 (W8-D1 reactions); API v1.4.0-w7-read + SOCKET v1.9-w7 (W7-D5 read receipts).
 
 ## Auth contract — đã chốt
 
@@ -303,11 +347,16 @@
 | 2026-04-21 | API v1.1.0-w7 + SOCKET v1.6-w7 | W7-D2 member management: partial success shape, MEMBER_LIMIT_EXCEEDED rename, CANNOT_KICK_SELF, /queue/conv-added|removed, OWNER_TRANSFERRED autoTransferred field. |
 | 2026-04-22 | API v1.2.0-w7-system + SOCKET v1.7-w7 | W7-D4 SYSTEM messages: JSONB systemMetadata, V10 DROP NOT NULL sender_id, CHECK chk_message_system_consistency, 8 event types, SYSTEM_MESSAGE_NOT_EDITABLE/NOT_DELETABLE. |
 | 2026-04-22 | API v1.4.0-w7-read + SOCKET v1.9-w7 | W7-D5 Read receipt: V12 migration, unreadCount real compute LEAST 99 filter SYSTEM, READ_UPDATED broadcast, `/app/conv.{id}.read` inbound no clientId forward-only idempotent. |
+| 2026-04-22 | API v1.6.0-w8-pin-block + SOCKET v1.11-w8 | W8-D2 Pin Message + Bilateral Block: V14 messages.pinned_at + pinned_by_user_id, V15 user_blocks UNIQUE(blocker,blocked). Pin STOMP `/app/msg.{messageId}.pin` HANDLER_CHECK, role GROUP OWNER/ADMIN, limit 3, broadcast MESSAGE_PINNED/UNPINNED. Block REST 3 endpoints, existsBilateral OR, integrate sendViaStomp DIRECT + createDirect. MessageDto + pinnedAt/pinnedBy, ConversationDetailDto + pinnedMessages[], UserDto + isBlockedByMe. 7 error codes mới. ADR-023 + ADR-024 ARCHITECTURE.md §12. |
+| 2026-04-22 | API v1.5.0-w8-reactions + SOCKET v1.10-w8 | W8-D1 Message Reactions: V13 migration `message_reactions` UNIQUE(message_id, user_id), MessageDto + reactions[], ReactionAggregateDto {emoji, count, userIds, currentUserReacted}, `/app/msg.{messageId}.react` no clientId toggle 3 semantic, REACTION_CHANGED broadcast action ADDED/REMOVED/CHANGED, policy HANDLER_CHECK, rate 5/s/user, 3 error codes REACTION_*, supersede SYSTEM_MESSAGE_NO_REACTIONS → REACTION_NOT_ALLOWED_FOR_SYSTEM, ADR-022 canonical ARCHITECTURE.md §12 (legacy ADR-022 soft-delete strip marked). |
 
 ---
 
 ## Changelog file này
 
+- 2026-04-22 W8-D2 contract: Pin Message + Bilateral Block — API v1.5.0-w8-reactions → v1.6.0-w8-pin-block + SOCKET v1.10-w8 → v1.11-w8. ADR-023 Pin (max 3/conv, GROUP OWNER/ADMIN, DIRECT any, HANDLER_CHECK, broadcast MESSAGE_PINNED/UNPINNED, MessageDto pinnedAt+pinnedBy, ConversationDetailDto pinnedMessages[]). ADR-024 Block (V15 user_blocks, bilateral existsBilateral OR, REST 3 endpoints, integrate sendViaStomp DIRECT + createDirect, isBlockedByMe privacy no hasBlockedMe). V14+V15 migrations. 7 new error codes (4 pin + 3 block). 3 WARNINGS (pin-deleted-race, pin-limit-race, block-existing-conv). ARCHITECTURE.md §12 append 2 ADRs.
+- 2026-04-22 W8-D1 review: **REQUEST CHANGES — 1 BLOCKING regression 100 tests**. Feature W8-D1 Reactions bản thân: 31/31 checklist items PASS, 40/40 reaction tests mới PASS (EmojiValidator 18, ReactionService 15, MessageMapperReaction 7), contract alignment PASS (API v1.5.0-w8-reactions + SOCKET v1.10-w8 exact match BE/FE). BLOCKING: `Message.java:112-117` thêm `@ColumnTransformer(write = "?::jsonb")` + `columnDefinition = "jsonb"` phá H2 deserialization — 100 test errors trên 6 class (SystemMessageTest 13/13, MemberManagementTest 26/26, FileControllerTest 24/24, FileVisibilityTest 9/12, GroupConversationTest 20/21, ConversationControllerTest 8/20). Root cause: JsonMapConverter read-back double-encoded khi H2 store qua `?::jsonb` cast — pattern W7-D4 knowledge "JPA JsonMapConverter JSONB H2/PG" (`@Convert` + `@Column(name)` không columnDefinition) đã portable sẵn → thêm `@ColumnTransformer` là regression. Scope creep — `Message.java` change không liên quan reactions feature, mix vào cùng branch làm block toàn bộ. Fix required: revert 2 dòng `@ColumnTransformer` + `columnDefinition`. Nếu PG thật sự cần cast → tách commit riêng + ADR + Spring profile. Patterns mới (khi fix xong): HANDLER_CHECK policy cho destination messageId-based (không conv_id FK), batch-load reactions tránh N+1 (`findAllByMessageIdIn` 1 query group-by Map<UUID, List>), fire-and-forget STOMP pattern (no clientId confirmation qua broadcast, unified ERROR queue với clientId=null tolerate). Pitfall: `@ColumnTransformer` + `columnDefinition="jsonb"` BREAK H2 với AttributeConverter — H2 trả JSON-quoted string thay raw JSON.
+- 2026-04-22 W8-D1 contract: Message Reactions — API v1.4.0-w7-read → v1.5.0-w8-reactions + SOCKET v1.9-w7 → v1.10-w8. Migration V13 `message_reactions` UNIQUE(message_id, user_id). Toggle 3 case (INSERT/DELETE/UPDATE chọn UPDATE thay DELETE+INSERT để id stable). ReactionAggregateDto `{emoji, count, userIds, currentUserReacted}` embed MessageDto. STOMP §3.15 `.react` no clientId fire-and-forget + §3.16 REACTION_CHANGED broadcast action ADDED/REMOVED/CHANGED. Policy HANDLER_CHECK (không STRICT_MEMBER interceptor) — messageId không có FK convId resolve trong handler. Rate 5/s/user loose. 3 error codes REACTION_* (ngoại lệ anti-enum documented). Supersede placeholder `SYSTEM_MESSAGE_NO_REACTIONS` từ W7-D4 rule 4 → `REACTION_NOT_ALLOWED_FOR_SYSTEM`. ADR-022 canonical ARCHITECTURE.md §12 — legacy ADR-022 (Soft-delete strip) + ADR-021 (Content XOR / Hybrid Visibility) marked legacy, consolidation phase sau. BLOCKING INCONSISTENCY flagged: VARCHAR(20) vs compound emoji rare (flag-tag 28 bytes) — chốt V1 VARCHAR(20) reject flag-tag qua validation.
 - 2026-04-22 (Consolidation W7): Compress ADR details + older review standards, preserve W7 content full.
 - 2026-04-22 W7D5: Read Receipt contract v1.4.0-w7-read + SOCKET v1.9. Schema V12 migration `last_read_message_id UUID REFERENCES messages(id) ON DELETE SET NULL` + composite index. MemberDto extended với `lastReadMessageId`. unreadCount real compute (bỏ placeholder 0): COUNT messages > lastRead.createdAt filter SYSTEM + deleted_at, cap LEAST 99. readBy compute CLIENT-SIDE (BE không fan-out readers list per-message). `/app/conv.{convId}.read` KHÔNG clientId, idempotent forward-only compare createdAt (incoming <= current → silent no-op). .read destination policy SILENT_DROP → STRICT_MEMBER (persist DB + broadcast). BLOCKING BE: idempotent compare createdAt (không UUID), filter SYSTEM+deleted, FK SET NULL, cross-conv app-level. BLOCKING FE: readBy client compute, optimistic unreadCount=0 self-echo, debounce 500ms trước STOMP .read.
 - 2026-04-22 W7D4-fix: Model 4 hybrid visibility + default avatars + ADMIN regression — NEEDS_FIXES (2 BLOCKING). BLOCKING #1: CreateGroupDialog FE thiếu `?public=true` → avatar 404 anti-enum trên /public endpoint. BLOCKING #2: BE `validateGroupAvatar` thiếu `isPublic` enforcement → defense missing (Option B recommend: auto-flip `setIsPublic(true) + save` trong validate, không break client). 3 patterns mới: hybrid visibility (ADR-021), seed defaults fixed UUID guard (triple-safeguard expires_at=9999 + attached_at NOW + DEFAULT_AVATAR_IDS Set cleanup skip), SecurityConfig permitAll ORDER matters.
