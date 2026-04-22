@@ -34,9 +34,10 @@ public class FileRecord {
 
     /**
      * User đã upload file. ON DELETE CASCADE ở DB — nếu user bị xoá cứng thì file cũng đi.
-     * Nullable=false ở entity vì upload luôn yêu cầu auth.
+     * NULLABLE từ V11 (ADR-021): default/system files KHÔNG có uploader.
+     * Upload flow thường (user upload qua POST /upload) luôn set non-null.
      */
-    @Column(name = "uploader_id", nullable = false)
+    @Column(name = "uploader_id")
     private UUID uploaderId;
 
     /** Tên gốc đã sanitize — hiển thị cho user khi download (Content-Disposition). */
@@ -79,6 +80,17 @@ public class FileRecord {
      */
     @Column(name = "thumbnail_internal_path", length = 1024)
     private String thumbnailInternalPath;
+
+    /**
+     * ADR-021 (W7-D4-fix): hybrid file visibility.
+     *  - true  = public → endpoint /api/files/{id}/public (KHÔNG cần auth). Cho avatar + default files.
+     *  - false = private → endpoint /api/files/{id} (JWT + uploader/member check). Cho message attachments.
+     *
+     * Default false để safe (existing attachment uploads không cần thay đổi).
+     */
+    @Column(name = "is_public", nullable = false)
+    @Builder.Default
+    private boolean isPublic = false;
 
     @PrePersist
     protected void onCreate() {

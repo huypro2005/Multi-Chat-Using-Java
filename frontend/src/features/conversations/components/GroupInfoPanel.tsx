@@ -25,8 +25,13 @@ import { useAuthStore } from '@/stores/authStore'
 import { MemberRole } from '@/types/conversation'
 import type { ConversationDto, MemberDto } from '@/types/conversation'
 import UserAvatar from '@/components/UserAvatar'
-import { useProtectedObjectUrl } from '@/features/files/hooks/useProtectedObjectUrl'
 import { useUserSearch } from '@/features/users/hooks'
+
+/**
+ * ADR-021 (W7-D4-fix): avatarUrl từ BE là public URL (/api/files/{id}/public).
+ * GroupAvatarDisplay dùng native <img> — không cần useProtectedObjectUrl.
+ */
+const DEFAULT_GROUP_AVATAR = '/api/files/00000000-0000-0000-0000-000000000002/public'
 
 interface Props {
   conversationId: string
@@ -437,24 +442,26 @@ function MemberContextMenu({
 // GroupAvatarDisplay
 // ---------------------------------------------------------------------------
 function GroupAvatarDisplay({ avatarUrl, name }: { avatarUrl: string | null; name: string }) {
-  // Extract file ID from URL like /api/files/{id}
-  const fileId = avatarUrl?.match(/\/api\/files\/([^/]+)/)?.[1] ?? null
-  const objectUrl = useProtectedObjectUrl(fileId ? `/api/files/${fileId}` : null)
-
-  if (objectUrl) {
-    return (
-      <img
-        src={objectUrl}
-        alt={name}
-        className="w-16 h-16 rounded-full object-cover"
-      />
-    )
-  }
+  const src = avatarUrl ?? DEFAULT_GROUP_AVATAR
 
   return (
-    <div className="w-16 h-16 rounded-full bg-indigo-100 flex items-center justify-center
-      text-indigo-700 text-2xl font-semibold select-none">
-      {name.charAt(0).toUpperCase()}
+    <div className="relative w-16 h-16">
+      {/* Initial letter fallback (rendered underneath img) */}
+      <div
+        className="absolute inset-0 w-16 h-16 rounded-full bg-indigo-100 flex items-center
+          justify-center text-indigo-700 text-2xl font-semibold select-none"
+        aria-hidden="true"
+      >
+        {name.charAt(0).toUpperCase()}
+      </div>
+      <img
+        src={src}
+        alt={name}
+        className="absolute inset-0 w-16 h-16 rounded-full object-cover"
+        onError={(e) => {
+          e.currentTarget.style.display = 'none'
+        }}
+      />
     </div>
   )
 }
@@ -685,7 +692,7 @@ export function GroupInfoPanel({ conversationId, open, onClose }: Props) {
           open={showEditDialog}
           onClose={() => setShowEditDialog(false)}
           currentName={conv.name ?? ''}
-          currentAvatarFileId={extractFileId(conv.avatarUrl)}
+          currentAvatarUrl={conv.avatarUrl}
         />
       )}
 
@@ -751,15 +758,6 @@ export function GroupInfoPanel({ conversationId, open, onClose }: Props) {
       />
     </div>
   )
-}
-
-// ---------------------------------------------------------------------------
-// Helper: extract fileId from /api/files/{id} URL
-// ---------------------------------------------------------------------------
-function extractFileId(avatarUrl: string | null | undefined): string | null {
-  if (!avatarUrl) return null
-  const match = avatarUrl.match(/\/api\/files\/([^/]+)/)
-  return match?.[1] ?? null
 }
 
 // ---------------------------------------------------------------------------

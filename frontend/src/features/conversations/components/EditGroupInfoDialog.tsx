@@ -3,6 +3,10 @@
 //
 // Tristate PATCH: chỉ gửi fields thực sự thay đổi.
 // avatarFileId: new UUID (đổi), null (xóa), không gửi (không đổi).
+//
+// ADR-021 (W7-D4-fix): currentAvatarUrl là public URL (/api/files/{id}/public)
+// → native <img src> load trực tiếp, không cần useProtectedObjectUrl.
+// Upload avatar gọi POST /api/files/upload?public=true.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef, useState } from 'react'
@@ -14,14 +18,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { conversationKeys } from '../queryKeys'
 import { updateGroup } from '../api'
 import type { ApiErrorBody } from '@/types/api'
-import { useProtectedObjectUrl } from '@/features/files/hooks/useProtectedObjectUrl'
 
 interface Props {
   conversationId: string
   open: boolean
   onClose: () => void
   currentName: string
-  currentAvatarFileId: string | null
+  /** Full public URL của avatar hiện tại, vd "/api/files/{id}/public". null nếu chưa có. */
+  currentAvatarUrl: string | null
 }
 
 const MAX_AVATAR_SIZE_MB = 20
@@ -32,7 +36,7 @@ export default function EditGroupInfoDialog({
   open,
   onClose,
   currentName,
-  currentAvatarFileId,
+  currentAvatarUrl,
 }: Props) {
   const queryClient = useQueryClient()
   // Avatar states
@@ -71,12 +75,6 @@ export default function EditGroupInfoDialog({
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const blobUrlRef = useRef<string | null>(null)
-
-  // Load current avatar via protected URL (if exists and not changed)
-  const currentAvatarPath = currentAvatarFileId ? `/api/files/${currentAvatarFileId}` : null
-  const currentAvatarObjectUrl = useProtectedObjectUrl(
-    avatarMode === 'unchanged' ? currentAvatarPath : null,
-  )
 
   // Cleanup blob URL on unmount
   useEffect(() => {
@@ -134,7 +132,8 @@ export default function EditGroupInfoDialog({
     try {
       const formData = new FormData()
       formData.append('file', file)
-      const res = await api.post<{ id: string }>('/api/files/upload', formData, {
+      // ADR-021: avatar upload phải gọi với ?public=true
+      const res = await api.post<{ id: string }>('/api/files/upload?public=true', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setAvatarNewFileId(res.data.id)
@@ -216,11 +215,20 @@ export default function EditGroupInfoDialog({
 
   if (!open) return null
 
-  // Determine displayed avatar
+  // Determine displayed avatar src:
+  // - 'changed': blob URL preview (new upload, before server confirm)
+  // - 'unchanged': currentAvatarUrl (public URL from BE, native img)
+  // - 'removed': null (show camera placeholder)
   const displayedAvatar =
-    avatarMode === 'changed' ? avatarPreview : avatarMode === 'unchanged' ? currentAvatarObjectUrl : null
+    avatarMode === 'changed'
+      ? avatarPreview
+      : avatarMode === 'unchanged'
+      ? currentAvatarUrl
+      : null
 
   const isDisabled = avatarUploading || isSubmitting
+  // Has a real avatar to show/remove
+  const hasCurrentAvatar = !!currentAvatarUrl || avatarMode === 'changed'
 
   return (
     <>
@@ -261,6 +269,10 @@ export default function EditGroupInfoDialog({
                     src={displayedAvatar}
                     alt="Avatar nhóm"
                     className="w-20 h-20 rounded-full object-cover"
+                    onError={(e) => {
+                      // If public URL fails (file missing), show placeholder
+                      e.currentTarget.style.display = 'none'
+                    }}
                   />
                 ) : (
                   <div className="w-20 h-20 rounded-full bg-indigo-100 flex items-center justify-center">
@@ -274,7 +286,7 @@ export default function EditGroupInfoDialog({
                   </div>
                 )}
 
-                {(displayedAvatar || currentAvatarFileId) && !avatarUploading && (
+                {hasCurrentAvatar && !avatarUploading && (
                   <button
                     type="button"
                     onClick={handleRemoveAvatar}
@@ -295,7 +307,7 @@ export default function EditGroupInfoDialog({
                   disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Upload size={14} />
-                {currentAvatarFileId || avatarMode === 'changed' ? 'Đổi ảnh đại diện' : 'Thêm ảnh đại diện'}
+                {hasCurrentAvatar ? 'Đổi ảnh đại diện' : 'Thêm ảnh đại diện'}
               </button>
 
               <input

@@ -7,6 +7,7 @@ import com.chatapp.auth.dto.response.AuthResponse;
 import com.chatapp.auth.dto.response.OAuthResponse;
 import com.chatapp.auth.dto.response.UserDto;
 import com.chatapp.exception.AppException;
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.security.JwtTokenProvider;
 import com.chatapp.security.JwtTokenProvider.TokenValidationResult;
 import com.chatapp.user.entity.User;
@@ -127,11 +128,15 @@ public class AuthService {
         }
 
         // 3. Tạo và lưu user entity
+        // W7-D4-fix (ADR-021): User mới → default avatar URL (public endpoint).
+        // User entity chỉ có avatar_url String (không có avatar_file_id column).
+        // FE dùng URL này trực tiếp trong <img src>; không cần null-check.
         User user = User.builder()
                 .email(req.email())
                 .username(req.username())
                 .fullName(req.fullName())
                 .passwordHash(passwordEncoder.encode(req.password()))
+                .avatarUrl(FileConstants.DEFAULT_USER_AVATAR_URL)
                 .status("active")
                 .build();
         user = userRepository.save(user);
@@ -368,13 +373,18 @@ public class AuthService {
         }
 
         // 5. Create new user
+        // W7-D4-fix (ADR-021): OAuth user có photoUrl từ Google thì giữ; nếu không có
+        // thì fallback DEFAULT_USER_AVATAR (public endpoint).
         String username = generateUniqueUsername(email, displayName);
+        String finalAvatarUrl = (photoUrl != null && !photoUrl.isBlank())
+                ? photoUrl
+                : FileConstants.DEFAULT_USER_AVATAR_URL;
         User newUser = User.builder()
                 .email(email)
                 .username(username)
                 .fullName(displayName != null && !displayName.isBlank()
                         ? displayName : email.split("@")[0])
-                .avatarUrl(photoUrl)
+                .avatarUrl(finalAvatarUrl)
                 .status("active")
                 .build();
         newUser = userRepository.save(newUser);

@@ -12,6 +12,7 @@ import com.chatapp.conversation.event.OwnerTransferredEvent;
 import com.chatapp.conversation.event.RoleChangedEvent;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.user.entity.User;
 import com.chatapp.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -367,10 +368,11 @@ public class ConversationBroadcaster {
         int memberCount = members.size();
 
         // Compute displayName / displayAvatarUrl (cho group: dùng name/avatar; cho 1-1 dùng other member).
+        // W7-D4-fix (ADR-021): dùng /public endpoint cho avatar_file_id.
         String displayName = conv.getName();
         String displayAvatarUrl = null;
         if (conv.getAvatarFileId() != null) {
-            displayAvatarUrl = "/api/files/" + conv.getAvatarFileId();
+            displayAvatarUrl = FileConstants.publicUrl(conv.getAvatarFileId());
         } else if (conv.getAvatarUrl() != null) {
             displayAvatarUrl = conv.getAvatarUrl();
         }
@@ -399,7 +401,9 @@ public class ConversationBroadcaster {
                 conv.getId(),
                 conv.getType(),
                 conv.getName(),
-                conv.getAvatarFileId() != null ? "/api/files/" + conv.getAvatarFileId() : conv.getAvatarUrl(),
+                conv.getAvatarFileId() != null
+                        ? FileConstants.publicUrl(conv.getAvatarFileId())
+                        : conv.getAvatarUrl(),
                 displayName,
                 displayAvatarUrl,
                 memberCount,

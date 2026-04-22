@@ -406,10 +406,10 @@ File: `src/features/files/hooks/useProtectedObjectUrl.ts`
 
 Fetch file qua `api.get({ responseType: 'blob', signal: controller.signal })` (có Bearer token) → `URL.createObjectURL` → return local blob URL cho `<img src>`.
 
-### Usage
-- `AttachmentGallery.tsx`: thumbnail grid + lightbox full-size
-- `PdfCard.tsx` (nếu cần preview): download blob rồi trigger `<a download>`
-- Tương lai: avatar, group avatar, mọi protected media
+### Usage (scope thu hẹp sau ADR-021)
+- `AttachmentGallery.tsx`: thumbnail grid + lightbox full-size (private message images)
+- `FileCard.tsx`: generic private file download
+- **KHÔNG dùng cho avatar** (xem "Pattern: Avatar native img public URL" bên dưới)
 
 ### Critical implementation rules
 
@@ -450,3 +450,49 @@ V1 blob URL đơn giản, secure, đủ cho demo/MVP.
 - Mở lightbox → full-size load
 - Refresh page → ảnh vẫn load (token restore qua authService.init)
 - Scroll nhanh qua 20+ ảnh → không memory leak (DevTools Memory tab flat)
+
+---
+
+## Pattern: Avatar native img public URL (ADR-021, W7-D4-fix)
+
+**Quyết định**: Avatars là public files (không cần auth). `<img src>` native load trực tiếp — không cần `useProtectedObjectUrl`.
+
+### Constants (hardcode FE, khớp migration V11 seed)
+```ts
+const DEFAULT_USER_AVATAR  = '/api/files/00000000-0000-0000-0000-000000000001/public'
+const DEFAULT_GROUP_AVATAR = '/api/files/00000000-0000-0000-0000-000000000002/public'
+```
+
+### Approach: div fallback + img overlay
+```tsx
+<div className="relative" style={{ width: size, height: size }}>
+  {/* Initial letter (always visible underneath — fallback khi img lỗi) */}
+  <div className="absolute inset-0 rounded-full bg-indigo-100 ...">{initial}</div>
+  {/* Native img — public URL, no auth */}
+  <img src={src} className="absolute inset-0 rounded-full object-cover"
+    onError={(e) => { e.currentTarget.style.display = 'none' }}
+  />
+</div>
+```
+
+- `onError` hide img → div lộ ra phía dưới (graceful fallback)
+- KHÔNG dùng `useProtectedObjectUrl` cho avatar
+
+### Avatar upload — luôn dùng `?public=true`
+```ts
+api.post('/api/files/upload?public=true', formData, ...)
+```
+Avatar flows: CreateGroupDialog, EditGroupInfoDialog.
+Message attachment flows: KHÔNG pass param (mặc định private).
+
+### Khi nào dùng gì
+| Context | Hook/Approach |
+|---------|---------------|
+| Avatar user/group | Native `<img src=publicUrl>` (ADR-021) |
+| Message attachment image | `useProtectedObjectUrl` (private, auth required) |
+| Generic file download | `useProtectedObjectUrl` trong FileCard |
+
+### EditGroupInfoDialog prop thay đổi (ADR-021)
+- Old: `currentAvatarFileId: string | null` → BE fetch via protected URL
+- New: `currentAvatarUrl: string | null` → public URL, native img trực tiếp
+- GroupInfoPanel pass: `currentAvatarUrl={conv.avatarUrl}` (không cần extractFileId)

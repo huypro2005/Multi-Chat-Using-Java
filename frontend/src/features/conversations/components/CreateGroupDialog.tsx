@@ -114,7 +114,7 @@ export default function CreateGroupDialog({ open, onClose, onCreated }: Props) {
     try {
       const formData = new FormData()
       formData.append('file', file)
-      const res = await api.post<{ id: string }>('/api/files/upload', formData, {
+      const res = await api.post<{ id: string }>('/api/files/upload?public=true', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setAvatarFileId(res.data.id)

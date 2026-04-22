@@ -28,6 +28,8 @@ export interface MessageSenderDto {
 
 // ---------------------------------------------------------------------------
 // AttachmentDto — file/image attachment metadata returned by BE
+// Also used as FileDto (POST /api/files/upload response shape).
+// W7-D4-fix (ADR-021): thêm isPublic + publicUrl (hybrid visibility).
 // ---------------------------------------------------------------------------
 export interface AttachmentDto {
   id: string
@@ -38,6 +40,9 @@ export interface AttachmentDto {
   thumbUrl: string | null
   iconType: 'IMAGE' | 'PDF' | 'WORD' | 'EXCEL' | 'POWERPOINT' | 'TEXT' | 'ARCHIVE' | 'GENERIC'
   expiresAt: string // ISO8601
+  // ADR-021: hybrid file visibility
+  isPublic: boolean                // true → avatar/public; false → private attachment
+  publicUrl: string | null         // "/api/files/{id}/public" nếu isPublic=true; null nếu false
 }
 
 // ---------------------------------------------------------------------------

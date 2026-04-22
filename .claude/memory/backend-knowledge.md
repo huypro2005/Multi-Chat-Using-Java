@@ -484,8 +484,49 @@ V1 assume single BE instance (ADR-015 SimpleBroker). Khi scale V2 với multi-in
 
 ---
 
+### Hybrid File Visibility Pattern (W7-D4-fix, ADR-021)
+
+**`is_public` flag + separate `/public` endpoint**:
+- Column `files.is_public BOOLEAN NOT NULL DEFAULT FALSE` (V11). Upload endpoint query param `?public=true|false` (default false). FileService.upload có 2-param overload (backward-compat) + 3-param với isPublic.
+- Endpoint `GET /api/files/{id}/public` — KHÔNG auth (SecurityConfig whitelist). Anti-enum: 404 cho cả not-found, is_public=false, expired (không leak flag state).
+- `GET /api/files/{id}` (private) giữ nguyên JWT + uploader/member check. Hai endpoint tách bạch.
+- `Cache-Control: public, max-age=86400` cho `/public` — browser/CDN cache. Avatar change = URL change = cache miss tự nhiên.
+- FileDto thêm 2 fields: `isPublic` + `publicUrl` (null nếu private). `url` resolve theo is_public. `thumbUrl` CHỈ private image (public avatars không expose thumb endpoint V1).
+
+**Seed default records via Flyway + FileConstants fixed UUIDs**:
+- V11 seed `(00000000-...-001, user default)` + `(00000000-...-002, group default)` với `is_public=TRUE`, `expires_at=9999-12-31` (double-safeguard với cleanup skip guard).
+- `FileConstants` class với DEFAULT_USER_AVATAR_ID, DEFAULT_GROUP_AVATAR_ID, DEFAULT_*_URL (`/api/files/{id}/public`), helper `publicUrl(id)`/`privateUrl(id)`.
+- Register → `user.setAvatarUrl(DEFAULT_USER_AVATAR_URL)`. User entity CHỈ có `avatar_url` String column (không có `avatar_file_id`), nên set string URL trực tiếp.
+- createGroup no avatarFileId → `DEFAULT_GROUP_AVATAR_ID`. Contract: mọi group PHẢI có avatar → FE không null-check.
+- updateGroup remove avatar → FALLBACK `DEFAULT_GROUP_AVATAR_ID` (KHÔNG để NULL).
+
+**@PostConstruct validate deployment assets (graceful missing)**:
+- `FileService.validateDefaultAvatars()`: check 2 default physical files exist qua `storageService.resolveAbsolute` + `Files.exists`. Log WARN nếu thiếu, KHÔNG fail startup. Deploy pipeline có thể chưa sync physical assets; production runbook requires manual `cp default-avatars/*.jpg ${STORAGE_PATH}/default/`.
+- Wrap toàn bộ method trong try-catch vì non-local storage (S3 V2) sẽ throw UnsupportedOperationException → skip gracefully.
+
+**SecurityConfig order matters** (pitfall):
+- `.requestMatchers("/api/files/*/public").permitAll()` PHẢI đặt TRƯỚC `.anyRequest().authenticated()`. Nếu đặt sau → Spring duyệt theo thứ tự khai báo, path match `anyRequest()` → 401.
+- Test verify: GET `/api/files/{id}/public` không token → 200; GET `/api/files/{id}` không token → 401.
+
+**Lombok boolean naming** (pitfall tốn thời gian):
+- Field `boolean isPublic` → Lombok @Getter sinh method tên `isPublic()`, KHÔNG phải `isIsPublic()`. Lý do: Lombok detect tiền tố `is` và strip để tránh double-prefix.
+- Sử dụng `record.isPublic()` trong caller code, KHÔNG `record.isIsPublic()`.
+- Cross-check bằng `mvn compile` + error `cannot find symbol: method isIsPublic()` → đổi lại.
+
+**FileCleanupJob skip defaults**:
+- `FileConstants.DEFAULT_AVATAR_IDS` Set<UUID> exported để cleanup loop `if (DEFAULT_AVATAR_IDS.contains(file.getId())) continue;`.
+- Defense-in-depth: expires_at=9999 đã safeguard, nhưng nếu code sửa nhầm column thì guard vẫn chặn.
+
+**H2 test profile pitfall (V11 Flyway disabled)**:
+- application-test.yml: `flyway.enabled=false` + `ddl-auto=create-drop` → V11 KHÔNG chạy. Hibernate tạo schema từ entity annotations (is_public column OK, nhưng không có default seed rows).
+- Test phải seed 2 default record programmatically trong @BeforeEach để flow tạo group với DEFAULT_GROUP_AVATAR_ID không vi phạm FK (nếu có) hoặc thiếu row khi test endpoint /public.
+- Tương tự test flow nào dùng default avatar → phải seed trước.
+
+---
+
 ## Changelog file này
 
+- 2026-04-22 W7D4-fix: Thêm Hybrid File Visibility Pattern (ADR-021) — is_public flag + /public endpoint, FileConstants fixed UUIDs, @PostConstruct validate defaults (graceful missing), SecurityConfig order matters, Lombok `boolean isPublic` → `isPublic()` not `isIsPublic()`, FileCleanupJob skip defaults. H2 test seed programmatic cho V11 skipped.
 - 2026-04-21 W7D2: Thêm Member Management Pattern — race-safe lock H2-compatible (native FOR UPDATE + SELECT rows), role hierarchy encapsulation qua canRemoveMember(target), auto-transfer query native CASE, OWNER→ADMIN sau transfer, partial-success response shape, @TransactionalEventListener REQUIRES_NEW cho DB access, user-specific /queue/conv-added|conv-removed.
 - 2026-04-21 W7D1: Thêm Group Chat Schema + CRUD Pattern (ADR-020) — MemberRole permission methods, CHECK constraint shape, soft-delete filter, ON DELETE SET NULL cho owner_id, Tristate DTO qua @JsonAnySetter Map, LinkedHashMap cho broadcast null-tolerant, avatar attach flow (markAttached), Event Publisher broadcast, naming drift V7→V9, member sort role+joinedAt, targetUserId backward-compat, DataSource metadata cho column verification test.
 - 2026-04-21 W6D2: Thêm FileAuthService (uploader OR conv-member rule, JPQL JOIN), ThumbnailService (Thumbnailator fail-open pattern), StorageService.resolveAbsolute interface extension, validateAndAttachFiles validation order (count→existence→ownership→expiry→unique→group), MessageDto.attachments field (always non-null List), MessageMapper N+1 warning. Test pattern cho Thumbnailator: ImageIO generate valid JPEG bytes. DB NOT NULL content pitfall → persist "" cho attachment-only messages.

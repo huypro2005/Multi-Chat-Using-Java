@@ -141,7 +141,9 @@ class AuthControllerTest {
                 .andExpect(jsonPath("$.user.email").value("alice@example.com"))
                 .andExpect(jsonPath("$.user.fullName").value("Alice Nguyen"))
                 .andExpect(jsonPath("$.user.id").isNotEmpty())
-                .andExpect(jsonPath("$.user.avatarUrl").doesNotExist());
+                // W7-D4-fix (ADR-021): register sets default avatar public URL
+                .andExpect(jsonPath("$.user.avatarUrl")
+                        .value("/api/files/00000000-0000-0000-0000-000000000001/public"));
     }
 
     @Test

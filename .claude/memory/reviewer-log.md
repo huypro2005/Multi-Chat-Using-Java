@@ -7,6 +7,7 @@
 
 ## Recent activity
 
+- [W7-D4-fix] Model 4 hybrid file visibility + default avatars + ADMIN add fix — **NEEDS_FIXES** (2 BLOCKING). BE (V11 migration, FileRecord.isPublic, /public endpoint anti-enum + Cache-Control public 1d, SecurityConfig permitAll ORDER trước anyRequest, FileDto publicUrl+isPublic, FileConstants DEFAULT_USER/GROUP_AVATAR_ID + skip cleanup, @PostConstruct physical-file warn, AuthService register+OAuth default avatar, ConversationService create/update fallback DEFAULT_GROUP_AVATAR_ID, MessageMapper.toFileDto respect isPublic) — tất cả BE layer OK. ADMIN canAddMembers đã đúng trong MemberRole (`this != MEMBER`) — không có bug, report chính xác. **BLOCKING FE#1**: CreateGroupDialog `POST /api/files/upload` KHÔNG có `?public=true` → upload file is_public=false, nhưng ConversationDto.from publish `/public` URL → /public endpoint reject (anti-enum 404) → avatar tạo từ "Create Group" KHÔNG BAO GIỜ load được. EditGroupInfoDialog đã đúng. **BLOCKING BE#2** (tangent, cần fix cùng): `validateGroupAvatar` trong ConversationService KHÔNG enforce `avatarFile.isPublic()=true` → nếu client bỏ qua `?public=true` (hoặc client custom), BE vẫn accept → DTO publish /public URL trỏ file private → 404. Defense-in-depth: BE nên either (a) reject upload không `?public=true` cho avatar attach (GROUP_AVATAR_NOT_PUBLIC), hoặc (b) auto-flip `setIsPublic(true) + save` trong `validateGroupAvatar`. Option (b) UX mượt hơn. 3 patterns mới added vào knowledge: hybrid visibility, seed default + fixed UUID guard, SecurityConfig permitAll ORDER. 2 warnings non-blocking: (c) UserAvatar + ConversationListItem vẫn dùng useProtectedObjectUrl — chạy được (hook fetch via axios + JWT, permitAll cho /public), nhưng redundant, lệch ý intent "native img cacheable"; refactor sau fix BLOCKING; (d) `avatarFile.markAttached()` set attached_at cho default record nếu ai đó attach avatar lặp lại — đã có skip trong cleanup, acceptable.
 - [W7-D4] SYSTEM messages (BE service + FE render + i18n + migration V10) — APPROVED. 270 tests pass (+13 SystemMessageTest). 8 event types wired đúng, ordering OWNER_TRANSFERRED trước MEMBER_LEFT verified (SM-06), avatar-only no-rename verified (SM-11), edit/delete guard trước anti-enum (SM-12/13). 5 patterns mới + 2 pitfalls documented.
 - [Reviewer] review W7-D3 FE group UI: FAIL→PASS. Blocking: GROUP_DELETED payload drift (FE typedef vs BE event). Fix: read from cache. 5 warnings logged.
 - [W6-D5] Security audit 18/18 PASS. Memory consolidate reviewer-log 689→313. WARNINGS W6-1/2/4 resolved.
@@ -22,6 +23,89 @@ Key decisions: ...
 Patterns confirmed: ...
 Contract: ...
 ```
+
+---
+
+## [W7-D4-fix] Model 4 hybrid file visibility + defaults + ADMIN bug — NEEDS_FIXES
+
+Verdict: NEEDS_FIXES (2 BLOCKING, tangled). Context: agent claim 282/282 BE tests pass + FE build clean. BE core layer OK; FE Create-Group flow BROKEN + BE missing defense.
+
+### BLOCKING items (fix trước commit)
+
+**BLOCKING #1 — FE CreateGroupDialog thiếu `?public=true` (critical regression)**
+`frontend/src/features/conversations/components/CreateGroupDialog.tsx` line 117:
+```
+const res = await api.post<{ id: string }>('/api/files/upload', formData, { ... })
+```
+So với EditGroupInfoDialog line 136 (ĐÚNG): `api.post('/api/files/upload?public=true', ...)`.
+
+Hậu quả chain:
+1. CreateGroup avatar upload → `FileService.upload(file, userId, isPublic=false)` → `files.is_public=FALSE`.
+2. `ConversationService.createGroup` → `validateGroupAvatar()` không check `isPublic` → accept.
+3. `avatarFile.markAttached() + save` → attached OK.
+4. `ConversationDto.from` → `avatarUrl = FileConstants.publicUrl(avatarFileId)` → `/api/files/{id}/public`.
+5. Broadcaster fire `CONVERSATION_UPDATED` + `/queue/conv-added` → các FE khác nhận `/public` URL.
+6. FE (bất kỳ user nào) load URL → `FileController.downloadPublic` → `FileService.loadForPublicDownload` → check `isPublic()=false` → return null → 404.
+7. **Mọi group tạo mới từ UI `CreateGroupDialog` với avatar custom → avatar không bao giờ hiển thị.**
+
+Test không catch vì test BE trực tiếp gọi service với `upload(..., isPublic=true)` (bypass UI path).
+
+Fix bắt buộc: Thêm `?public=true` vào CreateGroupDialog line 117.
+
+**BLOCKING #2 — BE defense missing: `validateGroupAvatar` không enforce `isPublic=true`**
+`backend/src/main/java/com/chatapp/conversation/service/ConversationService.java` method `validateGroupAvatar(avatarFileId, callerId)` line 675-699. Hiện check: exist + uploader == caller + !expired + MIME whitelist. KHÔNG check `file.isPublic()`.
+
+Hậu quả: dù FE fix #1, bất kỳ client nào (curl, custom integration, future mobile) gọi API upload (không ?public=true) + PATCH avatar → same bug. BE publish `/public` URL trỏ file private.
+
+Fix options (phải chọn 1):
+- **Option A (strict)**: trong `validateGroupAvatar`, sau MIME check → `if (!file.isPublic()) throw new AppException(400, "GROUP_AVATAR_NOT_PUBLIC", "Avatar file phải upload với ?public=true");`. Thêm error code vào API_CONTRACT.md.
+- **Option B (UX-friendly, recommended)**: trong `validateGroupAvatar`, nếu `!file.isPublic()` → `file.setIsPublic(true); fileRecordRepository.save(file);` trước khi trả về. BE auto-flip flag, client nào gọi cũng work. Logic: "file đã attach làm avatar → phải public → flip ngay". Safe vì avatar thuộc về caller (uploader check đã qua).
+
+Suggest Option B — ít break client hơn + flip là thao tác an toàn (avatar bản chất public).
+
+Áp dụng ở cả 2 call-site: `createGroup` (line 237) và `updateGroupInfo` (line 517).
+
+### Checklist PASS (đủ 20 items trừ 2 BLOCKING ở trên)
+
+1. **V11 migration (sql)**: uploader_id NULL OK, `is_public BOOLEAN NOT NULL DEFAULT FALSE` với comment ADR-021, DO-block backfill conditional (defense khi avatar_file_id chưa có ở user table), seed 2 UUID 001/002 với `ON CONFLICT (id) DO NOTHING` (idempotent), `expires_at=9999-12-31`, `attached_at=NOW()`, `is_public=TRUE`. Partial index `CREATE INDEX idx_files_public ON files(id) WHERE is_public = TRUE`. PASS.
+2. **FileRecord entity**: `@Column(name="uploader_id")` NULLABLE, `isPublic boolean` với `@Builder.Default=false` + javadoc ADR-021. PASS.
+3. **GET /api/files/{id}/public**: `FileController.downloadPublic` không `@AuthenticationPrincipal User`, anti-enum (not-found/not-public/expired merge → 404 NOT_FOUND), `Cache-Control: public, max-age=1d`, ETag + X-Content-Type-Options nosniff. PASS.
+4. **SecurityConfig**: `/api/files/*/public` trong `.requestMatchers(...).permitAll()` TRƯỚC `.anyRequest().authenticated()` — đúng thứ tự; wildcard `*` match UUID single-segment. PASS.
+5. **FileDto**: record `UUID id, String mime, String name, long size, String url, String thumbUrl, String iconType, OffsetDateTime expiresAt, boolean isPublic, String publicUrl` — khớp contract v1.3.0-w7. PASS.
+6. **Upload `?public=true`**: controller `@RequestParam(value="public", defaultValue="false") boolean isPublic` → `fileService.upload(file, userId, isPublic)`. Backward-compat overload `upload(file, userId)` → `upload(..., false)` giữ cho legacy caller. PASS.
+7. **FE UserAvatar**: VẪN dùng `useProtectedObjectUrl` — redundant nhưng KHÔNG broken. Hook fetch qua axios (kèm JWT); BE permitAll vẫn cho qua; response blob → URL.createObjectURL → `<img>`. Works. Intent contract là "native img cacheable" (browser HTTP cache khớp `Cache-Control: public, max-age=1d`) — nhưng hiện dùng blob URL → mất cacheability cross-session. **Non-blocking warning**: sau fix #1+#2, nên refactor UserAvatar + ConversationListItem + GroupInfoPanel.GroupAvatarDisplay + MessageItem (nếu có) để dùng `<img src={url}>` trực tiếp khi `url.endsWith('/public')`, chỉ dùng useProtectedObjectUrl cho private attachment preview. Agent khai báo "native img với public URL" nhưng diff không thay đổi UserAvatar/ConversationListItem — lệch report.
+8. **FE ConversationListItem**: như #7 — vẫn dùng hook, redundant nhưng chạy được. Non-blocking.
+9. **FE GroupInfoPanel.GroupAvatarDisplay**: ĐÃ đổi sang native `<img>` (line 457-464), fallback initial letter underneath + `onError` hide. PASS (đúng intent).
+10. **FE EditGroupInfoDialog**: gọi `?public=true` đúng (line 136), blob preview cho pending upload, `onError` hide img khi public URL 404. PASS.
+11. **FE CreateGroupDialog**: KHÔNG gọi `?public=true` → **BLOCKING #1 ở trên**.
+12. **FE useProtectedObjectUrl vẫn cho private attachment**: hook không đụng file MIME check, chỉ fetch path any `/api/files/`. FE AttachmentGallery + FileCard chưa được review trong diff này nhưng không bị ảnh hưởng (attachment path là `/api/files/{id}` private, hook hoạt động như cũ). PASS assumption.
+13. **User register default avatar**: `AuthService.register` line 139 `avatarUrl(FileConstants.DEFAULT_USER_AVATAR_URL)` → `/api/files/00000000-0000-0000-0000-000000000001/public`. Test AuthControllerTest expect exact string (line 145). PASS.
+14. **createGroup default avatar**: `ConversationService.createGroup` line 242-244 `finalAvatarFileId = avatarFile != null ? avatarFile.getId() : FileConstants.DEFAULT_GROUP_AVATAR_ID`. PASS. **Caveat**: `updateGroupInfo` xử lý `isRemoveAvatar()` (line 502-509) → fallback về DEFAULT_GROUP_AVATAR_ID thay vì NULL — PASS, đúng intent "mọi group luôn có avatar".
+15. **Cleanup job skip**: `FileCleanupJob.cleanupExpiredFiles` line 73-79 check `DEFAULT_AVATAR_IDS.contains(file.getId())` → `continue`; `cleanupOrphanFiles` line 143-148 cũng skip. Double-safeguard với `expires_at=9999-12-31` + `attached_at=NOW()` ở migration. PASS.
+16. **@PostConstruct warn**: `FileService.validateDefaultAvatars()` line 242 iterate 2 path qua `storageService.resolveAbsolute()` + `Files.exists()`. Log WARN nếu thiếu, log INFO nếu OK. Try/catch toàn method (non-local storage không làm fail). PASS.
+17. **MemberRole.canAddMembers()**: line 32-34 `return this != MEMBER` → OWNER true, ADMIN true, MEMBER false. ADMIN có quyền add — đã đúng. Agent report chính xác. **KHÔNG có bug** cần fix; focus #16 resolved.
+18. **Regression 282/282**: không verify trực tiếp (build tool gradlew không available trong workspace agent). Trust báo cáo của agent kèm điều kiện fix BLOCKING trên sẽ không ảnh hưởng tests (chỉ thêm `?public=true` vào FE + thêm check/flip ở BE validateGroupAvatar — cần thêm integration test Group avatar round-trip end-to-end).
+19. **ConversationDto.avatarUrl /public suffix**: line 63-69 `FileConstants.publicUrl(conv.getAvatarFileId())` → `/api/files/{id}/public`. Fallback legacy `conv.getAvatarUrl()` khi `avatar_file_id` null (backward-compat). PASS.
+20. **CONVERSATION_UPDATED /public payload**: `ConversationService.updateGroupInfo` line 508 `changes.put("avatarUrl", FileConstants.DEFAULT_GROUP_AVATAR_URL)` cho remove, line 522 `FileConstants.publicUrl(newAvatarId)` cho set new. Broadcaster pass-through qua `changes` map. ConversationBroadcaster.onMemberAdded dùng `FileConstants.publicUrl(conv.getAvatarFileId())` ở 2 site (line 375 + 404). PASS.
+
+### Non-blocking warnings
+
+- **N-1 (architectural)**: ADR-021 trong knowledge đã có conflict — 2 ADR khác nhau cùng số (ADR-021 Content XOR Attachments + ADR-021 hybrid visibility mới). Agent nên rename ADR mới thành ADR-023 hoặc ADR-025. Không fix block review này nhưng next consolidation nên address.
+- **N-2 (FE tech debt)**: UserAvatar + ConversationListItem chưa refactor sang native img. Hoạt động được nhưng intent contract (public cacheable URL) không đạt full (blob URL cross-session vẫn refetch). Gộp vào W7 cleanup.
+- **N-3 (ops)**: Physical default avatars (`default/avatar_default.jpg` + `default/group_default.jpg`) PHẢI copy tay sau deploy. Post-deploy checklist chưa có trong docs — suggest thêm `docs/DEPLOYMENT.md` section V1 (chưa có file này, deferred).
+- **N-4 (defense-in-depth)**: `validateGroupAvatar` fix (BLOCKING #2) nếu chọn Option B (auto-flip) → thêm log INFO khi flip để audit ("Avatar file {id} flipped is_public=false→true during attach").
+- **N-5 (contract drift)**: `docs/API_CONTRACT.md` v1.3.0-w7 phải document error code nếu chọn Option A (`GROUP_AVATAR_NOT_PUBLIC`). Nếu chọn Option B → không cần.
+
+### Patterns thêm vào knowledge (3)
+
+1. Hybrid file visibility — per-file `is_public` flag (ADR-021 hybrid).
+2. Seed default records + fixed UUID guard (migration + constant + cleanup skip triple-safeguard).
+3. SecurityConfig permitAll ORDER matters (whitelist trước `.anyRequest().authenticated()`).
+
+### Contract check
+
+- `docs/API_CONTRACT.md` v1.3.0-w7 + ADR-021 Phase A đã có theo agent report (không diff trong git scope nhưng file sẽ reflect ở commit tiếp). Nếu chọn Option A cho BLOCKING #2 → cần thêm `GROUP_AVATAR_NOT_PUBLIC` error code.
+- `docs/SOCKET_EVENTS.md` không đổi — CONVERSATION_UPDATED payload schema không thay đổi shape (vẫn `changes.avatarUrl: string | null`), chỉ giá trị đổi thành `/public` URL.
 
 ---
 

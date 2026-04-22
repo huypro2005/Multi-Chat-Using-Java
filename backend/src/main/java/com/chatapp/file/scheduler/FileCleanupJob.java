@@ -1,5 +1,6 @@
 package com.chatapp.file.scheduler;
 
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.file.repository.MessageAttachmentRepository;
@@ -70,6 +71,12 @@ public class FileCleanupJob {
             if (batch.isEmpty()) break;
 
             for (FileRecord file : batch) {
+                // W7-D4-fix (ADR-021): KHÔNG BAO GIỜ touch default avatar files.
+                // Double-safeguard với migration seed expires_at=9999-12-31.
+                if (FileConstants.DEFAULT_AVATAR_IDS.contains(file.getId())) {
+                    log.debug("[FileCleanup] Skipping default avatar {}", file.getId());
+                    continue;
+                }
                 try {
                     deletePhysical(file);
 
@@ -134,6 +141,12 @@ public class FileCleanupJob {
             if (batch.isEmpty()) break;
 
             for (FileRecord file : batch) {
+                // W7-D4-fix (ADR-021): default avatars có attached_at set từ migration
+                // nhưng nếu ai đó set NULL bằng tay, vẫn skip ở orphan cleanup.
+                if (FileConstants.DEFAULT_AVATAR_IDS.contains(file.getId())) {
+                    log.debug("[FileCleanup] Skipping default avatar (orphan scan) {}", file.getId());
+                    continue;
+                }
                 try {
                     deletePhysical(file);
                     fileRecordRepository.delete(file);

@@ -1,11 +1,13 @@
 package com.chatapp.file.service;
 
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.file.dto.FileDto;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.exception.FileRateLimitedException;
 import com.chatapp.file.exception.StorageException;
 import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.file.storage.StorageService;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
@@ -16,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.OffsetDateTime;
@@ -55,8 +58,19 @@ public class FileService {
     // upload
     // =========================================================================
 
+    /** Backward-compat overload — default isPublic=false (private attachment). */
     @Transactional
     public FileDto upload(MultipartFile file, UUID userId) {
+        return upload(file, userId, false);
+    }
+
+    /**
+     * Upload flow với hybrid visibility (ADR-021, W7-D4-fix).
+     *
+     * @param isPublic true = avatar/public endpoint; false = message attachment (private).
+     */
+    @Transactional
+    public FileDto upload(MultipartFile file, UUID userId, boolean isPublic) {
         // Step 1: Validate (throws FileEmpty/FileTooLarge/FileTypeNotAllowed/MimeMismatch)
         String detectedMime = validationService.validate(file);
 
@@ -94,11 +108,12 @@ public class FileService {
                 .expiresAt(now.plusDays(EXPIRY_DAYS))
                 .expired(false)
                 .attachedAt(null)
+                .isPublic(isPublic)
                 .build();
         record = fileRecordRepository.save(record);
 
-        log.info("File uploaded: id={}, uploader={}, mime={}, size={}B, storagePath={}",
-                record.getId(), userId, detectedMime, file.getSize(), storagePath);
+        log.info("File uploaded: id={}, uploader={}, mime={}, size={}B, isPublic={}, storagePath={}",
+                record.getId(), userId, detectedMime, file.getSize(), isPublic, storagePath);
 
         // Step 6: Generate thumbnail (fail-open — thumbnail failure không fail upload).
         if (thumbnailService.supportsThumbnail(detectedMime)) {
@@ -154,6 +169,31 @@ public class FileService {
     }
 
     /**
+     * Load public file cho GET /api/files/{id}/public (ADR-021, W7-D4-fix).
+     *
+     * Authorization: CHỈ is_public = true. Private files trả null → controller 404.
+     * Anti-enumeration: mọi case (not-found, is_public=false, expired) đều merge → null.
+     */
+    @Transactional(readOnly = true)
+    public FileRecord loadForPublicDownload(UUID fileId) {
+        FileRecord record = fileRecordRepository.findById(fileId).orElse(null);
+        if (record == null) {
+            return null;
+        }
+        if (!record.isPublic()) {
+            return null; // anti-enum
+        }
+        if (record.isExpired()) {
+            return null;
+        }
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        if (record.getExpiresAt() != null && record.getExpiresAt().isBefore(now)) {
+            return null;
+        }
+        return record;
+    }
+
+    /**
      * Mở InputStream từ storage — caller (controller) có trách nhiệm close/stream-out.
      * Throw StorageException nếu I/O lỗi.
      */
@@ -186,15 +226,65 @@ public class FileService {
     }
 
     // =========================================================================
+    // Startup checks (ADR-021, W7-D4-fix) — default avatar physical files
+    // =========================================================================
+
+    /**
+     * Soft check lúc startup: log WARN nếu 2 file physical default avatar thiếu trên disk.
+     *
+     * Migration V11 chỉ tạo DB record (pointer) — physical files PHẢI copy tay vào
+     * {@code ${STORAGE_PATH}/default/} post-deploy (runbook). Nếu thiếu, user/group
+     * dùng default sẽ nhận 404 khi load avatar.
+     *
+     * KHÔNG fail startup (deploy pipeline có thể chưa sync physical). Wrap trong
+     * try/catch để non-local storage (S3 V2) không làm fail.
+     */
+    @PostConstruct
+    public void validateDefaultAvatars() {
+        try {
+            checkDefaultExists(FileConstants.DEFAULT_USER_AVATAR_PATH, "DEFAULT_USER_AVATAR");
+            checkDefaultExists(FileConstants.DEFAULT_GROUP_AVATAR_PATH, "DEFAULT_GROUP_AVATAR");
+        } catch (Exception e) {
+            log.debug("[FileService] Default avatar check skipped: {}", e.getMessage());
+        }
+    }
+
+    private void checkDefaultExists(String relativePath, String label) {
+        try {
+            Path full = storageService.resolveAbsolute(relativePath);
+            if (!Files.exists(full)) {
+                log.warn("[FileService] Default {} MISSING on disk: {} — users/groups using default sẽ nhận 404 cho tới khi file được copy.",
+                        label, full);
+                log.warn("[FileService] Runbook: cp default-avatars/*.jpg {}", full.getParent());
+            } else {
+                log.info("[FileService] Default {} OK: {}", label, full);
+            }
+        } catch (SecurityException se) {
+            log.warn("[FileService] Default {} path resolution failed: {}", label, se.getMessage());
+        }
+    }
+
+    // =========================================================================
     // Mapping
     // =========================================================================
 
+    /**
+     * Build FileDto (ADR-021 hybrid shape).
+     *  - Public file  → url = /api/files/{id}/public, publicUrl = url, thumbUrl = null.
+     *  - Private file → url = /api/files/{id},       publicUrl = null, thumbUrl theo record.
+     *
+     * Thumbnail CHỈ áp cho private image (public avatars không có thumbnail V1).
+     */
     public FileDto toDto(FileRecord record) {
-        String url = "/api/files/" + record.getId();
-        // W6-D2: thumbUrl chỉ non-null khi đã generate được thumbnail thành công.
-        // Trước W6-D2 dùng record.isImage() nhưng client có thể gặp 404 nếu thumbnail generation fail —
-        // giờ align với thực tế: nếu thumbnailInternalPath null thì không expose URL.
-        String thumbUrl = record.getThumbnailInternalPath() != null ? url + "/thumb" : null;
+        boolean pub = record.isPublic();
+        String url = pub
+                ? FileConstants.publicUrl(record.getId())
+                : FileConstants.privateUrl(record.getId());
+        // W7-D4-fix: public files KHÔNG expose thumbnail endpoint (FE resize CSS).
+        String thumbUrl = (!pub && record.getThumbnailInternalPath() != null)
+                ? FileConstants.privateUrl(record.getId()) + "/thumb"
+                : null;
+        String publicUrl = pub ? url : null;
         return new FileDto(
                 record.getId(),
                 record.getMime(),
@@ -203,7 +293,9 @@ public class FileService {
                 url,
                 thumbUrl,
                 resolveIconType(record.getMime()),
-                record.getExpiresAt()
+                record.getExpiresAt(),
+                pub,
+                publicUrl
         );
     }
 

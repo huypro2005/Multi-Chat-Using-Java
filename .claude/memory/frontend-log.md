@@ -5,6 +5,16 @@
 
 ---
 
+[2026-04-22 W7-D4-fix] refactor: avatar native img public URL (ADR-021) — xóa useProtectedObjectUrl cho avatars
+- UserAvatar.tsx: bỏ useProtectedObjectUrl; dùng native <img src=avatarUrl> + div fallback overlay pattern; DEFAULT_USER_AVATAR constant
+- ConversationListItem.tsx: bỏ useProtectedObjectUrl; native img + DEFAULT_GROUP_AVATAR fallback cho GROUP
+- GroupInfoPanel.tsx: refactor GroupAvatarDisplay → native img; bỏ extractFileId helper; pass currentAvatarUrl prop thay vì currentAvatarFileId
+- EditGroupInfoDialog.tsx: prop currentAvatarFileId → currentAvatarUrl; bỏ useProtectedObjectUrl; avatar upload thêm ?public=true
+- CreateGroupDialog.tsx: avatar upload thêm ?public=true
+- types/message.ts: thêm isPublic + publicUrl vào AttachmentDto (ADR-021 contract)
+- useProtectedObjectUrl.ts: fix pre-existing TS18047 (state null narrowing)
+- tsc: 0 errors; vite build: ✓
+
 [2026-04-22 W7-D4] feat: system messages rendering with i18n (8 event types)
 - SỬA: SystemMessage.tsx — fix copy templates khớp chính xác contract §3e.1:
   - ROLE_PROMOTED: "đặt {target} làm quản trị viên" (thay vì "thăng làm phó nhóm")

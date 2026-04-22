@@ -54,12 +54,20 @@ public class FileController {
      * @param user  authenticated user (từ JWT).
      * @return 201 Created + FileDto.
      */
+    /**
+     * POST /api/files/upload?public={true|false}
+     *
+     * W7-D4-fix (ADR-021): query param {@code public} (default false).
+     *  - public=true  → avatar upload → is_public=true, endpoint /api/files/{id}/public.
+     *  - public=false → message attachment (default) → is_public=false, endpoint /api/files/{id}.
+     */
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
     public FileDto upload(
             @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "public", defaultValue = "false") boolean isPublic,
             @AuthenticationPrincipal User user) {
-        return fileService.upload(file, user.getId());
+        return fileService.upload(file, user.getId(), isPublic);
     }
 
     /**
@@ -145,6 +153,54 @@ public class FileController {
                 .header("X-Content-Type-Options", "nosniff")
                 .eTag("\"" + record.getId() + "-thumb\"")
                 .cacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePrivate())
+                .body(resource);
+    }
+
+    /**
+     * GET /api/files/{id}/public
+     *
+     * Public file download — KHÔNG yêu cầu JWT (ADR-021, W7-D4-fix).
+     * Chỉ serve files có is_public=true (avatar user, avatar group, default system files).
+     *
+     * Anti-enumeration: trả 404 cho CẢ not-found, is_public=false, expired — ngăn
+     * attacker dò is_public flag.
+     *
+     * Response headers:
+     *  - Content-Type: MIME thật của file.
+     *  - Content-Disposition: inline; filename="{originalName}".
+     *  - Cache-Control: public, max-age=86400 (1 ngày — browser HTTP cache thay cho blob URL).
+     *  - ETag: file.id.
+     *  - X-Content-Type-Options: nosniff.
+     */
+    @GetMapping("/{id}/public")
+    public ResponseEntity<Resource> downloadPublic(@PathVariable UUID id) {
+        FileRecord record = fileService.loadForPublicDownload(id);
+        if (record == null) {
+            throw new AppException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Tệp không tồn tại");
+        }
+
+        InputStream stream;
+        try {
+            stream = fileService.openStream(record);
+        } catch (StorageException e) {
+            log.warn("[FileController] Public file physical missing: id={}, err={}",
+                    id, e.getMessage());
+            throw new AppException(HttpStatus.NOT_FOUND, "FILE_NOT_FOUND",
+                    "Tệp không tồn tại");
+        }
+        InputStreamResource resource = new InputStreamResource(stream);
+
+        String safeFilename = sanitizeForHeader(record.getOriginalName());
+        String contentDisposition = "inline; filename=\"" + safeFilename + "\"";
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(record.getMime()))
+                .contentLength(record.getSizeBytes())
+                .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition)
+                .header("X-Content-Type-Options", "nosniff")
+                .eTag("\"" + record.getId() + "\"")
+                // Public cache: browser + CDN cache. Avatar change → URL đổi → cache miss tự nhiên.
+                .cacheControl(CacheControl.maxAge(Duration.ofDays(1)).cachePublic())
                 .body(resource);
     }
 

@@ -61,7 +61,10 @@ public class SecurityConfig {
                             "/actuator/health",
                             // WebSocket/SockJS handshake + info — auth xảy ra ở STOMP CONNECT frame
                             // qua AuthChannelInterceptor, không qua HTTP filter chain.
-                            "/ws/**"
+                            "/ws/**",
+                            // Public file endpoint (ADR-021, W7-D4-fix) — avatar user/group, default files.
+                            // KHÔNG cần JWT. Anti-enum: 404 cho private files.
+                            "/api/files/*/public"
                     ).permitAll()
                     // /api/auth/logout KHÔNG trong whitelist — yêu cầu JWT hợp lệ
                     .anyRequest().authenticated()

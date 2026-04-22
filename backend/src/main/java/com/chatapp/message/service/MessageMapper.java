@@ -150,18 +150,33 @@ public class MessageMapper {
                 .toList();
     }
 
+    /**
+     * Map FileRecord → FileDto cho attachment hydration trong MessageDto.
+     *
+     * W7-D4-fix (ADR-021): Message attachments gần như luôn private. Nhưng vẫn
+     * respect record.isPublic() — nếu file upload với ?public=true và sau đó
+     * attach vào message (unusual nhưng có thể), serve qua public URL.
+     */
     private FileDto toFileDto(FileRecord record) {
-        String baseUrl = "/api/files/" + record.getId();
-        String thumbUrl = record.getThumbnailInternalPath() != null ? baseUrl + "/thumb" : null;
+        boolean pub = record.isPublic();
+        String url = pub
+                ? com.chatapp.file.constant.FileConstants.publicUrl(record.getId())
+                : com.chatapp.file.constant.FileConstants.privateUrl(record.getId());
+        String thumbUrl = (!pub && record.getThumbnailInternalPath() != null)
+                ? com.chatapp.file.constant.FileConstants.privateUrl(record.getId()) + "/thumb"
+                : null;
+        String publicUrl = pub ? url : null;
         return new FileDto(
                 record.getId(),
                 record.getMime(),
                 record.getOriginalName(),
                 record.getSizeBytes(),
-                baseUrl,
+                url,
                 thumbUrl,
                 resolveIconType(record.getMime()),
-                record.getExpiresAt()
+                record.getExpiresAt(),
+                pub,
+                publicUrl
         );
     }
 

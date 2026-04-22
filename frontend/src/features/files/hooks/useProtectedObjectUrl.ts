@@ -47,5 +47,6 @@ export function useProtectedObjectUrl(path: string | null | undefined): string |
   }, [path])
 
   // Derive: only valid when the stored url was fetched for the current path
-  return state?.forPath === path && !!path ? state.url : null
+  if (state !== null && state.forPath === path && !!path) return state.url
+  return null
 }

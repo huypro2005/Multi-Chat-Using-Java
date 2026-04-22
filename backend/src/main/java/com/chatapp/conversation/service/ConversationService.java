@@ -10,6 +10,7 @@ import com.chatapp.conversation.event.GroupDeletedEvent;
 import com.chatapp.conversation.repository.ConversationMemberRepository;
 import com.chatapp.conversation.repository.ConversationRepository;
 import com.chatapp.exception.AppException;
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.file.entity.FileRecord;
 import com.chatapp.file.repository.FileRecordRepository;
 import com.chatapp.message.constant.SystemEventType;
@@ -236,12 +237,18 @@ public class ConversationService {
             avatarFile = validateGroupAvatar(req.avatarFileId(), currentUser.getId());
         }
 
+        // W7-D4-fix (ADR-021): group không có custom avatar → fallback DEFAULT_GROUP_AVATAR.
+        // Rationale: mọi group PHẢI có avatar (default nếu không custom) → FE không null-check.
+        UUID finalAvatarFileId = avatarFile != null
+                ? avatarFile.getId()
+                : FileConstants.DEFAULT_GROUP_AVATAR_ID;
+
         // Tạo conversation
         Conversation conversation = Conversation.builder()
                 .type(ConversationType.GROUP)
                 .name(name)
                 .ownerId(currentUser.getId())
-                .avatarFileId(avatarFile != null ? avatarFile.getId() : null)
+                .avatarFileId(finalAvatarFileId)
                 .createdBy(currentUser)
                 .build();
         conversation = conversationRepository.save(conversation);
@@ -355,9 +362,12 @@ public class ConversationService {
         ConversationType type = ConversationType.valueOf(row[1].toString());
         String name = row[2] != null ? row[2].toString() : null;
         // row[3] = avatar_url (legacy), row[4] = avatar_file_id (W7)
+        // W7-D4-fix (ADR-021): dùng /public endpoint cho avatar_file_id.
         String legacyAvatarUrl = row[3] != null ? row[3].toString() : null;
         String avatarFileId = row[4] != null ? row[4].toString() : null;
-        String avatarUrl = avatarFileId != null ? "/api/files/" + avatarFileId : legacyAvatarUrl;
+        String avatarUrl = avatarFileId != null
+                ? FileConstants.publicUrl(UUID.fromString(avatarFileId))
+                : legacyAvatarUrl;
         // last_message_at (row[5]) — shifted from row[4] after adding avatar_file_id column
         java.time.Instant lastMessageAt = null;
         if (row[5] != null) {
@@ -490,10 +500,12 @@ public class ConversationService {
 
         if (req.hasAvatarFileId()) {
             if (req.isRemoveAvatar()) {
-                // Remove avatar — không xoá FileRecord, chỉ detach
-                if (conv.getAvatarFileId() != null) {
-                    conv.setAvatarFileId(null);
-                    changes.put("avatarUrl", null);
+                // W7-D4-fix (ADR-021): FALLBACK về DEFAULT_GROUP_AVATAR thay vì để NULL.
+                // Mọi group PHẢI có avatar (default nếu không custom) → FE không null-check.
+                UUID currentAvatarId = conv.getAvatarFileId();
+                if (!FileConstants.DEFAULT_GROUP_AVATAR_ID.equals(currentAvatarId)) {
+                    conv.setAvatarFileId(FileConstants.DEFAULT_GROUP_AVATAR_ID);
+                    changes.put("avatarUrl", FileConstants.DEFAULT_GROUP_AVATAR_URL);
                 }
             } else {
                 UUID newAvatarId = req.getAvatarFileId();
@@ -507,7 +519,7 @@ public class ConversationService {
                 fileRecordRepository.save(avatarFile);
 
                 conv.setAvatarFileId(newAvatarId);
-                changes.put("avatarUrl", "/api/files/" + newAvatarId);
+                changes.put("avatarUrl", FileConstants.publicUrl(newAvatarId));
             }
         }
 
@@ -681,6 +693,14 @@ public class ConversationService {
             throw new AppException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "GROUP_AVATAR_NOT_IMAGE",
                     "Avatar phải là ảnh (jpeg/png/webp/gif)",
                     Map.of("actualMime", mime != null ? mime : "unknown"));
+        }
+
+        // ADR-021: avatar files must be public so /public endpoint serves them.
+        // Auto-flip any file uploaded without ?public=true (defense-in-depth).
+        if (!file.isPublic()) {
+            file.setPublic(true);
+            fileRecordRepository.save(file);
+            log.info("[AVATAR] Auto-flipped is_public=false→true for file {} (ADR-021)", file.getId());
         }
 
         return file;

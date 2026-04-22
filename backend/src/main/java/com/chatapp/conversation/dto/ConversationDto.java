@@ -2,6 +2,7 @@ package com.chatapp.conversation.dto;
 
 import com.chatapp.conversation.entity.Conversation;
 import com.chatapp.conversation.enums.ConversationType;
+import com.chatapp.file.constant.FileConstants;
 import com.chatapp.user.entity.User;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
@@ -59,10 +60,10 @@ public record ConversationDto(
             owner = OwnerDto.from(ownerUser);
         }
 
-        // avatarUrl: ưu tiên avatarFileId (W7), fallback cột legacy avatar_url (V3, có thể rỗng).
+        // avatarUrl (W7-D4-fix, ADR-021): dùng /public endpoint — native <img src> load OK.
         String avatarUrl = null;
         if (conv.getAvatarFileId() != null) {
-            avatarUrl = "/api/files/" + conv.getAvatarFileId();
+            avatarUrl = FileConstants.publicUrl(conv.getAvatarFileId());
         } else if (conv.getAvatarUrl() != null) {
             avatarUrl = conv.getAvatarUrl();
         }

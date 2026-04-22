@@ -16,6 +16,51 @@
 
 ---
 
+## [W7-D4-fix] feat: Model 4 hybrid file visibility (ADR-021) + default avatars + ADMIN permission — 282 tests pass (12 new)
+
+**Scope**: Hybrid file visibility + default avatars + regression tests cho ADMIN add members.
+
+**Item 1 — Model 4 Hybrid (ADR-021)**:
+- `V11__file_visibility_and_defaults.sql`: ALTER files ADD is_public BOOLEAN default FALSE + DROP NOT NULL uploader_id; backfill existing avatars is_public=TRUE (DO block check column exists cho users.avatar_file_id future); seed 2 default rows (UUID 001/002, is_public=TRUE, expires_at=9999-12-31); partial index `idx_files_public WHERE is_public=TRUE`.
+- `FileConstants` new class: DEFAULT_USER_AVATAR_ID/GROUP (fixed UUID), DEFAULT_*_URL (`/api/files/{id}/public`), helpers `publicUrl(id)` / `privateUrl(id)`.
+- `FileRecord`: thêm `boolean isPublic` (`@Column nullable=false + @Builder.Default false`); `uploader_id` bỏ `nullable=false` (default files).
+- `FileService.upload(file, userId, isPublic)` overload; backward-compat `upload(file, userId)` gọi với false.
+- `FileService.toDto`: public → url `/public` + publicUrl=url + thumbUrl=null; private → url gốc + publicUrl=null + thumbUrl theo record.
+- `FileService.loadForPublicDownload(fileId)`: check `record.isPublic() && !expired`; anti-enum trả null cho mọi fail case → controller 404.
+- `FileService.@PostConstruct validateDefaultAvatars()`: soft-check log WARN nếu 2 default file thiếu trên disk (runbook post-deploy). KHÔNG fail startup.
+- `FileController.upload(?public=...)`: query param default false.
+- `FileController.downloadPublic`: GET `/api/files/{id}/public` — KHÔNG cần JWT; `Cache-Control: public, max-age=86400`.
+- `SecurityConfig`: thêm `/api/files/*/public` vào permitAll whitelist TRƯỚC anyRequest().authenticated().
+
+**Item 2 — Default avatars**:
+- `AuthService.register`: set `user.avatarUrl = FileConstants.DEFAULT_USER_AVATAR_URL` (User entity dùng avatar_url String, không có avatar_file_id column).
+- `AuthService.oauth`: fallback default URL khi photoUrl từ Google null/blank.
+- `ConversationService.createGroup`: nếu `req.avatarFileId` null → set `DEFAULT_GROUP_AVATAR_ID`.
+- `ConversationService.updateGroupInfo` (remove avatar): FALLBACK `DEFAULT_GROUP_AVATAR_ID` thay vì NULL (contract: mọi group PHẢI có avatar).
+- `ConversationDto.from` + `ConversationBroadcaster.buildConvSummary` + `ConversationService.buildSummary`: dùng `FileConstants.publicUrl(avatarFileId)` thay vì `/api/files/{id}`.
+- `MessageMapper.toFileDto`: respect `record.isPublic()` cho attachments (hiếm nhưng hỗ trợ).
+- `FileCleanupJob`: skip `FileConstants.DEFAULT_AVATAR_IDS` (expired + orphan).
+
+**Item 3 — ADMIN permission**:
+- `MemberRole.canAddMembers()` đã đúng (return `this != MEMBER`). Không có bug thực sự. Thêm 2 regression tests (P01 ADMIN add OK, P02 MEMBER add 403).
+
+**Tests** — `FileVisibilityTest.java` (12 tests):
+- V01 upload ?public=true → isPublic=true + publicUrl; V02 default → false + null; V03 downloadPublic 200 no auth; V04 private file 404 anti-enum; V05 non-existent 404; V06 public no JWT / private needs JWT.
+- D01 register default avatarUrl; D02 createGroup no avatar → DEFAULT_GROUP; D03 custom avatar overrides default; D04 cleanup job skips default avatars.
+- P01 ADMIN can add members (regression); P02 MEMBER cannot add.
+
+**Lombok pitfall đã gặp**:
+- Field `boolean isPublic` → Lombok @Getter sinh method `isPublic()` KHÔNG PHẢI `isIsPublic()`. `isIs*` chỉ xảy ra nếu field là `boolean isIsXxx` (không phổ biến). Sử dụng `record.isPublic()` trong tất cả caller.
+
+**Sửa test cũ**:
+- `AuthControllerTest.registerHappyPath`: thay `$.user.avatarUrl doesNotExist()` → `value("/api/files/000...001/public")`.
+
+**Migration naming**: V11 — Flyway filename là source of truth. Docs viết V11__add_file_is_public.sql nhưng merge scope với default avatar seeding → `V11__file_visibility_and_defaults.sql` reflect đầy đủ.
+
+**Test profile pitfall (H2)**: Flyway disabled + `ddl-auto=create-drop` → V11 KHÔNG chạy tự động. FileVisibilityTest setUp() seed 2 default records programmatically.
+
+All 282 tests pass (270 cũ + 12 mới, 0 failures, 0 errors).
+
 ## [W7-bugfix] fix: group avatar not visible in sidebar for other users — 270 tests pass
 
 **Scope**: Bug fix avatar nhóm không hiển thị cho user khác trong sidebar.
