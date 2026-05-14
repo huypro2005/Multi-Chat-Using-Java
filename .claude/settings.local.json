@@ -42,7 +42,20 @@
       "Bash(javap -p org/springframework/web/socket/messaging/StompSubProtocolHandler.class)",
       "Bash(javap -p org/springframework/web/socket/config/annotation/WebSocketMessageBrokerConfigurationSupport.class)",
       "Bash(javap -p org/springframework/messaging/simp/stomp/DefaultStompSession.class)",
-      "Bash(javap -c -p org/springframework/messaging/simp/stomp/DefaultStompSession.class)"
+      "Bash(javap -c -p org/springframework/messaging/simp/stomp/DefaultStompSession.class)",
+      "Bash(git -C \"/d/CodeMonHoc/SE330/chat-app/.claude/worktrees/agent-a7394f7c\" log --oneline -3)",
+      "Bash(git -C \"/d/CodeMonHoc/SE330/chat-app/.claude/worktrees/agent-a1f8759f\" log --oneline -3)",
+      "Bash(git -C \"/d/CodeMonHoc/SE330/chat-app/.claude/worktrees/agent-a7394f7c\" status --short)",
+      "Bash(git -C \"/d/CodeMonHoc/SE330/chat-app/.claude/worktrees/agent-a1f8759f\" status --short)",
+      "Bash(awk NR>=420 && NR<=538 *)",
+      "Bash(awk '{t+=$1; f+=$2; e+=$3; s+=$4} END {print \"Tests:\", t, \"Failures:\", f, \"Errors:\", e, \"Skipped:\", s}')",
+      "Bash(python -c ' *)",
+      "Bash(cd /d)",
+      "Bash(find \"CodeMonHoc/SE330/chat-app\" -type f \\\\\\( -name \"*deploy*\" -o -name \"*.sh\" \\\\\\))",
+      "Bash(ls -la CodeMonHoc/SE330/chat-app/.github)",
+      "Bash(ls -la CodeMonHoc/SE330/chat-app/scripts)",
+      "Bash(find CodeMonHoc/SE330/chat-app/.github -type f)",
+      "Bash(ls -la CodeMonHoc/SE330/chat-app/docs)"
     ]
   }
 }

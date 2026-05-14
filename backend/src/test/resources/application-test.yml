@@ -28,9 +28,11 @@ app:
     access-expiration-ms: 3600000
     refresh-expiration-ms: 604800000
   cors:
-    allowed-origins: http://localhost:3000,http://localhost:5173
+    # allowed-origins: http://localhost:3000,http://localhost:5173
+    allowed-origins: http://docker.host.internal:3000,http://docker.host.internal:5173
   websocket:
-    allowed-origins: http://localhost:3000,http://localhost:5173
+    # allowed-origins: http://localhost:3000,http://localhost:5173
+    allowed-origins: http://docker.host.internal:3000,http://docker.host.internal:5173
   # W6-D3: Cron set "-" = disabled trigger. Bean vẫn load (enabled=true) để test gọi method trực tiếp.
   file-cleanup:
     enabled: true

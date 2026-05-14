@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { ProfileInfoTab } from '../components/ProfileInfoTab'
 import { ChangePasswordTab } from '../components/ChangePasswordTab'
 import { AccountTab } from '../components/AccountTab'
@@ -7,9 +8,25 @@ type Tab = 'info' | 'password' | 'account'
 
 export function ProfilePage() {
   const [activeTab, setActiveTab] = useState<Tab>('info')
+  const navigate = useNavigate()
+
+  const handleBack = () => {
+    if (window.history.length > 1) {
+      navigate(-1)
+      return
+    }
+    navigate('/conversations')
+  }
 
   return (
     <div className="max-w-3xl mx-auto p-6">
+      <button
+        type="button"
+        onClick={handleBack}
+        className="mb-4 text-sm text-gray-600 hover:text-indigo-600"
+      >
+        ← Quay lại
+      </button>
       <h1 className="text-2xl font-bold mb-6">Hồ sơ của tôi</h1>
       <div className="flex border-b border-gray-200 mb-6">
         <TabButton active={activeTab === 'info'} onClick={() => setActiveTab('info')}>

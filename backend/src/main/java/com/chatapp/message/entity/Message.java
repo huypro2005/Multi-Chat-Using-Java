@@ -10,6 +10,7 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnTransformer;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -112,7 +113,8 @@ public class Message {
      * rather than parsed JSON, causing MismatchedInputException in Hibernate 6 (W7-D4 pitfall).
      */
     @Convert(converter = JsonMapConverter.class)
-    @Column(name = "system_metadata")
+    @ColumnTransformer(write = "?::jsonb")
+    @Column(name = "system_metadata", columnDefinition = "jsonb")
     private Map<String, Object> systemMetadata;
 
     /**
