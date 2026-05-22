@@ -71,6 +71,17 @@ app:
     expired-cron: ${FILE_CLEANUP_EXPIRED_CRON:0 0 3 * * *}
     # Orphan cleanup: chạy đầu mỗi giờ.
     orphan-cron: ${FILE_CLEANUP_ORPHAN_CRON:0 0 * * * *}
+  limit:
+    # TTL cho rate limit windows: 15 phút = 900s
+    rate-limit-ttl-seconds: 900
+    # Max failed login attempts per IP per window.
+    login-max-failures: 5
+    # Max register requests per IP per window
+    register-max-requests: 10
+    # Max refresh calls per userId per window (60 giây).
+    refresh-max-calls: 5
+    # TTL cho rate limit refresh window: 60 giây.
+    refresh-rate-limit-ttl-seconds: 60
 
 # W6-D1 — File storage config. V1 dùng local disk; V2 migrate S3 (ADR-019).
 storage:

@@ -85,19 +85,24 @@ public class AuthService {
     }
 
     /** TTL cho rate limit windows: 15 phút = 900 giây. */
-    private static final long RATE_LIMIT_TTL_SECONDS = 900L;
+    @Value("${app.limit.rate-limit-ttl-seconds}")
+    private long RATE_LIMIT_TTL_SECONDS;
 
     /** Max failed login attempts per IP per window. */
-    private static final int LOGIN_MAX_FAILURES = 5;
+    @Value("${app.limit.login-max-failures}")
+    private int LOGIN_MAX_FAILURES;
 
     /** Max register requests per IP per window. */
-    private static final int REGISTER_MAX_REQUESTS = 10;
+    @Value("${app.limit.register-max-requests}")
+    private int REGISTER_MAX_REQUESTS;
 
     /** Max refresh calls per userId per window (60 giây). */
-    private static final int REFRESH_MAX_CALLS = 10;
+    @Value("${app.limit.refresh-max-calls}")
+    private int REFRESH_MAX_CALLS;
 
     /** TTL cho rate limit refresh window: 60 giây. */
-    private static final long REFRESH_RATE_LIMIT_TTL_SECONDS = 60L;
+    @Value("${app.limit.refresh-rate-limit-ttl-seconds}")
+    private long REFRESH_RATE_LIMIT_TTL_SECONDS;
 
     @Value("${app.jwt.refresh-expiration-ms}")
     private long refreshExpirationMs;
