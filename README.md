@@ -1,203 +1,258 @@
 # Chat App — SE330 Project
 
-Real-time chat application với group chat, file sharing, reactions, read receipts, pin message và block user.
+Real-time chat: direct/group chat, file sharing, reactions, read receipts, pin message, block user.
 
-## Features
+**Chạy nhanh (Docker):** Postgres local + Docker Desktop → copy `.env` → `docker compose up -d` → mở http://localhost
 
-### Messaging
-- Direct chat (1-1) và group chat
-- Send/Edit/Delete/Reply message
-- Any-emoji reactions
-- Pin message (max 3 mỗi conversation)
-- Read receipts + unread count
-- Typing indicator + reconnect catch-up
+---
 
-### File Sharing
-- Upload ảnh và tài liệu (14 MIME types)
-- Public/default avatars + private attachments
-- Thumbnail cho ảnh
+## Yêu cầu (Prerequisites)
 
-### User
-- Auth: register/login + Google OAuth
-- Profile page: cập nhật thông tin, đổi avatar, đổi mật khẩu
-- Settings page: blocked users + notification stub
-- Bilateral block/unblock
+### Chạy bằng Docker (khuyến nghị)
 
-### Platform
-- Spring Boot + PostgreSQL + Redis + React + STOMP
-- Docker-ready với `docker-compose.yml`
+| Cần có | Ghi chú |
+|--------|---------|
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Windows / Mac / Linux |
+| PostgreSQL cài trên máy | Port `5432`, tạo database `chatapp` |
+| Git | Clone repo |
 
-## Tech Stack
+> Docker **không** chạy container Postgres mặc định — backend container kết nối Postgres **trên máy host** qua `host.docker.internal`. Redis chạy trong Docker.
 
-### Backend
-- Java 21, Spring Boot 3.4.4
-- PostgreSQL 18, Redis 7
-- Flyway migrations
-- Apache Tika + Thumbnailator
+### Chạy local dev (không Docker)
 
-### Frontend
-- React 19 + TypeScript + Vite
-- TanStack Query + Zustand
-- Tailwind CSS
-- SockJS + STOMP
+| Cần có | Phiên bản |
+|--------|-----------|
+| Java + Maven | Java 21 |
+| Node.js + npm | Node 20+ |
+| PostgreSQL | 18+ |
+| Redis | 7+ (hoặc `docker compose up -d redis`) |
 
-## Quick Start (Docker)
+---
 
-### 1) Setup env
+## Cách 1 — Docker (khuyến nghị)
+
+### Bước 1: Clone & chuẩn bị Postgres
 
 ```bash
-cp .env.example .env
+git clone <repo-url>
+cd chat-app
 ```
 
-Mở `.env` và điền các biến bắt buộc:
-
-| Biến | Mô tả | Mặc định |
-|------|-------|----------|
-| `DB_HOST` | Postgres trên máy host | `host.docker.internal` |
-| `DB_PORT` | Port Postgres local | `5432` |
-| `DB_NAME` | Tên database | `chatapp` |
-| `DB_USER` | User Postgres local | `postgres` |
-| `DB_PASSWORD` | Mật khẩu Postgres local | — |
-| `JWT_SECRET` | Secret ký JWT (≥256 bit) | — |
-
-> **Mặc định Docker dùng Postgres local** trên máy bạn (không chạy container postgres). Backend container kết nối qua `host.docker.internal`.
-
-Đảm bảo Postgres local đã:
-1. Đang chạy trên port `5432`
-2. Có database `chatapp` (hoặc tên khớp `DB_NAME`)
-3. Cho phép kết nối từ Docker (Windows Docker Desktop thường OK mặc định)
-
-Tạo database nếu chưa có:
+Tạo database (pgAdmin hoặc `psql`):
 
 ```sql
 CREATE DATABASE chatapp;
 ```
 
-Tạo `JWT_SECRET` nhanh (PowerShell):
+Đảm bảo PostgreSQL đang chạy trên port `5432`.
+
+### Bước 2: Tạo file `.env`
+
+```bash
+cp .env.example .env
+```
+
+Mở `.env`, điền **ít nhất** các biến sau:
+
+```env
+DB_HOST=host.docker.internal
+DB_PORT=5432
+DB_NAME=chatapp
+DB_USER=postgres
+DB_PASSWORD=<mật-khẩu-postgres-của-bạn>
+
+JWT_SECRET=<chuỗi-ngẫu-nhiên-64-ký-tự>
+```
+
+Tạo `JWT_SECRET` (PowerShell):
 
 ```powershell
 -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 64 | ForEach-Object {[char]$_})
 ```
 
-**Google OAuth** (nếu cần đăng nhập Google trong Docker):
-
-1. **Frontend** — thêm vào `.env` (Firebase Console → Project Settings → Web app):
-
-```
-VITE_FIREBASE_API_KEY=your-api-key
-VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-VITE_FIREBASE_PROJECT_ID=your-project-id
-```
-
-2. **Backend** — mount Firebase Admin SDK JSON vào container:
-
-```
-FIREBASE_CREDENTIALS_HOST_PATH=D:\path\to\firebase-adminsdk.json
-```
-
-> `VITE_*` bake vào frontend lúc build — đổi sau phải `docker compose build frontend`.  
-> `FIREBASE_CREDENTIALS_HOST_PATH` là file trên máy host; container đọc tại `/app/config/firebase-credentials.json`.
-
-### 2) Build and run
+### Bước 3: Build & chạy
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Kiểm tra containers:
+### Bước 4: Kiểm tra
 
 ```bash
-docker compose ps
+docker compose ps          # backend + frontend + redis = Up (healthy)
+curl http://localhost/api/health   # {"status":"ok",...}
 ```
 
-Services:
-- **Frontend (dùng URL này):** http://localhost
-- Backend API (debug trực tiếp): http://localhost:8080
-- PostgreSQL: **Postgres local** trên máy host (port 5432)
-- Redis: container Docker (port 6379)
+Mở trình duyệt: **http://localhost** (port 80, không phải `:8080`).
 
-> Mở app qua http://localhost (port 80). Frontend gọi `/api` và `/ws` qua nginx reverse proxy — không gọi thẳng `:8080` từ browser.
+| Service | URL |
+|---------|-----|
+| **App (dùng URL này)** | http://localhost |
+| Backend API (debug) | http://localhost:8080 |
+| Postgres | localhost:5432 (trên máy host) |
+| Redis | localhost:6379 (container) |
 
-**Dùng Postgres trong Docker** (nếu không có Postgres local):
+**Upload file:** lưu tại `backend/uploads/` trên ổ cứng (mount tự động từ Docker).
+
+---
+
+## Google OAuth (tùy chọn)
+
+Đăng ký/đăng nhập bằng **username + password** hoạt động **không cần** Firebase.
+
+Nếu cần nút **Đăng nhập Google**, thêm vào `.env`:
+
+```env
+# Frontend (Firebase Console → Project Settings → Web app)
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=....firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=...
+
+# Backend — đường dẫn file Admin SDK JSON trên máy host
+FIREBASE_CREDENTIALS_HOST_PATH=D:\path\to\firebase-adminsdk.json
+```
+
+Sau đó **bắt buộc rebuild frontend** (config bake lúc build):
+
+```bash
+docker compose build frontend
+docker compose up -d
+```
+
+---
+
+## Cách 2 — Local dev (không Docker)
+
+### Bước 1: Redis
+
+Chọn một trong hai:
+
+```bash
+# Option A — chỉ chạy Redis bằng Docker
+docker compose up -d redis
+```
+
+Hoặc cài Redis local trên port `6379`.
+
+### Bước 2: Backend
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Ví dụ `backend/.env`:
+
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=chatapp
+DB_USER=postgres
+DB_PASSWORD=<your-password>
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+JWT_SECRET=<same-as-docker-or-new>
+JWT_ACCESS_EXPIRY_MINUTES=15
+JWT_REFRESH_EXPIRY_DAYS=7
+
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Chỉ cần nếu dùng Google OAuth
+FIREBASE_CREDENTIALS_PATH=D:\path\to\firebase-adminsdk.json
+```
+
+```bash
+cd backend
+mvn spring-boot:run
+```
+
+Backend: http://localhost:8080
+
+### Bước 3: Frontend
+
+```bash
+cp frontend/.env.example frontend/.env
+cp frontend/.env.local.example frontend/.env.local   # nếu dùng Google OAuth
+```
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend: http://localhost:3000
+
+---
+
+## Postgres trong Docker (thay vì Postgres local)
+
+Nếu **không** có Postgres cài sẵn trên máy:
+
+1. Sửa `.env`:
+
+```env
+DB_HOST=postgres
+DB_USER=chatapp
+DB_PASSWORD=chatapp_dev_password
+POSTGRES_PASSWORD=chatapp_dev_password
+```
+
+2. Chạy:
 
 ```bash
 docker compose --profile docker-db up -d
 ```
 
-Khi đó set trong `.env`: `DB_HOST=postgres`, `DB_USER=chatapp` (hoặc user bạn cấu hình trong profile).
+---
 
-### 3) Setup default avatars (optional)
+## Avatar mặc định (tùy chọn)
 
-Repo không chứa file avatar mặc định. Nếu cần avatar fallback cho user/group mới:
-
-```bash
-docker cp avatar_default.jpg chat-app-backend-1:/app/uploads/default/
-docker cp group_default.jpg chat-app-backend-1:/app/uploads/default/
-```
-
-Hoặc mount local volume trong `docker-compose.yml`:
-
-```yaml
-backend:
-  volumes:
-    - ./backend/uploads:/app/uploads
-    - ./default-avatars:/app/uploads/default:ro
-```
-
-Đặt `avatar_default.jpg` và `group_default.jpg` trong folder `./default-avatars/`.
-
-## Local Dev (không Docker)
-
-Docker và local dev dùng **env khác nhau**:
-
-| | Docker | Local dev |
-|---|--------|-----------|
-| Env file | `.env` (root) | `backend/.env` + `frontend/.env` |
-| Frontend URL | http://localhost | http://localhost:3000 |
-| API routing | nginx proxy `/api` | Vite proxy hoặc `VITE_API_BASE_URL` |
-
-**Backend:**
+Repo không chứa sẵn file avatar fallback. Copy vào folder upload:
 
 ```bash
-cp backend/.env.example backend/.env
-# Điền DB, Redis, JWT, Firebase credentials path
-cd backend && mvn spring-boot:run
+mkdir -p backend/uploads/default
+copy avatar_default.jpg backend\uploads\default\
+copy group_default.jpg backend\uploads\default\
 ```
 
-**Frontend:**
+(Docker đã mount `backend/uploads` — không cần `docker cp`.)
 
-```bash
-cp frontend/.env.example frontend/.env
-cp frontend/.env.local.example frontend/.env.local  # Firebase OAuth
-cd frontend && npm install && npm run dev
-```
+---
 
-Chi tiết từng biến: xem comment trong `backend/.env.example` và `frontend/.env.local.example`.
+## Xử lý lỗi thường gặp
 
-## Troubleshooting Docker
+| Triệu chứng | Cách fix |
+|-------------|----------|
+| Backend không start, lỗi DB | Postgres local chưa chạy / sai `DB_*` trong `.env` |
+| `Connection refused` DB | Windows/Mac: `DB_HOST=host.docker.internal` |
+| Login fail, CORS trên console | `docker compose build frontend --no-cache` rồi `up -d` |
+| Google OAuth 503 | Set `FIREBASE_CREDENTIALS_HOST_PATH`, restart backend |
+| Google OAuth 502 sau restart | `docker compose restart frontend` |
+| Ảnh/avatar 404 | File phải nằm trong `backend/uploads/` (đã mount mặc định) |
+| Port 80 bị chiếm | Đổi `"80:80"` → `"8081:80"` trong `docker-compose.yml` |
+| `docker compose up` lỗi mount Firebase | Set `FIREBASE_CREDENTIALS_HOST_PATH` trỏ file JSON (compose bắt buộc mount; password login vẫn chạy nếu BE warn Firebase) |
 
-| Triệu chứng | Nguyên nhân | Cách fix |
-|-------------|-------------|----------|
-| Backend crash, không kết nối DB | Postgres local chưa chạy hoặc sai `DB_*` | Kiểm tra Postgres + `.env` |
-| `Connection refused` tới DB | `DB_HOST` sai | Dùng `host.docker.internal` (Windows/Mac Docker Desktop) |
-| File/avatar 404 trong Docker | DB local có record nhưng file nằm ở `backend/uploads/` host | Compose mount `./backend/uploads:/app/uploads` (mặc định) — restart backend |
-| Login/register fail, console báo CORS | Frontend build với `localhost:8080` | Rebuild: `docker compose build frontend --no-cache` |
-| Port 80 đã bị chiếm | IIS/Skype/container khác | Đổi port trong `docker-compose.yml`: `"8081:80"` |
-| Google OAuth 503/502 | Backend không đọc được Firebase credentials | Set `FIREBASE_CREDENTIALS_HOST_PATH` trỏ file JSON trên host, rồi `docker compose up -d` |
-| Avatar mặc định 404 | Chưa copy file vào `/app/uploads/default/` | Xem bước 3 ở trên |
-
-Xem logs:
+Xem log:
 
 ```bash
 docker compose logs -f backend
 docker compose logs -f frontend
 ```
 
+---
+
+## Tech stack
+
+**Backend:** Java 21, Spring Boot 3.4, PostgreSQL, Redis, Flyway, STOMP WebSocket  
+**Frontend:** React 19, TypeScript, Vite, TanStack Query, Zustand, Tailwind CSS
+
 ## Docs
 
-- `docs/ARCHITECTURE.md`
-- `docs/API_CONTRACT.md`
-- `docs/SOCKET_EVENTS.md`
-- `docs/WARNINGS.md`
-- `docs/RETROSPECTIVE.md`
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [API_CONTRACT.md](docs/API_CONTRACT.md)
+- [SOCKET_EVENTS.md](docs/SOCKET_EVENTS.md)
+- [WARNINGS.md](docs/WARNINGS.md)
+- [RETROSPECTIVE.md](docs/RETROSPECTIVE.md)
