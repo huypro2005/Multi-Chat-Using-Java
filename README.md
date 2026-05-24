@@ -141,7 +141,7 @@ Hoặc mount local volume trong `docker-compose.yml`:
 ```yaml
 backend:
   volumes:
-    - uploads:/app/uploads
+    - ./backend/uploads:/app/uploads
     - ./default-avatars:/app/uploads/default:ro
 ```
 
@@ -181,7 +181,7 @@ Chi tiết từng biến: xem comment trong `backend/.env.example` và `frontend
 |-------------|-------------|----------|
 | Backend crash, không kết nối DB | Postgres local chưa chạy hoặc sai `DB_*` | Kiểm tra Postgres + `.env` |
 | `Connection refused` tới DB | `DB_HOST` sai | Dùng `host.docker.internal` (Windows/Mac Docker Desktop) |
-| Port 5432 conflict | Container postgres cũ vẫn chạy | `docker compose down` rồi `up` lại (không dùng profile `docker-db`) |
+| File/avatar 404 trong Docker | DB local có record nhưng file nằm ở `backend/uploads/` host | Compose mount `./backend/uploads:/app/uploads` (mặc định) — restart backend |
 | Login/register fail, console báo CORS | Frontend build với `localhost:8080` | Rebuild: `docker compose build frontend --no-cache` |
 | Port 80 đã bị chiếm | IIS/Skype/container khác | Đổi port trong `docker-compose.yml`: `"8081:80"` |
 | Google OAuth 503/502 | Backend không đọc được Firebase credentials | Set `FIREBASE_CREDENTIALS_HOST_PATH` trỏ file JSON trên host, rồi `docker compose up -d` |

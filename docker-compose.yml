@@ -56,7 +56,7 @@ services:
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
       WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://localhost}
     volumes:
-      - uploads:/app/uploads
+      - ${UPLOADS_HOST_PATH:-./backend/uploads}:/app/uploads
       - ${FIREBASE_CREDENTIALS_HOST_PATH}:/app/config/firebase-credentials.json:ro
     ports:
       - "8080:8080"
@@ -87,4 +87,3 @@ networks:
 volumes:
   pgdata:
   redis-data:
-  uploads:

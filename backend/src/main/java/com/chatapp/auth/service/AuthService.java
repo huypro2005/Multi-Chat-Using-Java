@@ -367,7 +367,7 @@ public class AuthService {
         String providerUid = firebaseToken.getUid();
         String email = firebaseToken.getEmail();
         String displayName = firebaseToken.getName();
-        String photoUrl = firebaseToken.getPicture();
+//        String photoUrl = firebaseToken.getPicture();
 
         if (email == null || email.isBlank()) {
             throw new AppException(HttpStatus.UNAUTHORIZED, "AUTH_FIREBASE_TOKEN_INVALID",
@@ -411,9 +411,10 @@ public class AuthService {
         // W7-D4-fix (ADR-021): OAuth user có photoUrl từ Google thì giữ; nếu không có
         // thì fallback DEFAULT_USER_AVATAR (public endpoint).
         String username = generateUniqueUsername(email, displayName);
-        String finalAvatarUrl = (photoUrl != null && !photoUrl.isBlank())
-                ? photoUrl
-                : FileConstants.DEFAULT_USER_AVATAR_URL;
+//        String finalAvatarUrl = (photoUrl != null && !photoUrl.isBlank())
+//                ? photoUrl
+//                : FileConstants.DEFAULT_USER_AVATAR_URL;
+        String finalAvatarUrl = FileConstants.DEFAULT_USER_AVATAR_URL;
         User newUser = User.builder()
                 .email(email)
                 .username(username)

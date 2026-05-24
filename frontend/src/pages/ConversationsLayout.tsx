@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, Outlet, useNavigate, useParams } from 'react-router-dom'
 import { MessageSquare } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
+import UserAvatar from '@/components/UserAvatar'
 import ConversationListSidebar from '@/features/conversations/components/ConversationListSidebar'
 import CreateConversationDialog from '@/features/conversations/components/CreateConversationDialog'
 import CreateGroupDialog from '@/features/conversations/components/CreateGroupDialog'
@@ -45,14 +46,15 @@ export default function ConversationsLayout() {
             <Link to="/settings" className="text-xs text-gray-600 hover:text-indigo-600">
               Cài đặt
             </Link>
-            <div
-              className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center
-                text-indigo-600 text-sm font-medium select-none"
-              aria-label={user?.fullName ?? 'Người dùng'}
+            <UserAvatar
+              user={{
+                fullName: user?.fullName,
+                username: user?.username,
+                avatarUrl: user?.avatarUrl ?? null,
+              }}
+              size={32}
               title={user?.fullName ?? 'Người dùng'}
-            >
-              {user?.fullName?.charAt(0).toUpperCase() ?? '?'}
-            </div>
+            />
           </div>
         </div>
 
