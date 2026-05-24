@@ -29,6 +29,10 @@ public class UpdateProfileRequest {
     }
 
     public boolean isAvatarUrlProvided() {
+        if (avatarUrl != null) {
+            // Nếu avatarUrl có giá trị (không null), chắc chắn là đã được cung cấp
+            return true;
+        }
         return avatarUrlProvided;
     }
 

@@ -52,23 +52,27 @@ public class FileAuthService {
     @Transactional(readOnly = true)
     public Optional<FileRecord> findAccessibleById(UUID fileId, UUID userId) {
         if (fileId == null || userId == null) {
+            // System.out.println("Invalid input: fileId "+fileId+ "or userId "+userId + "is null");
             return Optional.empty();
         }
 
         // findByIdAndExpiredFalse cũng loại bỏ record đã bị cleanup job mark expired=true.
         FileRecord record = fileRecordRepository.findByIdAndExpiredFalse(fileId).orElse(null);
         if (record == null) {
+            // System.out.println("FileRecord not found or expired: fileId=" + fileId);
             return Optional.empty();
         }
 
         // Expiry check (defense-in-depth: cleanup job có thể chậm).
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         if (record.getExpiresAt() != null && record.getExpiresAt().isBefore(now)) {
+            // System.out.println("FileRecord expired (expiresAt before now): fileId=" + fileId);
             return Optional.empty();
         }
 
         // Rule 1: uploader luôn được truy cập.
         if (record.getUploaderId() != null && record.getUploaderId().equals(userId)) {
+            // System.out.println("Access granted by uploader rule: userId=" + userId);
             return Optional.of(record);
         }
 
@@ -76,9 +80,10 @@ public class FileAuthService {
         boolean isMemberAttached = messageAttachmentRepository
                 .existsByFileIdAndConvMemberUserId(fileId, userId);
         if (isMemberAttached) {
+            // System.out.println("Access granted by conversation membership: userId=" + userId);
             return Optional.of(record);
         }
-
+        // System.out.println("Access denied: userId=" + userId + " is not uploader or conv member for fileId=" + fileId);
         return Optional.empty();
     }
 }

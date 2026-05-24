@@ -1,16 +1,19 @@
 services:
+  # Chỉ chạy khi KHÔNG dùng Postgres local: docker compose --profile docker-db up -d
   postgres:
+    profiles:
+      - docker-db
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: chatapp
-      POSTGRES_USER: chatapp
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatapp_dev_password}
+      POSTGRES_DB: ${DB_NAME:-chatapp}
+      POSTGRES_USER: ${DB_USER:-chatapp}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-${POSTGRES_PASSWORD:-chatapp_dev_password}}
     volumes:
       - pgdata:/var/lib/postgresql
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chatapp"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-chatapp}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -37,20 +40,24 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/chatapp
-      SPRING_DATASOURCE_USERNAME: chatapp
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-chatapp_dev_password}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${DB_HOST:-host.docker.internal}:${DB_PORT:-5432}/${DB_NAME:-chatapp}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-${POSTGRES_PASSWORD:-123456}}
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      APP_STORAGE_LOCAL_BASE_PATH: /app/uploads
+      FIREBASE_CREDENTIALS_PATH: /app/config/firebase-credentials.json
+      STORAGE_LOCAL_BASE_PATH: /app/uploads
       JWT_SECRET: ${JWT_SECRET:-change-this-secret-in-production-min-256-bits}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
+      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://localhost}
     volumes:
       - uploads:/app/uploads
+      - ${FIREBASE_CREDENTIALS_HOST_PATH}:/app/config/firebase-credentials.json:ro
     ports:
       - "8080:8080"
     networks:
@@ -60,8 +67,13 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "80:80"
     restart: unless-stopped

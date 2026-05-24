@@ -45,9 +45,12 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class FileService {
 
-    private static final int UPLOAD_RATE_LIMIT_PER_MINUTE = 20;
-    private static final long EXPIRY_DAYS = 30L;
-
+    private static final int UPLOAD_RATE_LIMIT_PER_MINUTE = 20; // Max 20 uploads per user per rolling minute (fail-open khi Redis down).
+    private static final long EXPIRY_DAYS = 30L; // File sẽ expire sau 30 ngày, tính từ createdAt (upload time).
+    // ADR-021, W7-D4-fix: public file (avatar) expire
+    // sau 1000 năm (practically non-expiring) —
+    // vẫn có expiresAt để thống nhất DB schema và support future cleanup nếu cần.
+    private static final long EXPIRY_DAYS_FOR_FILE_PUBLIC = 30L*12*1000;
     private final FileValidationService validationService;
     private final StorageService storageService;
     private final ThumbnailService thumbnailService;
@@ -96,6 +99,7 @@ public class FileService {
         }
 
         // Step 5: Persist DB
+        long expiryDays = isPublic ? EXPIRY_DAYS_FOR_FILE_PUBLIC : EXPIRY_DAYS;
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         FileRecord record = FileRecord.builder()
                 .id(fileId)
@@ -105,7 +109,7 @@ public class FileService {
                 .sizeBytes(file.getSize())
                 .storagePath(storagePath)
                 .createdAt(now)
-                .expiresAt(now.plusDays(EXPIRY_DAYS))
+                .expiresAt(now.plusDays(expiryDays))
                 .expired(false)
                 .attachedAt(null)
                 .isPublic(isPublic)
