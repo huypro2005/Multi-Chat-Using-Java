@@ -227,19 +227,22 @@ export function MessagesList({ conversationId, onReply }: Props) {
     return () => observer.disconnect()
   }, [hasNextPage, isFetchingNextPage, fetchNextPage])
 
-  return (
-    <div
-      ref={containerRef}
-      className="flex-1 overflow-y-auto p-4 space-y-1 bg-gray-50"
-      onScroll={handleScroll}
-    >
-      {/* Sentinel top — kích hoạt infinite scroll khi user scroll lên đây */}
-      <div ref={topSentinelRef} />
+  const pinnedMessages = conversation?.pinnedMessages ?? []
 
+  return (
+    <div className="flex flex-1 flex-col overflow-hidden bg-gray-50">
       <PinnedMessagesBanner
-        pinnedMessages={conversation?.pinnedMessages ?? []}
+        pinnedMessages={pinnedMessages}
         onScrollTo={scrollToMessage}
       />
+
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-y-auto p-4 space-y-1"
+        onScroll={handleScroll}
+      >
+      {/* Sentinel top — kích hoạt infinite scroll khi user scroll lên đây */}
+      <div ref={topSentinelRef} />
 
       {/* Loading older messages */}
       {isFetchingNextPage && <SmallSpinner />}
@@ -285,6 +288,7 @@ export function MessagesList({ conversationId, onReply }: Props) {
 
       {/* Bottom anchor — auto-scroll target */}
       <div ref={bottomRef} />
+      </div>
     </div>
   )
 }
